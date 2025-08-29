@@ -1,3 +1,5 @@
+__all__ = ['SwmtBase']
+
 class SwmtBase:
     """
     The base class for all types in Shawmut planner tools.
