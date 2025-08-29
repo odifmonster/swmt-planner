@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swmtplanner"
+version = "0.0.1"
+requires-python = ">=3.12"
+authors = [
+    {name = "Lam An Wyner", email = "lwyner@shawmutcorporation.com"},
+]
+description = "A package containing all the necessary classes and functions to write a Shawmut planning tool"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICEN[CS]E.*"]
+keywords = ["shawmut", "support", "supply chain"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3"
+]
