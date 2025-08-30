@@ -11,7 +11,7 @@ class Data(SwmtBase, HasID[int], read_only=('id','value')):
 
     def __init__(self, value: float):
         globals()['_CTR'] += 1
-        SwmtBase.__init__(self, priv={'id': globals()['_CTR'], 'value': value})
+        SwmtBase.__init__(self, _id=globals()['_CTR'], _value=value)
 
     @property
     def prefix(self) -> str:
