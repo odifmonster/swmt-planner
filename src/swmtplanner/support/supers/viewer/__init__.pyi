@@ -43,7 +43,8 @@ class Viewer[T](SwmtBase):
             A list of additional attributes (if any) to be required
             for initialization that should not be publicly
             accessible. Instances must have corresponding "private"
-            attributes with a preceding '_'.
+            attributes with a preceding '_'. 'link' is added
+            automatically.
         """
         ...
     def __init__(self, link: T, **kwargs) -> None:

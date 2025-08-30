@@ -1,7 +1,7 @@
 from typing import Protocol, Hashable
 from abc import abstractmethod
 
-__all__ = ['HasID', 'Viewable']
+__all__ = ['HasID']
 
 class HasID[T: Hashable](Protocol):
     """

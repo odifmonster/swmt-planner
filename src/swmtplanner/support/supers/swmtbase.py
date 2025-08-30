@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+def _mk_read_prop(name):
+    return lambda slf: getattr(slf, '_'+name)
+
 class SwmtBase:
 
     def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
@@ -7,7 +10,7 @@ class SwmtBase:
         cls._read_only = read_only
 
         for name in read_only:
-            curprop = property(fget=lambda slf: getattr(slf, '_'+name))
+            curprop = property(fget=_mk_read_prop(name))
             setattr(cls, name, curprop)
         
         super().__init_subclass__()

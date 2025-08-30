@@ -17,8 +17,14 @@ def _copy_linked_func(name):
     return func
 
 def setter_like(func):
-    func._is_setter = 1
-    return func
+    def wrapper(slf, *args, **kwargs):
+        cls = type(slf)
+        if hasattr(slf, '_mut_in_group') and not slf._mut_in_group and slf._in_group:
+            raise RuntimeError(f'\'{cls.__name__}\' objects cannot be mutated while ' + \
+                               'in a group')
+        return func(slf, *args, **kwargs)
+    wrapper._is_setter = 1
+    return wrapper
 
 class Viewer[T](SwmtBase):
 

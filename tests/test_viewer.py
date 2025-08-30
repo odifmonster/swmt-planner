@@ -2,8 +2,7 @@
 
 import unittest
 
-from swmtplanner.support import HasID
-from swmtplanner.support.supers import SwmtBase, setter_like, Viewer
+from swmtplanner.support import HasID, SwmtBase, setter_like, Viewer
 
 _CTR = 0
 
