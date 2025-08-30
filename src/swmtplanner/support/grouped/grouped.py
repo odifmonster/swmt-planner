@@ -34,6 +34,50 @@ class Grouped[T, U](SwmtBase,
     def __contains__(self, key):
         return key in self._subgrps and self._subgrps[key].n_items > 0
     
+    def __getitem__(self, key):
+        if type(key) is not tuple:
+            key = (key,)
+        if len(key) == 0:
+            return self.view()
+        if key[0] not in self._subgrps or len(self._subgrps[key[0]]) == 0:
+            raise KeyError(f'Object does not contain items with {self._unbound[0]}={repr(key[0])}')
+        try:
+            return self._subgrps[key[0]][key[1:]]
+        except KeyError as err:
+            if 'Key is too long' in str(err) or \
+                '-dim key incompatible with' in str(err):
+                raise KeyError(f'{len(key)}-dim key incompatible with {self.depth}-dim Grouped object')
+            raise err
+    
+    def __repr__(self):
+        contents: list[str] = []
+
+        if self.depth == 1:
+            for val in self._subgrps.values():
+                vrep = repr(val)
+                if not vrep: continue
+                contents.append('  ' + vrep)
+        else:
+            max_k = max(map(lambda k: len(repr(k)), self._subgrps.keys()))
+            kprefix = ' '*(max_k+4)
+
+            for key, val in self._subgrps.items():
+                if len(val) == 0: continue
+                krep = repr(key)
+                vrep = repr(val)
+
+                vrep_start, *vrep_lines = vrep.split('\n')
+
+                gap = ' '*(max_k-len(krep)+1)
+                item_start = '  '+krep+':'+gap+vrep_start
+                item_lines = list(map(lambda l: kprefix+l, vrep_lines))
+
+                contents.append('\n'.join([item_start] + item_lines))
+        
+        if not contents:
+            return ''
+        return 'grouped({\n' + '\n'.join(contents) + '\n})'
+    
     @property
     def depth(self):
         return len(self._unbound)
@@ -92,9 +136,21 @@ class Grouped[T, U](SwmtBase,
         del self._ids_map[dview.id]
         return ret
     
+    def iterkeys(self):
+        for key in self:
+            remkeys = self._subgrps[key].iterkeys()
+            for remkey in remkeys:
+                yield (key, *remkey)
+    
+    def itervalues(self):
+        for key in self:
+            yield from self._subgrps[key].itervalues()
+    
     def view(self):
         return self._view
         
-class GroupedView[T, U](Viewer[Grouped[T, U]], dunders=('len','iter','contains'),
-                        attrs=('depth','n_items'), funcs=('get',)):
+class GroupedView[T, U](Viewer[Grouped[T, U]],
+                        dunders=('len','iter','contains','getitem','repr'),
+                        attrs=('depth','n_items'),
+                        funcs=('get','iterkeys','itervalues')):
     pass

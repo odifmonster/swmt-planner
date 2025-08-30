@@ -240,5 +240,51 @@ class TestGrouped(unittest.TestCase):
                 rem_colors.add(roll.color)
             self.group1.remove(roll)
 
+    def test_iterkeys(self):
+        checked_map = {
+            (roll.color, roll.item, roll.size, roll.id): 0 for roll in self.all_rolls
+        }
+        for roll in self.all_rolls:
+            self.group1.add(roll)
+
+        for key in self.group1.iterkeys():
+            self.assertTrue(key in checked_map)
+            self.assertEqual(checked_map[key], 0)
+            checked_map[key] += 1
+
+        to_remove = random.sample(self.all_rolls, 75)
+        dont_check = set()
+        for roll in to_remove:
+            self.group1.remove(roll.view())
+            dont_check.add((roll.color, roll.item, roll.size, roll.id))
+        
+        for key in self.group1.iterkeys():
+            checked_map[key] += 1
+        
+        self.assertTrue(all(map(lambda key: checked_map[key] == 1, dont_check)))
+        self.assertTrue(all(map(lambda key: checked_map[key] == 2,
+                                checked_map.keys() - dont_check)))
+    
+    def test_itervalues(self):
+        checked_map = { roll: 0 for roll in self.all_rolls }
+        for roll in self.all_rolls:
+            self.group1.add(roll)
+
+        for rview in self.group1.itervalues():
+            self.assertTrue(rview in checked_map)
+            self.assertEqual(checked_map[rview], 0)
+            checked_map[rview] += 1
+
+        to_remove = set(random.sample(self.all_rolls, 75))
+        for roll in to_remove:
+            self.group1.remove(roll.view())
+
+        for rview in self.group1.itervalues():
+            checked_map[rview] += 1
+        
+        self.assertTrue(all(map(lambda roll: checked_map[roll] == 1, to_remove)))
+        self.assertTrue(all(map(lambda roll: checked_map[roll] == 2,
+                            checked_map.keys() - to_remove)))
+
 if __name__ == '__main__':
     unittest.main()

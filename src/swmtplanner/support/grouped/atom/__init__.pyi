@@ -25,6 +25,7 @@ class Atom[T: Hashable](SwmtBase, priv=('prop_names','prop_vals','data','view'))
     def __contains__(self, key: tuple[()]) -> bool:
         """Returns True iff this object contains the given key."""
         ...
+    def __getitem__(self, key: tuple[()]) -> AtomView[T]: ...
     @property
     def depth(self) -> int:
         """The number of axes this object has."""
@@ -59,12 +60,23 @@ class Atom[T: Hashable](SwmtBase, priv=('prop_names','prop_vals','data','view'))
         internal grouping structure as necessary.
         """
         ...
+    def iterkeys(self) -> Generator[tuple[()]]:
+        """
+        Generates the full-length keys of this object. Each key
+        corresponds to an individual item.
+        """
+        ...
+    def itervalues(self) -> Generator[DataView[T]]:
+        """Generates the individual items in this object."""
+        ...
     def view(self) -> AtomView[T]:
         """Returns a live, read-only view of this object."""
         ...
 
-class AtomView[T: Hashable](Viewer[Atom[T]], dunders=('len','iter','contains'),
-                  attrs=('depth','n_items','data'), funcs=('get',)):
+class AtomView[T: Hashable](Viewer[Atom[T]],
+                            dunders=('len','iter','contains','getitem','repr'),
+                            attrs=('depth','n_items','data'),
+                            funcs=('get','iterkeys','itervalues')):
     """
     A class for views of Atom objects.
     """
@@ -75,6 +87,7 @@ class AtomView[T: Hashable](Viewer[Atom[T]], dunders=('len','iter','contains'),
     def __contains__(self, key: tuple[()]) -> bool:
         """Returns True iff this object contains the given key."""
         ...
+    def __getitem__(self, key: tuple[()]) -> 'AtomView[T]': ...
     @property
     def depth(self) -> int:
         """The number of axes this object has."""
@@ -92,4 +105,13 @@ class AtomView[T: Hashable](Viewer[Atom[T]], dunders=('len','iter','contains'),
         Gets an item (view) from this object by its id. Raises a
         KeyError if 'id' does not point to one of the items.
         """
+        ...
+    def iterkeys(self) -> Generator[tuple[()]]:
+        """
+        Generates the full-length keys of this object. Each key
+        corresponds to an individual item.
+        """
+        ...
+    def itervalues(self) -> Generator[DataView[T]]:
+        """Generates the individual items in this object."""
         ...

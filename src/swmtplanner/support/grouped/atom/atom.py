@@ -25,6 +25,21 @@ class Atom[T](SwmtBase, priv=('prop_names','prop_vals','data','view')):
     
     def __contains__(self, key):
         return len(self) == 1 and key == tuple()
+    
+    def __getitem__(self, key):
+        if type(key) is not tuple:
+            raise TypeError('\'Atom\' object cannot be indexed with ' + \
+                            f'\'{type(key).__name__}\'')
+        if len(key) > 0:
+            raise KeyError('Key is too long')
+        if len(self) == 0:
+            raise KeyError(f'\'Atom\' object does not contain key {repr(key)}')
+        return self.view()
+    
+    def __repr__(self):
+        if len(self) == 0:
+            return ''
+        return repr(self.data)
 
     @property
     def depth(self):
@@ -76,9 +91,19 @@ class Atom[T](SwmtBase, priv=('prop_names','prop_vals','data','view')):
         ret._rem_from_group()
         return ret
     
+    def iterkeys(self):
+        return iter(self)
+    
+    def itervalues(self):
+        if len(self) > 0:
+            yield self.data
+        return
+    
     def view(self):
         return self._view
 
-class AtomView[T](Viewer[Atom[T]], dunders=('len','iter','contains'),
-                  attrs=('depth','n_items','data'), funcs=('get',)):
+class AtomView[T](Viewer[Atom[T]],
+                  dunders=('len','iter','contains','getitem','repr'),
+                  attrs=('depth','n_items','data'),
+                  funcs=('get','iterkeys','itervalues')):
     pass

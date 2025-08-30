@@ -37,6 +37,7 @@ class Grouped[T: Hashable, U: Hashable](
     def __contains__(self, key: U) -> bool:
         """Returns True iff this object contains the given key."""
         ...
+    def __getitem__(self, key: U | tuple) -> GroupedView[T] | AtomView[T]: ...
     @property
     def depth(self) -> int:
         """The number of axes this object has."""
@@ -67,13 +68,22 @@ class Grouped[T: Hashable, U: Hashable](
         internal grouping structure as necessary.
         """
         ...
+    def iterkeys(self) -> Generator[tuple[U, *tuple]]:
+        """
+        Generates the full-length keys of this object. Each key
+        corresponds to an individual item.
+        """
+        ...
+    def itervalues(self) -> Generator[DataView[T]]:
+        """Generates the individual items in this object."""
+        ...
     def view(self) -> GroupedView[T, U]:
         """Returns a live, read-only view of this object."""
         ...
 
 class GroupedView[T: Hashable, U: Hashable](
-    Viewer[Grouped[T, U]], dunders=('len','iter','contains'),
-    attrs=('depth','n_items'), funcs=('get',)
+    Viewer[Grouped[T, U]], dunders=('len','iter','contains','getitem','repr'),
+    attrs=('depth','n_items'), funcs=('get','iterkeys','itervalues')
     ):
     """
     A class for views of Grouped objects.
@@ -85,6 +95,7 @@ class GroupedView[T: Hashable, U: Hashable](
     def __contains__(self, key: U) -> bool:
         """Returns True iff this object contains the given key."""
         ...
+    def __getitem__(self, key: U | tuple) -> GroupedView[T] | AtomView[T]: ...
     @property
     def depth(self) -> int:
         """The number of axes this object has."""
@@ -98,4 +109,13 @@ class GroupedView[T: Hashable, U: Hashable](
         Gets an item (view) from this object by its id. Raises a
         KeyError if 'id' does not point to one of the items.
         """
+        ...
+    def iterkeys(self) -> Generator[tuple[U, *tuple]]:
+        """
+        Generates the full-length keys of this object. Each key
+        corresponds to an individual item.
+        """
+        ...
+    def itervalues(self) -> Generator[DataView[T]]:
+        """Generates the individual items in this object."""
         ...
