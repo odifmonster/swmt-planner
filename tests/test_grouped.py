@@ -5,7 +5,7 @@ import unittest
 import random
 
 from swmtplanner.support import setter_like
-from swmtplanner.support.grouped import Data, DataView, Atom
+from swmtplanner.support.grouped import Data, DataView, Atom, Grouped
 
 def random_str_id(length: int = 8):
     digits = [str(i) for i in range(10)]
@@ -132,6 +132,113 @@ class TestAtom(unittest.TestCase):
 
         self.atom.add(self.roll)
         self.assertEqual(self.atom.get(self.roll.id), self.roll)
+
+class TestGrouped(unittest.TestCase):
+    
+    def setUp(self):
+        self.group1 = Grouped[str, str]('color', 'item', 'size', 'id')
+        self.group2 = Grouped[str, str]('size', 'id', color='BLACK', item='GREIGE01')
+
+        self.all_rolls: list[Roll] = []
+        self.g2_rolls: list[Roll] = []
+
+        colors = ['BLACK', 'GRAY', 'BLUE']
+        items = list(map(lambda i: f'GREIGE{i+1:02}', range(3)))
+        for _ in range(300):
+            roll = Roll(random_str_id(), random.choice(colors), random.choice(items),
+                        random.normalvariate(mu=700, sigma=100))
+            self.all_rolls.append(roll)
+            if roll.color == 'BLACK' and roll.item == 'GREIGE01':
+                self.g2_rolls.append(roll)
+
+    def test_add_rem(self):
+        test_roll = self.all_rolls[0]
+        init_qty = test_roll.qty
+        self.group1.add(test_roll)
+
+        with self.assertRaises(RuntimeError) as cm:
+            test_roll.allocate(100)
+        self.assertEqual(str(cm.exception),
+                         '\'Roll\' objects cannot be mutated while in a group')
+        
+        self.group1.remove(test_roll.view())
+        test_roll.allocate(100)
+        self.assertAlmostEqual(init_qty-100, test_roll.qty, places=4)
+
+    def test_bad_props(self):
+        bad_roll1 = Roll(random_str_id(), 'BLACK', 'GREIGE02', 700)
+        bad_roll2 = Roll(random_str_id(), 'BLUE', 'GREIGE01', 700)
+
+        with self.assertRaises(ValueError) as cm:
+            self.group2.add(bad_roll1)
+
+        with self.assertRaises(ValueError) as cm:
+            self.group2.add(bad_roll2)
+
+    def test_n_items(self):
+        for i, roll in enumerate(self.all_rolls):
+            self.assertEqual(self.group1.n_items, i)
+            self.group1.add(roll)
+
+        for roll in self.all_rolls:
+            self.group1.add(roll)
+        
+        self.assertEqual(self.group1.n_items, len(self.all_rolls))
+
+        for i, roll in enumerate(self.all_rolls):
+            self.assertEqual(self.group1.n_items, len(self.all_rolls)-i)
+            self.group1.remove(roll.view())
+
+    def test_len(self):
+        colors: dict[str, list[Roll]] = {}
+        for roll in self.all_rolls:
+            self.assertEqual(len(self.group1), len(colors))
+            if roll.color not in colors:
+                colors[roll.color] = []
+            colors[roll.color].append(roll)
+            self.group1.add(roll)
+
+        for roll in self.all_rolls:
+            self.assertEqual(len(self.group1), len(colors))
+            colors[roll.color].remove(roll)
+            if len(colors[roll.color]) == 0:
+                del colors[roll.color]
+            self.group1.remove(roll)
+
+    def test_iter(self):
+        colors: dict[str, list[Roll]] = {}
+        for roll in self.all_rolls:
+            self.assertEqual(set(self.group1), colors.keys())
+            if roll.color not in colors:
+                colors[roll.color] = []
+            colors[roll.color].append(roll)
+            self.group1.add(roll)
+
+        for roll in self.all_rolls:
+            self.assertEqual(set(self.group1), colors.keys())
+            colors[roll.color].remove(roll)
+            if len(colors[roll.color]) == 0:
+                del colors[roll.color]
+            self.group1.remove(roll)
+    
+    def test_contains(self):
+        colors: dict[str, list[Roll]] = {}
+        for roll in self.all_rolls:
+            self.assertTrue(all(map(lambda clr: clr in self.group1, colors.keys())))
+            if roll.color not in colors:
+                colors[roll.color] = []
+            colors[roll.color].append(roll)
+            self.group1.add(roll)
+
+        rem_colors: set[str] = set()
+        for roll in self.all_rolls:
+            self.assertTrue(all(map(lambda clr: clr in self.group1, colors.keys())))
+            self.assertTrue(all(map(lambda clr: clr not in self.group1, rem_colors)))
+            colors[roll.color].remove(roll)
+            if len(colors[roll.color]) == 0:
+                del colors[roll.color]
+                rem_colors.add(roll.color)
+            self.group1.remove(roll)
 
 if __name__ == '__main__':
     unittest.main()
