@@ -24,16 +24,14 @@ class Viewer[T](SwmtBase):
 
     def __init_subclass__(cls, dunders = tuple(), attrs = tuple(), funcs = tuple(),
                           read_only = tuple(), priv = tuple()):
-        super().__init_subclass__(read_only=read_only, priv=('link',)+priv)
-
         dunders = list(map(lambda name: f'__{name}__', dunders))
         for fname in dunders + list(funcs):
             setattr(cls, fname, _copy_linked_func(fname))
         
         for attr in attrs:
             setattr(cls, attr, _mk_linked_prop(attr))
+
+        super().__init_subclass__(read_only=read_only, priv=('link',)+priv)
     
-    def __init__(self, link, priv: dict[str] = {}, **kwargs):
-        newpriv = priv.copy()
-        newpriv['link'] = link
-        super().__init__(priv=newpriv, **kwargs)
+    def __init__(self, link, **kwargs):
+        super().__init__(_link=link, **kwargs)
