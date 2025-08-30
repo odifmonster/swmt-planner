@@ -35,16 +35,10 @@ class Viewer[T](SwmtBase):
           funcs:
             The functions to copy from the linked object.
           read_only:
-            A list of read-only attributes (if any). These names
-            will refer to properties without setters, and instances
-            must have corresponding "private" attributes with a
-            preceding '_'.
+            Names to be passed to the SwmtBase subclass initializer.
           priv:
-            A list of additional attributes (if any) to be required
-            for initialization that should not be publicly
-            accessible. Instances must have corresponding "private"
-            attributes with a preceding '_'. 'link' is added
-            automatically.
+            Names to be passed to the SwmtBase subclass initializer.
+            'link' is added automatically.
         """
         ...
     def __init__(self, link: T, **kwargs) -> None:
@@ -54,11 +48,7 @@ class Viewer[T](SwmtBase):
           link:
             The object to link the properties to.
           **kwargs:
-            Every keyword will become an attribute of the instance,
-            and the value will be used as the initial value. If any
-            names provided to the initializer are not present as
-            keywords (preceded by '_'), a ValueError is raised. If
-            any keyword is the name of a read-only attribute, a
-            ValueError is raised.
+            Additional keyword arguments to pass to the SwmtBase
+            initializer.
         """
         ...
