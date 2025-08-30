@@ -2,14 +2,8 @@
 
 import unittest
 
-import random
-
 from swmtplanner.support import setter_like
 from swmtplanner.support.grouped import Data, DataView
-
-def random_str_id(length: int = 8):
-    digits = [str(i) for i in range(10)]
-    return ''.join([random.choice(digits) for _ in range(length)])
 
 class Roll(Data[str], mut_in_group=False, read_only=('item',),
            priv=('init_qty','allocs')):

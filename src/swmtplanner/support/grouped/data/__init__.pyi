@@ -1,7 +1,13 @@
 from typing import Hashable
 from swmtplanner.support import HasID, SwmtBase, Viewer
 
-__all__ = ['Data', 'DataView']
+__all__ = ['Data', 'DataView', 'match_props', 'repr_props']
+
+def match_props[T: Hashable](data: Data[T], prop_names: tuple[str, ...],
+                             prop_vals: tuple) -> bool: ...
+
+def repr_props(prop_names: tuple[str, ...], prop_vals: tuple,
+               indent: str = '  ') -> str: ...
 
 class Data[T: Hashable](SwmtBase, HasID[T]):
     """
