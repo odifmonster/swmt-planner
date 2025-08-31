@@ -12,9 +12,9 @@ class CharStream:
 
     def __init__(self, buffer: TextIOBase):
         self._buffer = buffer
-        self._line = 0
+        self._line = 1
         self._prev_line = None
-        self._line_off = 0
+        self._line_off = 1
         self._file_off = 0
     
     def read(self):
@@ -24,7 +24,7 @@ class CharStream:
             if c == '\n':
                 self._prev_line = self._line_off
                 self._line += 1
-                self._line_off = 0
+                self._line_off = 1
             else:
                 self._line_off += 1
         return c
@@ -37,7 +37,7 @@ class CharStream:
         self._file_off -= 1
         self._line_off -= 1
         
-        if self._line_off < 0:
+        if self._line_off < 1:
             if self._prev_line is None:
                 raise RuntimeError('Backed up too many times')
             self._line_off = self._prev_line

@@ -20,7 +20,7 @@ def _is_alpha_num(c):
     return _is_alpha(c) or _is_num(c)
 
 def _format_file_pos(pos: FilePos):
-    return f'Line {pos.line} at column {pos.line_offset+1}'
+    return f'Line {pos.line} at column {pos.line_offset}'
 
 def _get_unexpected_err(f: CharStream, c):
     msg = _format_file_pos(f.get_pos())+':'
@@ -34,13 +34,23 @@ def _next_ws(f: CharStream, value, start: FilePos):
     c = f.read()
 
     if c == ' ':
-        if len(value) == 3:
-            return Token(TokType.INDENT, value+c, start)
         return _next_ws(f, value+c, start)
     
     if len(c) == 1:
         f.backup()
     return Token(TokType.WS, value, start)
+
+def _next_indent(f: CharStream, value, start: FilePos):
+    c = f.read()
+
+    if c == ' ':
+        return _next_indent(f, value+c, start)
+    
+    if len(c) == 1:
+        f.backup()
+    if len(value) == 0:
+        return None
+    return Token(TokType.INDENT, value, start)
 
 def _next_dot(f: CharStream, value, start: FilePos):
     c = f.read()
@@ -76,7 +86,7 @@ def _next_string(f: CharStream, value, start: FilePos):
         raise SyntaxError(msg)
     
     if c == '"':
-        return Token(TokType.STRING, value+c, start)
+        return Token(TokType.STRING, value[1:], start)
     
     if c == '\\':
         c = _special_char(f, c)
@@ -140,18 +150,25 @@ def _next_num(f: CharStream, value, start: FilePos):
         f.backup()
     return Token(TokType.NUM, value, start)
 
-def get_toks(f: CharStream):
+def _get_toks(f: CharStream):
     yield Token(TokType.START, 'START', FilePos(0, 0, 0))
     while True:
         pos = f.get_pos()
         c = f.read()
         if not c:
+            yield Token(TokType.END, 'END', pos)
             return
         
-        if c in ('\n', ':', ',', '='):
+        if c == '\n':
+            yield Token(TokType.NEWLINE, c, pos)
+            pos = f.get_pos()
+            indent = _next_indent(f, '', pos)
+            if indent is not None:
+                yield indent
+            continue
+
+        if c in (':', ',', '='):
             match c:
-                case '\n':
-                    kind = TokType.NEWLINE
                 case ':':
                     kind = TokType.COLON
                 case ',':
@@ -182,3 +199,30 @@ def get_toks(f: CharStream):
         
         tok = func(f, c, pos)
         yield tok
+
+class TokStream:
+
+    def __init__(self, buffer):
+        _raw_stream = _get_toks(CharStream(buffer))
+        self._stream = filter(lambda tok: tok.kind not in (TokType.WS, TokType.COMMENT),
+                              _raw_stream)
+        self._prev: list[Token] = []
+        self._pos = 0
+
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self._pos < len(self._prev):
+            nxttok = self._prev[self._pos]
+        else:
+            nxttok = next(self._stream)
+            self._prev.append(nxttok)
+
+        self._pos += 1
+        return nxttok
+    
+    def backup(self, n = 1):
+        if n > self._pos:
+            raise ValueError('Cannot back up a stream before its starting point')
+        self._pos -= n

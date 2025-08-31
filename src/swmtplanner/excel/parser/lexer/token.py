@@ -7,6 +7,7 @@ from ..file import FilePos
 
 class TokType(Enum):
     START = auto()
+    END = auto()
     INDENT = auto()
     WS = auto()
     NEWLINE = auto()

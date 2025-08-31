@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
 from .token import TokType, Token
-from .lexer import get_toks
+from .lexer import TokStream
 
-__all__ = ['TokType', 'Token', 'get_toks']
+__all__ = ['TokType', 'Token', 'TokStream']
