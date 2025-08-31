@@ -4,7 +4,8 @@
 # End a line in ... if you want the next line to be included as part of the previous one
 
 # The 'folder' argument must be wrapped in quotes. If you are on a Windows computer, you also
-# need to use double backslash characters
+# need to use double backslash characters. If no folder argument is given, the folder
+# passed to the relevant script is used
 
 fabric_items: # information about fabric items (which jets they can run on, which greige style they use, etc.)
     folder="/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
@@ -28,7 +29,7 @@ jet_info:
     workbook=master.xlsx
     sheet=jets
 
-inventory:
+pa_inventory:
     workbook="1427_PACOHINVDCSH - 2025-08-28T082859.985.xlsx"
     sheet=1427_PACOHINVDCSH
     col_names=Roll, Item, Quality, Pounds, ASSIGNED_ORDER
@@ -37,6 +38,11 @@ inventory:
 adaptive_orders:
     workbook=LamDemandPlanning.xlsx
     sheet=Adaptive
+
+pa_714:
+    workbook=LamDemandPlanning.xlsx
+    sheet=714
+    col_names=Item, "Dye Order"
 
 pa_demand_plan:
     workbook="Demand Planning 20250827.xlsx"

@@ -6,6 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "swmtplanner"
 version = "0.0.1"
 requires-python = ">=3.12"
+dependencies = [
+    "pandas[excel]>=2.1.0",
+    "typer>=0.17.3"
+]
 authors = [
     {name = "Lam An Wyner", email = "lwyner@shawmutcorporation.com"},
 ]
@@ -19,3 +23,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3"
 ]
+
+[project.scripts]
+excel-to-tsv = "swmtplanner.excel.cli:app"

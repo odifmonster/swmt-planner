@@ -10,5 +10,7 @@ Classifier: Operating System :: OS Independent
 Classifier: Programming Language :: Python :: 3
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
+Requires-Dist: pandas[excel]>=2.1.0
+Requires-Dist: typer>=0.17.3
 
 # This is a README
