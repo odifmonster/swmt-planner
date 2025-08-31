@@ -1,0 +1,46 @@
+# EDIT DATA SOURCE INFO HERE
+
+# Any text following a pound sign is ignored
+# End a line in ... if you want the next line to be included as part of the previous one
+
+# The 'folder' argument must be wrapped in quotes. If you are on a Windows computer, you also
+# need to use double backslash characters
+
+fabric_items: # information about fabric items (which jets they can run on, which greige style they use, etc.)
+    folder="/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+    workbook="New XREF file.xlsx"
+    sheet=Xref
+    col_names="GREIGE ITEM", STYLE, Yield, "COLOR NAME", "COLOR NUMBER", "PA FIN ITEM", ...
+        "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10", "SHADE RATING"
+
+greige_sizes: # information about target lbs per greige style roll
+    workbook=master.xlsx
+    sheet="greige info"
+
+greige_translation:
+    workbook=LamDemandPlanning.xlsx
+    sheet="Greige Style Translation"
+    subst_names=inventory, plan # only use this if the workbook has no column names
+    col_ranges="A:B" # required if providing column names
+    start_row=2 # the first row of data to start reading
+
+jet_info:
+    workbook=master.xlsx
+    sheet=jets
+
+inventory:
+    workbook="1427_PACOHINVDCSH - 2025-08-28T082859.985.xlsx"
+    sheet=1427_PACOHINVDCSH
+    col_names=Roll, Item, Quality, Pounds, ASSIGNED_ORDER
+    start_row=4
+
+adaptive_orders:
+    workbook=LamDemandPlanning.xlsx
+    sheet=Adaptive
+
+pa_demand_plan:
+    workbook="Demand Planning 20250827.xlsx"
+    sheet="Demand Planning20230927"
+    start_row=8
+    col_ranges="D,M:P" # this argument also has to be wrapped in quotes
+    end_row=112
