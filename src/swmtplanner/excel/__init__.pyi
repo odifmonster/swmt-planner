@@ -7,7 +7,7 @@ __all__ = ['parser', 'info']
 
 type _InfoName = Literal['dye_formulae', 'fabric_items', 'greige_sizes',
                          'greige_translation', 'jet_info', 'pa_inventory',
-                         'adaptive_orders', 'pa_714', 'pa_demand_plan']
+                         'adaptive_orders', 'pa_demand_plan']
 
 def init() -> None: ...
 def get_read_args(name: _InfoName) -> info.PandasInfo: ...

@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
-import typer, os, pandas as pd
-from typing_extensions import Annotated
+import typer, os, warnings, pandas as pd
+from typing_extensions import Annotated, Optional
+from pathlib import Path
+from enum import Enum
 
 from .parser import tree
 from .info import parse_pd_args
@@ -33,9 +35,7 @@ def init():
             case 'pa_inventory':
                 str_cols = ['Roll', 'Item', 'Quality', 'ASSIGNED_ORDER']
             case 'adaptive_orders':
-                str_cols = ['Dyelot', 'Machine']
-            case 'pa_714':
-                str_cols = ['Item', 'Dye Order']
+                str_cols = ['Dyelot', 'Machine', 'Color']
             case 'pa_demand_plan':
                 str_cols = ['PA Fin Item']
             case _:
@@ -50,13 +50,35 @@ def get_read_args(name):
         raise KeyError(f'No info for \'{name}\'')
     return globals()['_INFO_MAP'][name]
 
-def _convert_dyelot(dl: str):
-    if '@' in dl:
-        return pd.dl[:dl.find('@')]
-    if '/' in dl:
-        return dl[:dl.find('/')]
-    missing = 10 - len(dl)
-    return '0'*missing+dl
+def _detect_dirpath(root: str):
+    workbooks = set()
+    for value in globals()['_INFO_MAP'].values():
+        if value[0] is None:
+            workbooks.add(value[1])
+    
+    dirtups = os.walk(root)
+    valid_paths = []
+    for dirpath, _, filenames in dirtups:
+        if workbooks.issubset(set(filenames)):
+            valid_paths.append(os.path.abspath(dirpath))
+    
+    if len(valid_paths) == 0:
+        raise ValueError(f'\'{root}\' does not contain a valid default directory')
+    
+    if len(valid_paths) > 0:
+        msg = 'Found multiple valid default directories, using first option: '
+        msg += f'\'{valid_paths[0]}\''
+        warnings.warn(msg, category=RuntimeWarning)
+    return valid_paths[0]
+
+def _detect_outpath(info: str):
+    srcdir = os.path.dirname(os.path.dirname(__file__))
+    dirtups = os.walk(srcdir)
+    fname = info.replace('_', '-') + '.dat'
+    for dirpath, _, filenames in dirtups:
+        if fname in filenames:
+            return os.path.join(dirpath, fname)
+    raise ValueError(f'Could not find \'{fname}\' file to update in project tree')
 
 def load_df(info, default_dir):
     dirpath, fname, pd_kwargs = get_read_args(info)
@@ -86,27 +108,61 @@ def load_df(info, default_dir):
             sub_df = sub_df[~(sub_df['Yield'].isna() | sub_df['PA FIN ITEM'].isna())]
             sub_df = sub_df[~sub_df['GREIGE ITEM'].str.contains('CAT')]
             return sub_df
-        case 'jet_info':
+        case 'jet_info' | 'adaptive_orders':
             return df
         case 'pa_inventory':
             df['Item'] = df['Item'].str.upper()
             sub_df = df[(df['Quality'] == 'A') & df['ASSIGNED_ORDER'].isna()]
             return sub_df
-        case 'adaptive_orders':
-            df['Dyelot2'] = df['Dyelot'].map(_convert_dyelot)
-            return df
         case 'pa_demand_plan':
             sub_df = df[~df['PA Fin Item'].isna()]
             return sub_df
         case _:
             raise ValueError(f'Unknown excel info \'{info}\'')
-        
+
+class _Name(str, Enum):
+    greige_translation = 'greige_translation'
+    greige_sizes = 'greige_sizes'
+    dye_formulae = 'dye_formulae'
+    fabric_items = 'fabric_items'
+    jet_info = 'jet_info'
+    pa_inventory = 'pa_inventory'
+    adaptive_orders = 'adaptive_orders'
+    pa_demand_plan = 'pa_demand_plan'
+
+class _DirKind(str, Enum):
+    explicit = 'explicit'
+    detected = 'detected'
+
+_NameArg = typer.Argument(help='The name of the info from excel_info.dat',
+                          case_sensitive=False)
+_DKindArg = typer.Argument(help='The type of default directory path being provided',
+                           case_sensitive=False)
+_DirArg = typer.Argument(help='The path to the directory to search for the files',
+                         exists=True, dir_okay=True, file_okay=False, resolve_path=True)
+_OutOpt = typer.Option('--output', '-o',
+                       help='An explicit path to the desired output file',
+                       dir_okay=False, file_okay=True, writable=True, resolve_path=True)
+
 def to_tsv_file(
-        name: Annotated[str, typer.Argument(help="The name of the info from excel_info.dat")],
-        default_dir: Annotated[str, typer.Argument(help="The folder to search when 'folder' is not provided")],
-        outpath: Annotated[str, typer.Argument(help="The path to which to write the output")]
-        ):
-    df = load_df(name, default_dir)
+        name: Annotated[_Name, _NameArg],
+        dirkind: Annotated[_DirKind, _DKindArg],
+        dirpath: Annotated[Path, _DirArg],
+        outpath: Annotated[Path | None, _OutOpt] = None):
+    
+    if dirkind == _DirKind.explicit:
+        default_dir = str(dirpath)
+    else:
+        default_dir = _detect_dirpath(str(dirpath))
+
+    if outpath is None:
+        outpath = _detect_outpath(name.value)
+    else:
+        outpath = str(outpath)
+
+    assert outpath is not None
+
+    df = load_df(name.value, default_dir)
     outfile = open(outpath, mode='w+')
 
     for i in df.index:

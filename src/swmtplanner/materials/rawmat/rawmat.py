@@ -10,7 +10,7 @@ Status = NewType('Status', str)
 ARRIVED = Status('ARRIVED')
 EN_ROUTE = Status('EN_ROUTE')
 
-class RawMat[T](Data[T], mut_in_group=False):
+class RawMat[T, U](Data[T], mut_in_group=False):
 
     def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
         super().__init_subclass__(mut_in_group=False,
@@ -67,7 +67,7 @@ class RawMat[T](Data[T], mut_in_group=False):
                                repr(snapshot))
             self._temp_allocs[snapshot].remove(piece)
 
-class RawMatView[T](DataView[T]):
+class RawMatView[T, U](DataView[T]):
     
     def __init_subclass__(cls, dunders = tuple(), attrs = tuple(),
                           funcs = tuple(), read_only = tuple(), priv = tuple()):

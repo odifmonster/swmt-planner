@@ -7,6 +7,8 @@ from swmtplanner.materials import Snapshot
 
 __all__ = ['RMAlloc', 'Status', 'ARRIVED', 'EN_ROUTE', 'RawMat', 'RawMatView']
 
+type _Item = GreigeStyle | FabricStyle
+
 class RMAlloc[T: Hashable](SwmtBase, HasID[int],
                            read_only=('id','raw_mat_id','qty','avail_date')):
     """Represents an allocated piece of some raw material."""
@@ -37,7 +39,7 @@ Status = NewType('Status', str)
 ARRIVED: Status = ...
 EN_ROUTE: Status = ...
 
-class RawMat[T: Hashable](Data[T]):
+class RawMat[T: Hashable, U: _Item](Data[T]):
     """
     Represents raw materials in inventory (or planned to arrive
     in inventory). Subclasses can define additional attributes
@@ -58,9 +60,9 @@ class RawMat[T: Hashable](Data[T]):
             and 'temp_allocs'. See SwmtBase for more details.
         """
         ...
-    def __init__(self, prefix: str, id: T, view: RawMatView[T],
-                 item: GreigeStyle | FabricStyle, status: Status,
-                 receipt_date: dt.datetime, qty: Quantity, **kwargs) -> None:
+    def __init__(self, prefix: str, id: T, view: RawMatView[T, U], item: U,
+                 status: Status, receipt_date: dt.datetime, qty: Quantity,
+                 **kwargs) -> None:
         """
         Initialize a new RawMat object.
 
@@ -86,7 +88,7 @@ class RawMat[T: Hashable](Data[T]):
         ...
     snapshot: Snapshot | None
     @property
-    def item(self) -> GreigeStyle | FabricStyle:
+    def item(self) -> U:
         """The raw material item."""
         ...
     @property
@@ -129,8 +131,9 @@ class RawMat[T: Hashable](Data[T]):
             The snapshot this piece was allocated on.
         """
         ...
+    def view(self) -> RawMatView[T, U]: ...
         
-class RawMatView[T: Hashable](DataView[T]):
+class RawMatView[T: Hashable, U: _Item](DataView[T]):
     """A class for views of RawMat objects."""
     def __init_subclass__(cls, dunders: tuple[str, ...] = tuple(),
                           attrs: tuple[str, ...] = tuple(),
@@ -147,9 +150,9 @@ class RawMatView[T: Hashable](DataView[T]):
             more details.
         """
         ...
-    def __init__(self, link: RawMat[T], **kwargs) -> None: ...
+    def __init__(self, link: RawMat[T, U], **kwargs) -> None: ...
     @property
-    def item(self) -> GreigeStyle | FabricStyle:
+    def item(self) -> U:
         """The raw material item."""
         ...
     @property

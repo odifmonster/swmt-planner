@@ -42,11 +42,7 @@ pa_inventory:
 adaptive_orders:
     workbook=LamDemandPlanning.xlsx
     sheet=Adaptive
-
-pa_714:
-    workbook=LamDemandPlanning.xlsx
-    sheet=714
-    col_names=Item, "Dye Order"
+    col_names=Dyelot, Machine, StartTime, EndTime, Color
 
 pa_demand_plan:
     workbook="Demand Planning 20250827.xlsx"

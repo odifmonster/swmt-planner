@@ -12,7 +12,7 @@ from swmtplanner.materials import Snapshot, RawMat, RawMatView, ARRIVED
 greige.translate.init()
 greige.init()
 
-class GreigeRoll(RawMat[str]):
+class GreigeRoll(RawMat[str, GreigeStyle]):
 
     def __init__(self, id: str, item: GreigeStyle, lbs: float):
         super().__init__('GreigeRoll', id, GRollView(self), item,
@@ -31,7 +31,7 @@ class GreigeRoll(RawMat[str]):
             return 'NORMAL'
         return 'LARGE'
 
-class GRollView(RawMatView[str], attrs=('size',)):
+class GRollView(RawMatView[str, GreigeStyle], attrs=('size',)):
 
     def __init__(self, link: GreigeRoll):
         super().__init__(link)
