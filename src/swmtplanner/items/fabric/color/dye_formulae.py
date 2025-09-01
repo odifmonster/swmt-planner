@@ -21,9 +21,9 @@ def init():
             shade = int(float(shade))
             globals()['_COLORS'][f'{number:05}'] = Color(number, name, shade)
     
-    globals['_COLORS']['00001'] = Color(1, 'EMPTY', 'EMPTY')
-    globals['_COLORS']['00002'] = Color(2, 'HEAVYSTRIP', 'HEAVYSTRIP')
-    globals['_COLORS']['00003'] = Color(3, 'STRIP', 'STRIP')
+    globals()['_COLORS']['00001'] = Color(1, 'EMPTY', 'EMPTY')
+    globals()['_COLORS']['00002'] = Color(2, 'HEAVYSTRIP', 'HEAVYSTRIP')
+    globals()['_COLORS']['00003'] = Color(3, 'STRIP', 'STRIP')
 
 def get_color(number):
     if number not in globals()['_COLORS']:

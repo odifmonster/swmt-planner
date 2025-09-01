@@ -116,7 +116,8 @@ def to_tsv_file(
             jets = []
             for jetidx in (1,2,3,4,7,8,9,10):
                 if not pd.isna(df.loc[i, f'JET {jetidx}']):
-                    jets.append(f'Jet-{i:02}')
+                    jets.append(f'Jet-{jetidx:02}')
+            if not jets: continue
             items.append(' '.join(jets))
             row = '\t'.join([str(x) for x in items])
         else:
