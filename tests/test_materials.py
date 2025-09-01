@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
+import unittest
+
 import datetime as dt
 
-from swmtplanner import excel
 from swmtplanner.support import Quantity
 from swmtplanner.support.grouped import Grouped
 from swmtplanner.items import greige, GreigeStyle
-from swmtplanner.materials import RawMat, RawMatView, ARRIVED
+from swmtplanner.materials import Snapshot, RawMat, RawMatView, ARRIVED
 
-excel.init()
 greige.translate.init()
 greige.init()
 
@@ -41,25 +41,75 @@ class PAInv(Grouped[str, GreigeStyle]):
     def __init__(self):
         super().__init__('item', 'size', 'id')
 
-def main():
-    dirpath = '/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling'
-    info_df = excel.load_df('pa_inventory', dirpath)
+    def get(self, id: str) -> GRollView:
+        return super().get(id)
 
-    inv = PAInv()
-    for i in info_df.index:
-        roll_id = info_df.loc[i, 'Roll']
+    def add(self, data: GreigeRoll) -> None:
+        return super().add(data)
+    
+    def remove(self, dview: GRollView, remkey = False) -> GreigeRoll:
+        return super().remove(dview, remkey=remkey)
 
-        inv_name = info_df.loc[i, 'Item']
-        plan_name = greige.translate.translate_name(inv_name)
-        if plan_name is None: continue
+class TestRawMat(unittest.TestCase):
 
-        grg = greige.get_style(plan_name)
-        if grg is None: continue
+    def setUp(self):
+        self.roll1 = GreigeRoll('ROLL01', greige.get_style('AU7529'), 935)
+        self.roll2 = GreigeRoll('ROLL02', greige.get_style('AU7529'), 800)
+        self.inv = PAInv()
 
-        roll = GreigeRoll(roll_id, grg, info_df.loc[i, 'Pounds'])
-        inv.add(roll)
+    def test_immut_in_group(self):
+        self.inv.add(self.roll1)
 
-    print(inv)
+        with self.assertRaises(RuntimeError) as cm1:
+            self.roll1.allocate(Quantity(lbs=350))
+
+        self.assertEqual(str(cm1.exception), '\'GreigeRoll\' objects cannot be mutated ' + \
+                         'while in a group')
+        
+        with self.assertRaises(RuntimeError) as cm2:
+            self.roll1.allocate(Quantity(lbs=350), snapshot=Snapshot())
+
+        self.assertEqual(str(cm2.exception), '\'GreigeRoll\' objects cannot be mutated ' + \
+                         'while in a group')
+        
+    def test_alloc(self):
+        piece1 = self.roll1.allocate(Quantity(lbs=350))
+        piece2 = self.roll2.allocate(Quantity(lbs=350))
+
+        self.assertAlmostEqual(self.roll1.qty.lbs, 585, places=4)
+        self.assertAlmostEqual(self.roll2.qty.lbs, 450, places=4)
+
+        with self.assertRaises(KeyError):
+            self.roll1.deallocate(piece2)
+
+        self.roll1.deallocate(piece1)
+        self.roll2.deallocate(piece2)
+
+        self.assertAlmostEqual(self.roll1.qty.lbs, 935, places=4)
+        self.assertAlmostEqual(self.roll2.qty.lbs, 800, places=4)
+
+    def test_temp_alloc(self):
+        snap1 = Snapshot()
+        snap2 = Snapshot()
+        piece1 = self.roll1.allocate(Quantity(lbs=350), snapshot=snap1)
+        piece2 = self.roll1.allocate(Quantity(lbs=375), snapshot=snap2)
+
+        self.assertEqual(self.roll1.qty.lbs, 935)
+        self.roll1.snapshot = snap1
+        self.assertEqual(self.roll1.qty.lbs, 585)
+        self.roll1.snapshot = snap2
+        self.assertEqual(self.roll1.qty.lbs, 560)
+        self.roll1.snapshot = None
+        self.assertEqual(self.roll1.qty.lbs, 935)
+
+        with self.assertRaises(KeyError):
+            self.roll1.deallocate(piece2, snapshot=snap1)
+
+        self.roll1.deallocate(piece1, snapshot=snap1)
+        self.roll1.snapshot = snap1
+        self.assertEqual(self.roll1.qty.lbs, 935)
+        self.roll1.snapshot = snap2
+        self.assertEqual(self.roll1.qty.lbs, 560)
 
 if __name__ == '__main__':
-    main()
+    unittest.main()

@@ -29,7 +29,8 @@ class RawMat[T](Data[T], mut_in_group=False):
         if self.snapshot is None or self.snapshot not in self._temp_allocs:
             return self._cur_qty
         return self._cur_qty - sum(map(lambda al: al.qty,
-                                       self._temp_allocs[self.snapshot]))
+                                       self._temp_allocs[self.snapshot]),
+                                   start=Quantity(pcs=0, yds=0, lbs=0))
     
     @setter_like
     def allocate(self, amount: Quantity, snapshot = None):
@@ -39,7 +40,7 @@ class RawMat[T](Data[T], mut_in_group=False):
                 raise ValueError(f'{str(amount)} exceeds remaining quantity of ' + \
                                  f'resource {repr(self)} ({str(self._cur_qty)})')
             self._cur_qty -= amount
-            piece = RMAlloc[T](self, amount)
+            piece = RMAlloc[T](self.id, self.receipt_date, amount)
             self._allocs.add(piece)
         else:
             if snapshot not in self._temp_allocs:
@@ -51,7 +52,7 @@ class RawMat[T](Data[T], mut_in_group=False):
                                  f'resource {repr(self)} on {repr(snapshot)} ' + \
                                  f' ({str(self.qty)})')
             self.snapshot = prev_snap
-            piece = RMAlloc[T](self, amount)
+            piece = RMAlloc[T](self.id, self.receipt_date, amount)
             self._temp_allocs[snapshot].add(piece)
         return piece
 
@@ -71,5 +72,6 @@ class RawMatView[T](DataView[T]):
     def __init_subclass__(cls, dunders = tuple(), attrs = tuple(),
                           funcs = tuple(), read_only = tuple(), priv = tuple()):
         super().__init_subclass__(dunders=dunders,
-                                  attrs=('item','status','receipt_date','qty')+attrs,
+                                  attrs=('item','status','receipt_date','qty',
+                                         'snapshot')+attrs,
                                   funcs=funcs, read_only=read_only, priv=priv)
