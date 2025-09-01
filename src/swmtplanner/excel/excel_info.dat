@@ -7,8 +7,12 @@
 # need to use double backslash characters. If no folder argument is given, the folder
 # passed to the relevant script is used
 
+dye_formulae:
+    workbook="New XREF file.xlsx"
+    sheet=Xref
+    col_names="COLOR NAME", "COLOR NUMBER", "SHADE RATING"
+
 fabric_items: # information about fabric items (which jets they can run on, which greige style they use, etc.)
-    folder="/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
     workbook="New XREF file.xlsx"
     sheet=Xref
     col_names="GREIGE ITEM", STYLE, Yield, "COLOR NAME", "COLOR NUMBER", "PA FIN ITEM", ...

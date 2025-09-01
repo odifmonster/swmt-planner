@@ -16,11 +16,14 @@ def init():
 
     for info in info_list:
         dirpath, fname, pd_kwargs = parse_pd_args(info)
+        pd_kwargs['dtype'] = {}
         match info.name:
             case 'greige_translation':
                 str_cols = ['inventory', 'plan']
             case 'greige_sizes':
                 str_cols = ['greige']
+            case 'dye_formulae':
+                str_cols = ['COLOR NAME']
             case 'fabric_items':
                 str_cols = ['GREIGE ITEM', 'STYLE', 'COLOR NAME', 'COLOR NUMBER',
                             'PA FIN ITEM']
@@ -38,7 +41,8 @@ def init():
             case _:
                 raise KeyError(f'Unknown excel info \'{info.name}\'')
         
-        pd_kwargs['dtype'] = { str_col: 'string' for str_col in str_cols }
+        for str_col in str_cols:
+            pd_kwargs['dtype'][str_col] = 'string'
         globals()['_INFO_MAP'][info.name] = (dirpath, fname, pd_kwargs)
 
 def get_read_args(name):
@@ -72,6 +76,10 @@ def load_df(info, default_dir):
         case 'greige_sizes':
             df['greige'] = df['greige'].str.upper()
             return df
+        case 'dye_formulae':
+            sub_df = df[~(df['COLOR NAME'].isna() | df['COLOR NUMBER'].isna())]
+            sub_df = sub_df[~sub_df['SHADE RATING'].isna()]
+            return sub_df
         case 'fabric_items':
             df['GREIGE ITEM'] = df['GREIGE ITEM'].str.upper()
             sub_df = df[~(df['COLOR NUMBER'].isna() | df['SHADE RATING'].isna())]

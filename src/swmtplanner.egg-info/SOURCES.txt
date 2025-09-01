@@ -30,8 +30,15 @@ src/swmtplanner/excel/parser/tree/tree.py
 src/swmtplanner/excel/parser/tree/treetypes.py
 src/swmtplanner/items/__init__.py
 src/swmtplanner/items/__init__.pyi
+src/swmtplanner/items/fabric/__init__.py
+src/swmtplanner/items/fabric/__init__.pyi
+src/swmtplanner/items/fabric/color/__init__.py
+src/swmtplanner/items/fabric/color/__init__.pyi
+src/swmtplanner/items/fabric/color/color.py
 src/swmtplanner/items/greige/__init__.py
 src/swmtplanner/items/greige/__init__.pyi
+src/swmtplanner/items/greige/greige.py
+src/swmtplanner/items/greige/styles.py
 src/swmtplanner/items/greige/translate/__init__.py
 src/swmtplanner/items/greige/translate/__init__.pyi
 src/swmtplanner/items/greige/translate/translate.py
