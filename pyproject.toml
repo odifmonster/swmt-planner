@@ -23,6 +23,3 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3"
 ]
-
-[project.scripts]
-excel-to-tsv = "swmtplanner.excel.cli:app"
