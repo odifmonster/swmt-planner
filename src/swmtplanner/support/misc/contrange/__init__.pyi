@@ -11,8 +11,8 @@ class _SupportsComp(Protocol):
     def __gt__(self, other: '_SupportsComp') -> bool: ...
 
 class ContRange[T: _SupportsComp](NamedTuple):
-    min: T
-    max: T
+    minval: T
+    maxval: T
     def contains(self, val: 'T | ContRange[T]', minincl: bool = True,
                  maxincl: bool = True) -> bool: ...
     def overlaps(self, rng: 'ContRange[T]', minincl: bool = True,

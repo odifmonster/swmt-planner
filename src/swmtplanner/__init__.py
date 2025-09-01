@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from . import support, excel, items
+from . import support, excel, items, materials
 
-__all__ = ['support', 'excel', 'items']
+__all__ = ['support', 'excel', 'items', 'materials']

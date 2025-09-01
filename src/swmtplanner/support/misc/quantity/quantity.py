@@ -58,3 +58,12 @@ class Quantity(SwmtBase, read_only=('pcs','yds','lbs')):
     
     def __div__(self, scalar):
         return self._apply(lambda x: x/scalar)
+    
+    def __str__(self):
+        for uom in ('pcs','yds','lbs'):
+            if getattr(self, uom) is not None:
+                val = round(getattr(self, uom), ndigits=2)
+                tgt_uom = uom
+                break
+        
+        return f'{val} {tgt_uom}'

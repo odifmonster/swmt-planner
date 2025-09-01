@@ -80,3 +80,11 @@ class DataView[T: Hashable](Viewer[Data[T]]):
             Names to be passed to the Viewer subclass initializer.
         """
         ...
+    @property
+    def prefix(self) -> str:
+        """Used to distinguish between different HasID implementations."""
+        ...
+    @property
+    def id(self) -> T:
+        """The unique, hashable id of this object."""
+        ...
