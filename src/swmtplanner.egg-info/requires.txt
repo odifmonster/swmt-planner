@@ -1,0 +1,2 @@
+pandas[excel]>=2.1.0
+typer>=0.17.3
