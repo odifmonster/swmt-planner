@@ -3,6 +3,8 @@ from enum import Enum
 from io import TextIOBase
 from swmtplanner.excel.interpreter.file import FilePos
 
+__all__ = ['TokType', 'Token', 'tokenize', 'Lexer']
+
 class TokType(Enum):
     START = ...
     END = ...
@@ -25,12 +27,19 @@ class Token(NamedTuple):
     start: FilePos
 
 class Lexer:
-    """Represents a tokenizing engine for excel info files."""
+    """Represents an iterator over the tokens in an excel info file."""
     def __init__(self, buffer: TextIOBase) -> None:
         """Initialize a new Lexer from a file buffer."""
         ...
-    def __iter__(self) -> Generator[Token]:
-        """Generate the syntactically-relevant tokens from the underlying stream."""
+    def __iter__(self) -> Lexer:
+        """Iterate over the syntactically-relevant tokens from the underlying stream."""
+        ...
+    def __next__(self) -> Token:
+        """Get the next syntactically-relevant token from the underlying stream."""
+        ...
+    @property
+    def ended(self) -> bool:
+        """Whether the stream has ended."""
         ...
     def backup(self, n: int) -> None:
         """Back up the stream by n tokens."""

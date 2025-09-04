@@ -47,7 +47,7 @@ adaptive_orders:
 pa_714:
     workbook=LamDemandPlanning.xlsx
     sheet=714
-    col_names="Item", "Dye Order"
+    col_names=Item, "Dye Order"
 
 pa_demand_plan:
     workbook="Demand Planning 20250827.xlsx"
