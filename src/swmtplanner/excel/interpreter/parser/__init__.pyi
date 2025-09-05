@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import NamedTuple, Literal
 from enum import Enum
 from io import TextIOBase
 
@@ -23,10 +23,17 @@ class VarType(Enum):
     NORMAL = ...
     LIST = ...
 
-class Variable(NamedTuple):
+class _NormVar(NamedTuple):
     name: str
-    kind: VarType
-    value: Atom | list[Atom]
+    kind: Literal[VarType.NORMAL]
+    value: Atom
+
+class _ListVar(NamedTuple):
+    name: str
+    kind: Literal[VarType.LIST]
+    value: list[Atom]
+
+type Variable = _NormVar | _ListVar
 
 class Attribute(NamedTuple):
     name: str
