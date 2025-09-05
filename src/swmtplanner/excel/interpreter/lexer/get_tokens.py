@@ -69,6 +69,26 @@ def _next_file(f: CharStream, value: str, start: FilePos):
         f.backup()
     return TokType.FILE, value, start
 
+def _next_varname2(f: CharStream, value: str, start: FilePos):
+    c = f.read()
+
+    if _is_alpha_num(c):
+        return _next_varname2(f, value+c, start)
+    
+    if len(c) == 1:
+        f.backup()
+    return TokType.VARNAME, value, start
+
+def _next_varname1(f: CharStream, value: str, start: FilePos):
+    c = f.read()
+
+    if _is_alpha(c):
+        return _next_varname2(f, value+c, start)
+    
+    if len(c) == 1:
+        f.backup()
+    raise _unexpected_err(f.get_pos(), c)
+
 def _next_name(f: CharStream, value: str, start: FilePos):
     c = f.read()
 
@@ -120,7 +140,8 @@ def tokenize(buffer):
     yield Token(TokType.START, 'START', FilePos(1, 0, -1))
 
     tok_map = {
-        '=': TokType.EQUALS, ':': TokType.COLON, ',': TokType.COMMA
+        '*': TokType.STAR, '=': TokType.EQUALS, ':': TokType.COLON,
+        ',': TokType.COMMA
     }
 
     while True:
@@ -131,9 +152,9 @@ def tokenize(buffer):
             yield Token(TokType.END, 'END', pos)
             return
 
-        if c in ('=', ':', ',', '\n', ' ', '.', '"', '#'):
+        if c in ('*', '=', ':', ',', '\n', ' ', '.', '$', '"', '#'):
             match c:
-                case '=' | ':' | ',':
+                case '*' | '=' | ':' | ',':
                     kind = tok_map[c]
                     value = c
                     start = pos
@@ -148,6 +169,8 @@ def tokenize(buffer):
                     kind, value, start = _next_string(f, c, pos)
                 case '#':
                     kind, value, start = _next_comment(f, c, pos)
+                case '$':
+                    kind, value, start = _next_varname1(f, c, pos)
         elif c == '0' or _is_alpha(c):
             kind, value, start = _next_name(f, c, pos)
         elif _is_num(c):

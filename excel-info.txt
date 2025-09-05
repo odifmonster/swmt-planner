@@ -3,8 +3,20 @@
 # Any text following a pound sign is ignored
 # End a line in ... if you want the next line to be included as part of the previous one
 
+# Values assigned outside of info blocks can be re-used elsewhere, with a preceding
+# '$' to mark it as a reference and not a regular name
+
+FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+WORKBOOK = "PA plant orders against Lam demand 20250901.xlsx"
+
+# any values that should be interpreted as a list must be preceded by a *
+*jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
+*req_wks = "FAB req'd WK0", "FAB req'd WK1", "FAB req'd WK2", "FAB req'd WK3", ...
+    "FAB req'd WK4", "FAB req'd WK5"
+
 dye_formulae:
     # This is always required, can be a file name or an absolute path to a file
+    folder=$FOLDER
     workbook="New XREF file.xlsx"
     sheet=Xref # This is always required
     col_names="COLOR NAME", "COLOR NUMBER", "SHADE RATING"
@@ -12,17 +24,19 @@ dye_formulae:
 # information about fabric items (which jets they can run on,
 # which greige style they use, etc.)
 fabric_items:
+    folder=$FOLDER
     workbook="New XREF file.xlsx"
     sheet=Xref
     col_names="GREIGE ITEM", STYLE, Yield, "COLOR NAME", "COLOR NUMBER", "PA FIN ITEM", ...
-        "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10", ...
-        "SHADE RATING"
+        $jets, "SHADE RATING"
 
 greige_sizes: # information about target lbs per greige style roll
+    folder=$FOLDER
     workbook=master.xlsx
     sheet="greige info"
 
 greige_translation:
+    folder=$FOLDER
     workbook=LamDemandPlanning.xlsx
     sheet="Greige Style Translation"
     subst_names=inventory, plan # only use this if the workbook has no column names
@@ -30,28 +44,44 @@ greige_translation:
     start_row=2 # the first row of data to start reading
 
 jet_info:
+    folder=$FOLDER
     workbook=master.xlsx
     sheet=jets
 
 pa_inventory:
-    workbook="1427_PACOHINVDCSH - 2025-08-28T082859.985.xlsx"
-    sheet=1427_PACOHINVDCSH
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet=1427
     col_names=Roll, Item, Quality, Pounds, ASSIGNED_ORDER
     start_row=4
 
 adaptive_orders:
-    workbook=LamDemandPlanning.xlsx
+    folder=$FOLDER
+    workbook=$WORKBOOK
     sheet=Adaptive
-    col_names=Dyelot, Machine, StartTime, EndTime
+    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, Qty
 
-pa_714:
-    workbook=LamDemandPlanning.xlsx
-    sheet=714
-    col_names=Item, "Dye Order"
+si_release:
+    folder=$FOLDER
+    workbook="SI release 20250825.xlsx"
+    sheet="Vendor Release Report - Weekly "
+    col_ranges="F,AS:AT"
+    subst_names=greige, daily_lbs, weekly_lbs
+    start_row=3
+    end_row=25
 
-pa_demand_plan:
-    workbook="Demand Planning 20250827.xlsx"
-    sheet="Demand Planning20230927"
-    start_row=8
-    col_ranges="D,M:P" # this argument also has to be wrapped in quotes
-    end_row=112
+wf_release:
+    folder=$FOLDER
+    workbook="SI release 20250825.xlsx"
+    sheet="Vendor Release Report - Weekly "
+    col_ranges="F,AU"
+    subst_names=greige, weekly_lbs
+    start_row=29
+    end_row=35
+
+pa_reqs:
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet="Fab shortage 9-4"
+    col_names="PA Item", "Ply1 Item", "FAB req'd past due", $req_wks, "PA Fin", ...
+        "Inspection", "Frame", "Dye Orders"

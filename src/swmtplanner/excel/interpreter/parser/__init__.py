@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
-from .trees import Empty, AtomType, Atom, Attribute, Block
+from .trees import Empty, AtomType, Atom, VarType, Variable, Attribute, Block
 from .get_trees import parse
 
-__all__ = ['Empty', 'AtomType', 'Atom', 'Attribute', 'Block', 'parse']
+__all__ = ['Empty', 'AtomType', 'Atom', 'VarType', 'Variable',
+           'Attribute', 'Block', 'parse']

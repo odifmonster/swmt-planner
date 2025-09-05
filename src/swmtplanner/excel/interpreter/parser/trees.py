@@ -7,6 +7,7 @@ class Empty:
     pass
 
 class AtomType(Enum):
+    VARNAME = auto()
     NAME = auto()
     NUMBER = auto()
     FILE = auto()
@@ -15,6 +16,15 @@ class AtomType(Enum):
 class Atom(NamedTuple):
     kind: AtomType
     data: str
+
+class VarType(Enum):
+    NORMAL = auto()
+    LIST = auto()
+
+class Variable(NamedTuple):
+    name: str
+    kind: VarType
+    value: Atom | list[Atom]
 
 class Attribute(NamedTuple):
     name: str
