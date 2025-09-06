@@ -23,7 +23,6 @@ class GreigeStyle(SwmtBase, HasID[str], read_only=('id','load_rng','roll_rng')):
             The maximum lbs/port for this style.
         """
         ...
-    def __str__(self) -> str: ...
     @property
     def load_rng(self) -> FloatRange:
         """The range of weights to load one port with this style."""

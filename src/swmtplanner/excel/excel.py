@@ -115,8 +115,8 @@ def _grg_trans_file():
     df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
     df = df_cols_as_str(df, 'inventory', 'plan')
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'item',
-                           'greige', 'translate.py')
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'greige',
+                           'translate.py')
     outfile = open(outpath, mode='w+')
 
     outfile.write('#!/usr/bin/env python\n\n')
@@ -136,8 +136,8 @@ def _grg_style_file():
     df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
     df = df_cols_as_str(df, 'greige')
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'item',
-                           'greige', 'styles.py')
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'greige',
+                           'styles.py')
     outfile = open(outpath, mode='w+')
 
     outfile.write('#!/usr/bin/env python\n\n')
@@ -148,7 +148,100 @@ def _grg_style_file():
         item = df.loc[i, 'greige']
         load_tgt = df.loc[i, 'tgt_lbs']
         outfile.write(' '*4 + f'\'{item}\': GreigeStyle(\'{item}\', ')
-        outfile.write(f'{load_tgt:.2f}, {load_tgt:.2f}),\n')
+        outfile.write(f'{load_tgt-20:.2f}, {load_tgt+20:.2f}),\n')
+
+    outfile.write(' '*4 + f'\'NONE\': GreigeStyle(\'NONE\', 0, 1),\n')
+    
+    outfile.write('}')
+    outfile.truncate()
+    outfile.close()
+
+def _dyes_file():
+    fpath, pdargs = INFO_MAP['dye_formulae']
+    df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
+    df = df_cols_as_str(df, 'COLOR NAME')
+    df = df[~(df['COLOR NUMBER'].isna() | df['SHADE RATING'].isna())]
+
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'fabric',
+                           'color', 'dyes.py')
+    outfile = open(outpath, mode='w+')
+
+    outfile.write('#!/usr/bin/env python\n\n')
+    outfile.write('from .shade import Shade\nfrom .color import Color\n\n')
+    outfile.write('DYES = {\n')
+
+    for fmla, group in df.groupby('COLOR NUMBER'):
+        formula = int(fmla)
+        name = list(group['COLOR NAME'])[0]
+        shade_val = list(group['SHADE RATING'])[0]
+        outfile.write(' '*4 + f'\'{formula:05}\': Color({formula}, ')
+        outfile.write(f'\'{name}\', Shade.from_int({int(shade_val)})),\n')
+
+    outfile.write(' '*4 + f'\'00001\': Color(1, \'EMPTY\', ')
+    outfile.write(f'Shade.from_str(\'EMPTY\')),\n')
+    outfile.write(' '*4 + f'\'00002\': Color(2, \'HEAVYSTRIP\', ')
+    outfile.write(f'Shade.from_str(\'HEAVYSTRIP\')),\n')
+    outfile.write(' '*4 + f'\'00003\': Color(3, \'STRIP\', ')
+    outfile.write(f'Shade.from_str(\'STRIP\')),\n')
+
+    outfile.write('}')
+    outfile.truncate()
+    outfile.close()
+
+def _pa_items_file():
+    fpath, pdargs = INFO_MAP['pa_fin_items']
+    pa_df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
+    pa_df = pa_df[~(pa_df['PA FIN ITEM'].isna() | pa_df['Yield'].isna())]
+    pa_df = pa_df[~(pa_df['COLOR NUMBER'].isna() | pa_df['SHADE RATING'].isna())]
+    pa_df['GREIGE ITEM'] = pa_df['GREIGE ITEM'].str.upper().apply(lambda s: s.strip())
+    pa_df['STYLE'] = pa_df['STYLE'].apply(lambda s: s.strip())
+    pa_df['PA FIN ITEM'] = pa_df['PA FIN ITEM'].apply(lambda s: s.strip())
+
+    jet_cols = list(map(lambda i: f'JET {i+1}',
+                        filter(lambda i: i not in (4, 5), range(10))))
+    pa_df = df_cols_as_str(pa_df, 'GREIGE ITEM', 'STYLE', 'COLOR NAME',
+                           'PA FIN ITEM', *jet_cols)
+
+    fpath, pdargs = INFO_MAP['greige_styles']
+    grg_df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
+    grg_df = df_cols_as_str(grg_df, 'greige')
+
+    pa_df = pa_df.merge(grg_df, how='left', left_on='GREIGE ITEM',
+                        right_on='greige')
+    pa_df = pa_df[~pa_df['greige'].isna()]
+
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'fabric',
+                           'items.py')
+    outfile = open(outpath, mode='w+')
+
+    outfile.write('#!/usr/bin/env python\n\n')
+    outfile.write('from ..greige import STYLES\n')
+    outfile.write('from .color import DYES\n')
+    outfile.write('from .fabric import FabricItem\n\n')
+    outfile.write('ITEMS = {\n')
+
+    for item, group in pa_df.groupby('PA FIN ITEM'):
+        idx = list(group.index)[0]
+        master = group.loc[idx, 'STYLE']
+        grg_id = group.loc[idx, 'GREIGE ITEM']
+        clr_num = int(group.loc[idx, 'COLOR NUMBER'])
+        yld = group.loc[idx , 'Yield']
+        outfile.write(' '*4 + f'\'{item}\': FabricItem(\'{item}\', \'{master}\', ')
+        outfile.write(f'STYLES[\'{grg_id}\'], DYES[\'{clr_num:05}\'], {yld}, ')
+
+        allowed_jets = []
+        for i in filter(lambda i: i not in (4, 5), range(10)):
+            if not pd.isna(group.loc[idx, f'JET {i+1}']):
+                allowed_jets.append(f'Jet-{i+1:02}')
+        
+        outfile.write('[' + ', '.join([repr(jid) for jid in allowed_jets]) + ']),\n')
+
+    outfile.write(' '*4 + '\'EMPTY\': FabricItem(\'EMPTY\', \'NONE\', ')
+    outfile.write('STYLES[\'NONE\'], DYES[\'00001\'], 1, []),\n')
+    outfile.write(' '*4 + '\'HEAVYSTRIP\': FabricItem(\'HEAVYSTRIP\', \'NONE\', ')
+    outfile.write('STYLES[\'NONE\'], DYES[\'00002\'], 1, []),\n')
+    outfile.write(' '*4 + '\'STRIP\': FabricItem(\'STRIP\', \'NONE\', ')
+    outfile.write('STYLES[\'NONE\'], DYES[\'00003\'], 1, []),\n')
     
     outfile.write('}')
     outfile.truncate()
@@ -160,5 +253,9 @@ def update_file(name: _DataNameAnno):
             _grg_trans_file()
         case _DataName.greige_styles:
             _grg_style_file()
+        case _DataName.dye_formulae:
+            _dyes_file()
+        case _DataName.pa_fin_items:
+            _pa_items_file()
         case _:
             print('cool')
