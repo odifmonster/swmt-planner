@@ -10,7 +10,7 @@ INFO_MAP = {
             'SHADE RATING',
         ],
     }),
-    'fabric_items': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/New XREF file.xlsx', {
+    'pa_fin_items': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/New XREF file.xlsx', {
         'sheet_name': 'Xref',
         'header': 0,
         'usecols': [
@@ -31,7 +31,7 @@ INFO_MAP = {
             'SHADE RATING',
         ],
     }),
-    'greige_sizes': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/master.xlsx', {
+    'greige_styles': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/master.xlsx', {
         'sheet_name': 'greige info',
         'header': 0,
     }),

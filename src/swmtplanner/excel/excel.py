@@ -1,10 +1,17 @@
 #!/usr/bin/env python
 
-import os, typer
+import os, typer, pandas as pd
 from pathlib import Path
 from typing import Annotated
+from enum import Enum
 
 from .interpreter import load_info_file
+from .info import INFO_MAP
+
+def df_cols_as_str(df: pd.DataFrame, *args):
+    for colname in args:
+        df[colname] = df[colname].astype('string')
+    return df
 
 def info_to_pdargs(info_name: str, info: dict[str]):
     items = {}
@@ -92,3 +99,66 @@ def write_excel_info(infosrc: _InfoSrcAnno):
     
     outfile.write('}')
     outfile.truncate()
+
+class _DataName(str, Enum):
+    dye_formulae = 'dye_formulae'
+    pa_fin_items = 'pa_fin_items'
+    greige_styles = 'greige_styles'
+    greige_translation = 'greige_translation'
+
+_DATA_HELP = 'Name of the data to read from excel and update.'
+_DataNameAnno = Annotated[_DataName,
+                          typer.Argument(help=_DATA_HELP)]
+
+def _grg_trans_file():
+    fpath, pdargs = INFO_MAP['greige_translation']
+    df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
+    df = df_cols_as_str(df, 'inventory', 'plan')
+
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'item',
+                           'greige', 'translate.py')
+    outfile = open(outpath, mode='w+')
+
+    outfile.write('#!/usr/bin/env python\n\n')
+    outfile.write('GREIGE_STYLE_MAP = {\n')
+
+    for i in df.index:
+        inv = df.loc[i, 'inventory']
+        plan = df.loc[i, 'plan']
+        outfile.write(' '*4 + f'\'{inv}\': \'{plan}\',\n')
+    
+    outfile.write('}')
+    outfile.truncate()
+    outfile.close()
+
+def _grg_style_file():
+    fpath, pdargs = INFO_MAP['greige_styles']
+    df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
+    df = df_cols_as_str(df, 'greige')
+
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'item',
+                           'greige', 'styles.py')
+    outfile = open(outpath, mode='w+')
+
+    outfile.write('#!/usr/bin/env python\n\n')
+    outfile.write('from .greige import GreigeStyle\n\n')
+    outfile.write('STYLES = {\n')
+
+    for i in df.index:
+        item = df.loc[i, 'greige']
+        load_tgt = df.loc[i, 'tgt_lbs']
+        outfile.write(' '*4 + f'\'{item}\': GreigeStyle(\'{item}\', ')
+        outfile.write(f'{load_tgt:.2f}, {load_tgt:.2f}),\n')
+    
+    outfile.write('}')
+    outfile.truncate()
+    outfile.close()
+
+def update_file(name: _DataNameAnno):
+    match name:
+        case _DataName.greige_translation:
+            _grg_trans_file()
+        case _DataName.greige_styles:
+            _grg_style_file()
+        case _:
+            print('cool')

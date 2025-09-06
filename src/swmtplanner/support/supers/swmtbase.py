@@ -18,9 +18,9 @@ class SwmtBase:
     def __init__(self, **kwargs):
         cls = type(self)
 
-        priv_names = map(lambda name: '_'+name, cls._privs)
-        if not set(priv_names).issubset(kwargs.keys()):
-            not_incl = set(priv_names).difference(kwargs.keys())
+        priv_names = set(map(lambda name: '_'+name, cls._privs))
+        if len(priv_names) > 0 and not priv_names.issubset(kwargs.keys()):
+            not_incl = priv_names.difference(kwargs.keys())
             msg = 'Attribute(s) ' + ', '.join([repr(name) for name in not_incl])
             msg += ' not provided to initializer'
             raise ValueError(msg)

@@ -23,14 +23,14 @@ dye_formulae:
 
 # information about fabric items (which jets they can run on,
 # which greige style they use, etc.)
-fabric_items:
+pa_fin_items:
     folder=$FOLDER
     workbook="New XREF file.xlsx"
     sheet=Xref
     col_names="GREIGE ITEM", STYLE, Yield, "COLOR NAME", "COLOR NUMBER", "PA FIN ITEM", ...
         $jets, "SHADE RATING"
 
-greige_sizes: # information about target lbs per greige style roll
+greige_styles: # information about target lbs per greige style roll
     folder=$FOLDER
     workbook=master.xlsx
     sheet="greige info"
