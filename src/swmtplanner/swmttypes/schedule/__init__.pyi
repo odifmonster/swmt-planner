@@ -2,7 +2,7 @@ from .job import Job, JobView
 
 import datetime as dt
 from swmtplanner.support import SwmtBase, HasID, FloatRange, DateRange
-from swmtplanner.app.materials import Lot
+from swmtplanner.swmttypes.materials import Lot
 
 __all__ = ['Job', 'JobView', 'Schedule']
 

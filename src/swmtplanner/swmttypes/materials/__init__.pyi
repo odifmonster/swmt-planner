@@ -3,7 +3,7 @@ from enum import Enum
 from abc import abstractmethod
 import datetime as dt
 from swmtplanner.support import SwmtBase, HasID, Quantity
-from swmtplanner.app.products import GreigeStyle, FabricItem
+from swmtplanner.swmttypes.products import GreigeStyle, FabricItem
 
 __all__ = ['Status', 'Lot', 'LotView', 'Snapshot']
 

@@ -3,8 +3,8 @@ from enum import Enum
 import datetime as dt
 from swmtplanner.support import Quantity, SwmtBase
 from swmtplanner.support.grouped import Data, DataView
-from swmtplanner.app.products import GreigeStyle, FabricItem
-from swmtplanner.app.materials import Lot, LotView
+from swmtplanner.swmttypes.products import GreigeStyle, FabricItem
+from swmtplanner.swmttypes.materials import Lot, LotView
 
 __all__ = ['OrderKind', 'OrderQty', 'Order', 'OrderView', 'Req']
 

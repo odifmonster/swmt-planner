@@ -3,7 +3,7 @@ from .color import Color
 
 import datetime as dt
 from swmtplanner.support import SwmtBase, HasID
-from swmtplanner.app.products import GreigeStyle
+from swmtplanner.swmttypes.products import GreigeStyle
 
 __all__ = ['color', 'Color', 'FabricItem', 'ITEMS']
 

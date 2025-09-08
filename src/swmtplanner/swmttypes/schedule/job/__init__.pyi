@@ -1,8 +1,8 @@
 from typing import Any
 import datetime as dt
 from swmtplanner.support import SwmtBase, HasID, Viewer
-from swmtplanner.app.products import GreigeStyle, FabricItem
-from swmtplanner.app.materials import Lot, LotView
+from swmtplanner.swmttypes.products import GreigeStyle, FabricItem
+from swmtplanner.swmttypes.materials import Lot, LotView
 
 __all__ = ['Job', 'JobView']
 
