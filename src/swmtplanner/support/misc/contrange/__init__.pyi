@@ -23,4 +23,5 @@ class ContRange[T: _SupportsComp](NamedTuple):
 class FloatRange(ContRange[float]):
     def average(self) -> float: ...
 
-type DateRange = ContRange[dt.datetime]
+class DateRange(ContRange[dt.datetime]):
+    ...

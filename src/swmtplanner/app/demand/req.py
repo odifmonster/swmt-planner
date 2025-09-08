@@ -12,6 +12,10 @@ class Req[T](SwmtBase, read_only=('item',), priv=('orders','lots')):
     def orders(self):
         return list(map(lambda o: o.view(), self._orders))
     
+    @property
+    def lots(self):
+        return list(map(lambda l: l.view(), self._lots))
+    
     def add_order(self, id, hard_qty, hard_date, soft_qty, soft_date, safety_qty):
         zero = Quantity(pcs=0, yds=0, lbs=0)
         hard_cum = zero

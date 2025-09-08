@@ -3,12 +3,17 @@ from . import interpreter, cli
 from typing import TypedDict, Literal, Required
 import pandas as pd
 
-__all__ = ['interpreter', 'df_cols_as_str', 'write_excel_info', 'cli', 'INFO_MAP']
+__all__ = ['interpreter', 'df_cols_as_str', 'info_to_pdargs', 'write_excel_info',
+           'cli', 'INFO_MAP']
 
 INFO_MAP: dict[_InfoName, tuple[str, _PandasArgs]] = ...
 
 def df_cols_as_str(df: pd.DataFrame, *args: *tuple[str, ...]) -> pd.DataFrame:
     """Convert types of the listed DataFrame columns to 'string'."""
+    ...
+
+def info_to_pdargs(info_name: _InfoName, info: dict[str]) -> tuple[str, _PandasArgs]:
+    """Get excel info as a file path and valid pandas keyword arguments."""
     ...
 
 def write_excel_info(infosrc: str) -> None:

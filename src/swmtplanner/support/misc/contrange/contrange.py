@@ -46,4 +46,5 @@ class FloatRange(ContRange[float]):
     def average(self):
         return (self.minval + self.maxval) / 2
     
-type DateRange = ContRange[dt.datetime]
+class DateRange(ContRange[dt.datetime]):
+    pass

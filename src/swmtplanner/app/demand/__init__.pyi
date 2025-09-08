@@ -4,7 +4,7 @@ import datetime as dt
 from swmtplanner.support import Quantity, SwmtBase
 from swmtplanner.support.grouped import Data, DataView
 from swmtplanner.app.products import GreigeStyle, FabricItem
-from swmtplanner.app.materials import Lot
+from swmtplanner.app.materials import Lot, LotView
 
 __all__ = ['OrderKind', 'OrderQty', 'Order', 'OrderView', 'Req']
 
@@ -102,7 +102,7 @@ class Order[T: Hashable, U: _Product](
     def assign(self, lot: Lot[Any, Any, U]) -> None:
         """Assign a lot to this order."""
         ...
-    def unassign(self, lot: Lot[Any, Any, U]) -> None:
+    def unassign(self, lot: LotView[Any, Any, U]) -> None:
         """Unassign a lot from this order."""
         ...
     def view(self) -> OrderView[T, U]: ...
@@ -173,6 +173,10 @@ class Req[T: _Product](SwmtBase, read_only=('item',), priv=('orders','lots')):
     def orders(self) -> list[OrderView[Any, T]]:
         """The views of the orders under this requirement."""
         ...
+    @property
+    def lots(self) -> list[LotView[Any, Any, T]]:
+        """The views of the lots going towards this requirement."""
+        ...
     def add_order(self, id: Hashable, hard_qty: Quantity, hard_date: dt.datetime,
                   soft_qty: Quantity, soft_date: dt.datetime, safety_qty: Quantity) \
                     -> Order[Any, T]:
@@ -205,6 +209,6 @@ class Req[T: _Product](SwmtBase, read_only=('item',), priv=('orders','lots')):
     def assign(self, lot: Lot[Any, Any, T]) -> None:
         """Assign a lot to this requirement."""
         ...
-    def unassign(self, lot: Lot[Any, Any, T]) -> None:
+    def unassign(self, lot: LotView[Any, Any, T]) -> None:
         """Unassign a lot from this requirement."""
         ...

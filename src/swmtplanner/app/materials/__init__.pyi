@@ -5,7 +5,7 @@ import datetime as dt
 from swmtplanner.support import SwmtBase, HasID, Quantity
 from swmtplanner.app.products import GreigeStyle, FabricItem
 
-__all__ = ['Status', 'Lot', 'Snapshot']
+__all__ = ['Status', 'Lot', 'LotView', 'Snapshot']
 
 class Status(Enum):
     ARRIVED = ...
@@ -53,6 +53,54 @@ class Lot[T: Hashable, U: _Product, S: _Product](HasID[T], Protocol):
         ...
     @property
     @abstractmethod
+    def fin(self) -> dt.datetime | None:
+        """
+        The date and time the finished product becomes available, or
+        None if this lot is not on the schedule.
+        """
+        ...
+    @abstractmethod
+    def view(self) -> LotView[T, U, S]:
+        """A live, read-only view of this object."""
+        ...
+
+class LotView[T: Hashable, U: _Product, S: _Product](Protocol):
+    """
+    A protocol representing views of Lot-implementing objects.
+    """
+    @property
+    def prefix(self) -> str:
+        """Used to distinguish between different HasID implementations."""
+        ...
+    @property
+    def id(self) -> T:
+        """The unique, hashable id of this object."""
+        ...
+    @property
+    def status(self) -> Status:
+        """The status of the raw materials used in this lot."""
+        ...
+    @property
+    def received(self) -> dt.datetime:
+        """The date the materials were/will be received."""
+        ...
+    @property
+    def rawmat(self) -> U:
+        """The raw material item used for this lot."""
+        ...
+    @property
+    def product(self) -> S:
+        """The product produced by this lot."""
+        ...
+    @property
+    def qty(self) -> Quantity:
+        """The quantity of materials (used and produced) by this lot."""
+        ...
+    @property
+    def start(self) -> dt.datetime | None:
+        """The date and time the job (if any) assigned to this lot starts."""
+        ...
+    @property
     def fin(self) -> dt.datetime | None:
         """
         The date and time the finished product becomes available, or

@@ -82,6 +82,6 @@ wf_release:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 9-4"
+    sheet="Fab shortage 9-5"
     col_names="PA Item", "Ply1 Item", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
