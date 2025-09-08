@@ -115,7 +115,7 @@ def _grg_trans_file():
     df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
     df = df_cols_as_str(df, 'inventory', 'plan')
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'greige',
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'swmttypes', 'products', 'greige',
                            'translate.py')
     outfile = open(outpath, mode='w+')
 
@@ -134,9 +134,9 @@ def _grg_trans_file():
 def _grg_style_file():
     fpath, pdargs = INFO_MAP['greige_styles']
     df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
-    df = df_cols_as_str(df, 'greige')
+    df = df_cols_as_str(df, 'Greige', 'GreigeAlt')
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'greige',
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'swmttypes', 'products', 'greige',
                            'styles.py')
     outfile = open(outpath, mode='w+')
 
@@ -145,12 +145,20 @@ def _grg_style_file():
     outfile.write('STYLES = {\n')
 
     for i in df.index:
-        item = df.loc[i, 'greige']
-        load_tgt = df.loc[i, 'tgt_lbs']
-        outfile.write(' '*4 + f'\'{item}\': GreigeStyle(\'{item}\', ')
-        outfile.write(f'{load_tgt-20:.2f}, {load_tgt+20:.2f}),\n')
+        item = df.loc[i, 'GreigeAlt']
+        roll_tgt = df.loc[i, 'Target']
+        roll_diff = 40
+        if roll_tgt <= 400:
+            load_tgt = roll_tgt
+            roll_diff = 20
+        else:
+            load_tgt = roll_tgt / 2
 
-    outfile.write(' '*4 + f'\'NONE\': GreigeStyle(\'NONE\', 0, 1),\n')
+        outfile.write(' '*4 + f'\'{item}\': GreigeStyle(\'{item}\', ')
+        outfile.write(f'{load_tgt-20:.1f}, {load_tgt+20:.1f}, ')
+        outfile.write(f'{roll_tgt-roll_diff:.1f}, {roll_tgt+roll_diff:.1f}),\n')
+
+    outfile.write(' '*4 + f'\'NONE\': GreigeStyle(\'NONE\', 0, 1, 0, 1),\n')
     
     outfile.write('}')
     outfile.truncate()
@@ -162,7 +170,7 @@ def _dyes_file():
     df = df_cols_as_str(df, 'COLOR NAME')
     df = df[~(df['COLOR NUMBER'].isna() | df['SHADE RATING'].isna())]
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'fabric',
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'swmttypes', 'products', 'fabric',
                            'color', 'dyes.py')
     outfile = open(outpath, mode='w+')
 
@@ -204,13 +212,13 @@ def _pa_items_file():
 
     fpath, pdargs = INFO_MAP['greige_styles']
     grg_df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
-    grg_df = df_cols_as_str(grg_df, 'greige')
+    grg_df = df_cols_as_str(grg_df, 'Greige', 'GreigeAlt')
 
     pa_df = pa_df.merge(grg_df, how='left', left_on='GREIGE ITEM',
-                        right_on='greige')
-    pa_df = pa_df[~pa_df['greige'].isna()]
+                        right_on='GreigeAlt')
+    pa_df = pa_df[~pa_df['GreigeAlt'].isna()]
 
-    outpath = os.path.join(os.path.dirname(__file__), '..', 'app', 'products', 'fabric',
+    outpath = os.path.join(os.path.dirname(__file__), '..', 'swmttypes', 'products', 'fabric',
                            'items.py')
     outfile = open(outpath, mode='w+')
 

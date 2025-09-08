@@ -31,8 +31,8 @@ INFO_MAP = {
             'SHADE RATING',
         ],
     }),
-    'greige_styles': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/master.xlsx', {
-        'sheet_name': 'greige info',
+    'greige_styles': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/LamDemandPlanning.xlsx', {
+        'sheet_name': 'Griege Sizes',
         'header': 0,
     }),
     'greige_translation': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/LamDemandPlanning.xlsx', {
@@ -49,7 +49,7 @@ INFO_MAP = {
         'sheet_name': 'jets',
         'header': 0,
     }),
-    'pa_inventory': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250901.xlsx', {
+    'pa_inventory': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250908.xlsx', {
         'sheet_name': '1427',
         'header': 0,
         'skiprows': 3,
@@ -61,7 +61,7 @@ INFO_MAP = {
             'ASSIGNED_ORDER',
         ],
     }),
-    'adaptive_orders': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250901.xlsx', {
+    'adaptive_orders': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250908.xlsx', {
         'sheet_name': 'Adaptive',
         'header': 0,
         'usecols': [
@@ -97,8 +97,8 @@ INFO_MAP = {
             'weekly_lbs',
         ],
     }),
-    'pa_reqs': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250901.xlsx', {
-        'sheet_name': 'Fab shortage 9-4',
+    'pa_reqs': ('/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/PA plant orders against Lam demand 20250908.xlsx', {
+        'sheet_name': 'Fab shortage 9-8',
         'header': 0,
     }),
 }

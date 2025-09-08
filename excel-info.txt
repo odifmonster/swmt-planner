@@ -7,7 +7,7 @@
 # '$' to mark it as a reference and not a regular name
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
-WORKBOOK = "PA plant orders against Lam demand 20250901.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20250908.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
@@ -32,8 +32,8 @@ pa_fin_items:
 
 greige_styles: # information about target lbs per greige style roll
     folder=$FOLDER
-    workbook=master.xlsx
-    sheet="greige info"
+    workbook=LamDemandPlanning.xlsx
+    sheet="Griege Sizes"
 
 greige_translation:
     folder=$FOLDER
@@ -82,6 +82,6 @@ wf_release:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 9-5"
+    sheet="Fab shortage 9-8"
     col_names="PA Item", "Ply1 Item", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"

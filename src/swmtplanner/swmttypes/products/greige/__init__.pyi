@@ -11,7 +11,8 @@ class GreigeStyle(SwmtBase, HasID[str], read_only=('id','load_rng','roll_rng')):
     A class for representing greige styles and associated
     information.
     """
-    def __init__(self, item: str, load_min: float, load_max: float) -> None:
+    def __init__(self, item: str, load_min: float, load_max: float,
+                 roll_min: float, roll_max: float) -> None:
         """
         Initialize a new GreigeStyle object.
 
@@ -21,6 +22,10 @@ class GreigeStyle(SwmtBase, HasID[str], read_only=('id','load_rng','roll_rng')):
             The minimum lbs/port for this style.
           load_max:
             The maximum lbs/port for this style.
+          roll_min:
+            The minimum lbs/roll for this style.
+          roll_max:
+            The maximum lbs/roll for this style.
         """
         ...
     @property
