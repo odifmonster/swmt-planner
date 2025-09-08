@@ -258,4 +258,4 @@ def update_file(name: _DataNameAnno):
         case _DataName.pa_fin_items:
             _pa_items_file()
         case _:
-            print('cool')
+            print('No file to update.')

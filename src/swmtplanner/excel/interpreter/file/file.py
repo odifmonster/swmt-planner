@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 from typing import NamedTuple
-from io import TextIOBase
 
 class FilePos(NamedTuple):
     line: int
@@ -10,7 +9,7 @@ class FilePos(NamedTuple):
 
 class CharStream:
 
-    def __init__(self, buffer: TextIOBase):
+    def __init__(self, buffer):
         self._buffer = buffer
         self._line = 1
         self._column = 1
