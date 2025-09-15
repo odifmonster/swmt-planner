@@ -422,7 +422,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             else:
                 true_qty *= 0.9
 
-            mo_data['yds_expected'].append(true_qty)
+            mo_data['fin_yds_expected'].append(true_qty)
             mo_data['ordered_yds'].append(orders_df.loc[o_idx, 'yds'])
             mo_data['pnum'].append(orders_df.loc[o_idx, 'pnum'])
             mo_data['due_date'].append(orders_df.loc[o_idx, 'due_date'])
