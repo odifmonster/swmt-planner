@@ -191,7 +191,9 @@ def _load_pa_floor_mos():
     fpath, pdargs = INFO_MAP['pa_floor_mos']
     mo_df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
     mo_df = df_cols_as_str(mo_df, 'Item\nType', 'Warehouse', 'Customer',
-                           'Roll', 'Lot', 'Item', 'Quality', 'Owner')
+                           'Roll', 'Lot', 'Item', 'Quality', 'Owner',
+                           'DEFECT1', 'DEF1_REASON', 'DEFECT2', 'DEF2_REASON',
+                           'DEFECT3', 'DEF3_REASON', 'MARKET_SEGMENT')
     
     insp = mo_df['Warehouse'] == 'BG'
     frame = mo_df['Warehouse'] == 'BF'
@@ -243,11 +245,16 @@ def _pa_process_report(mo_df: pd.DataFrame, writer):
 def _pa_rework_report(mo_df: pd.DataFrame, writer):
     rwk_df = mo_df[mo_df['Process'] == 'REWORK']
     rwk_df['Code'] = 'RW'
-    rwk_df['Width'] = rwk_df['Nominal\nWidth']
+    rwk_df = rwk_df.rename({'Nominal\nWidth': 'Width', 'DEFECT1': 'Defect1',
+                            'DEF1_REASON': 'Reason1', 'DEFECT2': 'Defect2',
+                            'DEF2_REASON': 'Reason2', 'DEFECT3': 'Defect3',
+                            'DEF3_REASON': 'Reason3', 'MARKET_SEGMENT': 'Market'}, axis=1)
     rwk_df['AltItem'] = rwk_df[['Code', 'Item', 'Style', 'Color', 'Width']].agg(_get_alt_item2, axis=1).astype('string')
     rwk_df.to_excel(writer, sheet_name='reworks', float_format='%.2f',
                     columns=['Customer', 'Owner', 'Width', 'Roll', 'Lot',
-                             'Item', 'AltItem', 'Quality', 'Quantity'], index=False)
+                             'Item', 'AltItem', 'Quality', 'Quantity',
+                             'Defect1', 'Reason1', 'Defect2', 'Reason2',
+                             'Defect3', 'Reason3', 'Market'], index=False)
 
 def _parse_ship_day(day_str: str):
     day_str = day_str.lower()
@@ -370,7 +377,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     mo_df = mo_grp_df.reset_index()
 
     mo_data = {
-        'mo': [], 'process': [], 'item': [], 'raw_yds': [], 'yds_expected': [],
+        'mo': [], 'process': [], 'item': [], 'raw_yds': [], 'fin_yds_expected': [],
         'ordered_yds': [], 'pnum': [], 'due_date': []
     }
 
