@@ -5,9 +5,11 @@ import datetime as dt
 from swmtplanner.support import SwmtBase, HasID
 from swmtplanner.swmttypes.products import GreigeStyle
 
-__all__ = ['color', 'Color', 'FabricItem', 'ITEMS']
+__all__ = ['color', 'Color', 'FabricItem', 'load_items', 'ITEMS']
 
 ITEMS: dict[str, FabricItem] = ...
+
+def load_items(fpath: str) -> None: ...
 
 class FabricItem(SwmtBase, HasID[str],
                  read_only=('id','master','greige','color','yld','cycle_time'),

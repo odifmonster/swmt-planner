@@ -3,5 +3,5 @@
 from .roll import *
 from .inventory import PAInv
 
-__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'GrgRoll', 'GrgRollView',
-           'PAInv']
+__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'PortLoad', 'GrgRoll',
+           'GrgRollView', 'PAInv']

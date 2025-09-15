@@ -1,3 +1,4 @@
+from typing import NamedTuple
 from enum import Enum
 import datetime as dt
 from swmtplanner.support import Quantity, SwmtBase, HasID
@@ -5,7 +6,8 @@ from swmtplanner.support.grouped import Data, DataView
 from swmtplanner.swmttypes.products import GreigeStyle
 from swmtplanner.swmttypes.materials import Status, Snapshot
 
-__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'GrgRoll', 'GrgRollView']
+__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'PortLoad', 'GrgRoll',
+           'GrgRollView']
 
 class KnitPlant(Enum):
     WVILLE = ...
@@ -18,14 +20,24 @@ class GrgRollSize(Enum):
     PARTIAL = ...
     ODD = ...
 
-class GRollAlloc(SwmtBase, HasID[int], read_only=('id','roll_id','avail_date','weight')):
-    def __init__(self, roll_id: str, avail_date: dt.datetime, weight: Quantity) -> None: ...
+class GRollAlloc(SwmtBase, HasID[int],
+                 read_only=('id','roll_id','status','avail_date','weight')):
+    def __init__(self, roll_id: str, status: Status, avail_date: dt.datetime,
+                 weight: Quantity) -> None: ...
     @property
     def roll_id(self) -> str: ...
+    @property
+    def status(self) -> Status: ...
     @property
     def avail_date(self) -> str: ...
     @property
     def weight(self) -> Quantity: ...
+
+class PortLoad(NamedTuple):
+    rolls: tuple[GRollAlloc, ...]
+    status: Status
+    avail_date: dt.datetime
+    weight: Quantity
 
 class GrgRoll(Data[str], mut_in_group=False,
               read_only=('item','plant','status','received'),

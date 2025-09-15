@@ -5,8 +5,8 @@ from swmtplanner.support.grouped import Atom, AtomView, Grouped, GroupedView
 from swmtplanner.swmttypes.products import GreigeStyle
 from swmtplanner.swmttypes.materials import Status
 
-__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'GrgRoll', 'GrgRollView',
-           'PAInv']
+__all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'PortLoad', 'GrgRoll',
+           'GrgRollView', 'PAInv']
 
 class _RollAtom(Atom[str]):
     def __getitem__(self, key: tuple[()]) -> _RollAtomView: ...

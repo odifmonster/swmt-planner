@@ -6,7 +6,7 @@ _CTR = 0
 
 class Job[T](SwmtBase, HasID[str],
           read_only=('id','start','end','cycle_time','rawmat','moveable'),
-          priv=('lots','view')):
+          priv=('lots',)):
     
     def __init__(self, lots, start, cycle_time, moveable, idx = None):
         if idx is None:
@@ -17,7 +17,7 @@ class Job[T](SwmtBase, HasID[str],
 
         SwmtBase.__init__(self, _id=job_id, _start=start, _end=start+cycle_time,
                           _cycle_time=cycle_time, _moveable=moveable,
-                          _raw_mat=lots[0].rawmat, _lots=lots, _view=JobView(self))
+                          _raw_mat=lots[0].rawmat, _lots=lots)
         
     @property
     def prefix(self):
@@ -40,9 +40,13 @@ class Job[T](SwmtBase, HasID[str],
             lot.start = None
 
     def view(self):
-        return self._view
+        raise NotImplementedError()
 
-class JobView[T](Viewer[Job[T]], dunders=('hash','eq','repr'),
-                 attrs=('prefix','id','start','end','cycle_time','rawmat',
-                        'moveable','lots','is_product')):
-    pass
+class JobView[T](Viewer[Job[T]]):
+    
+    def __init_subclass__(cls, dunders = tuple(), attrs = tuple(), funcs = tuple(),
+                          read_only = tuple(), priv = tuple()):
+        super().__init_subclass__(dunders=('hash','eq','repr')+dunders,
+                                  attrs=('prefix','id','start','end','cycle_time','rawmat',
+                                         'moveable','lots','is_product')+attrs,
+                                  funcs=funcs, read_only=read_only, priv=priv)

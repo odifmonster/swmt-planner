@@ -2,3 +2,4 @@ tests/misc.py
 __pycache__/
 temp*.txt
 .ipynb_checkpoints/
+*.ipynb

@@ -2,35 +2,19 @@
 
 from .greige import GreigeStyle
 
-STYLES = {
-    'ANMUT-C': GreigeStyle('ANMUT-C', 340.0, 380.0, 340.0, 380.0),
-    'AU1148G36': GreigeStyle('AU1148G36', 380.0, 420.0, 760.0, 840.0),
-    'AU2958A': GreigeStyle('AU2958A', 355.0, 395.0, 710.0, 790.0),
-    'AU2958G': GreigeStyle('AU2958G', 355.0, 395.0, 710.0, 790.0),
-    'AU2958H': GreigeStyle('AU2958H', 355.0, 395.0, 710.0, 790.0),
-    'AU3086': GreigeStyle('AU3086', 330.0, 370.0, 660.0, 740.0),
-    'AU3426': GreigeStyle('AU3426', 342.5, 382.5, 685.0, 765.0),
-    'AU3426 WIDE': GreigeStyle('AU3426 WIDE', 342.5, 382.5, 685.0, 765.0),
-    'AU3426H': GreigeStyle('AU3426H', 342.5, 382.5, 685.0, 765.0),
-    'AU4398': GreigeStyle('AU4398', 330.0, 370.0, 660.0, 740.0),
-    'AU4583': GreigeStyle('AU4583', 355.0, 395.0, 710.0, 790.0),
-    'AU4583 210': GreigeStyle('AU4583 210', 355.0, 395.0, 710.0, 790.0),
-    'AU4782': GreigeStyle('AU4782', 355.0, 395.0, 710.0, 790.0),
-    'AU4782DREP': GreigeStyle('AU4782DREP', 355.0, 395.0, 710.0, 790.0),
-    'AU4782K': GreigeStyle('AU4782K', 355.0, 395.0, 710.0, 790.0),
-    'AU5429D': GreigeStyle('AU5429D', 367.5, 407.5, 735.0, 815.0),
-    'AU5429H': GreigeStyle('AU5429H', 367.5, 407.5, 735.0, 815.0),
-    'AU6563': GreigeStyle('AU6563', 330.0, 370.0, 660.0, 740.0),
-    'AU6953': GreigeStyle('AU6953', 355.0, 395.0, 710.0, 790.0),
-    'AU7130': GreigeStyle('AU7130', 367.5, 407.5, 735.0, 815.0),
-    'AU7368H': GreigeStyle('AU7368H', 342.5, 382.5, 685.0, 765.0),
-    'AU7389G': GreigeStyle('AU7389G', 342.5, 382.5, 685.0, 765.0),
-    'AU7389H': GreigeStyle('AU7389H', 342.5, 382.5, 685.0, 765.0),
-    'AU7529': GreigeStyle('AU7529', 330.0, 370.0, 660.0, 740.0),
-    'AU7538B': GreigeStyle('AU7538B', 330.0, 370.0, 330.0, 370.0),
-    'AU7614-BKAN': GreigeStyle('AU7614-BKAN', 330.0, 370.0, 660.0, 740.0),
-    'AU7614-CGAN': GreigeStyle('AU7614-CGAN', 330.0, 370.0, 660.0, 740.0),
-    'AU7614CLG-186': GreigeStyle('AU7614CLG-186', 330.0, 370.0, 660.0, 740.0),
-    'AUSR7980': GreigeStyle('AUSR7980', 330.0, 370.0, 660.0, 740.0),
-    'NONE': GreigeStyle('NONE', 0, 1, 0, 1),
-}
+STYLES = {}
+
+def load_styles(fpath: str):
+    if len(globals()['STYLES']) > 0: return
+
+    with open(fpath) as infile:
+        for line in infile:
+            line = line.strip()
+            if not line: continue
+
+            style, load_min, load_max, roll_min, roll_max = line.split('\t')
+            grg = GreigeStyle(style, float(load_min), float(load_max),
+                              float(roll_min), float(roll_max))
+            globals()['STYLES'][style] = grg
+    
+    globals()['STYLES']['NONE'] = GreigeStyle('NONE', 0, 1, 0, 1)

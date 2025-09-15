@@ -1,10 +1,14 @@
 from swmtplanner.support import SwmtBase, HasID, FloatRange
 
-__all__ = ['GreigeStyle', 'STYLE_MAP']
+__all__ = ['GreigeStyle', 'load_translations', 'STYLE_MAP', 'load_styles', 'STYLES']
 
 STYLE_MAP: dict[str, str] = ...
 
 STYLES: dict[str, GreigeStyle] = ...
+
+def load_translations(fpath: str) -> None: ...
+
+def load_styles(fpath: str) -> None: ...
 
 class GreigeStyle(SwmtBase, HasID[str], read_only=('id','load_rng','roll_rng')):
     """

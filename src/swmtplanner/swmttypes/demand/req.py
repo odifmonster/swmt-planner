@@ -30,8 +30,8 @@ class Req[T](SwmtBase, read_only=('item',), priv=('orders','lots')):
 
         new_order = Order(id, self.item, self,
                           OrderQty(hard_qty, hard_qty+hard_cum), hard_date,
-                          OrderQty(soft_qty, soft_qty+soft_cum), soft_date,
-                          OrderQty(safety_qty, safety_qty+safety_cum))
+                          OrderQty(soft_qty, hard_qty+soft_qty+soft_cum), soft_date,
+                          OrderQty(safety_qty, hard_qty+soft_qty+safety_qty+safety_cum))
         self._orders.append(new_order)
         return new_order
 

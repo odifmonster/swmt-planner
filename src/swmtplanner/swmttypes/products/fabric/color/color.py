@@ -8,7 +8,7 @@ class Color(SwmtBase, HasID[str], read_only=('name','shade','soil'),
     
     def __init__(self, formula, name, shade):
         match shade:
-            case Shade.SOLUTION | Shade.LIGHT:
+            case Shade.SOLUTION | Shade.LIGHT2 | Shade.LIGHT1:
                 soil = 1
             case Shade.EMPTY | Shade.MEDIUM:
                 soil = 3
@@ -29,13 +29,20 @@ class Color(SwmtBase, HasID[str], read_only=('name','shade','soil'),
     def id(self):
         return f'{self._id:05}'
     
-    def get_needed_strip(self, soil, prev_clr):
-        if self.shade == Shade.LIGHT and (soil >= 20 or prev_clr.shade == Shade.BLACK):
-            if soil - 27 >= 10:
-                return 'HEAVYSTRIP'
-            return 'STRIP'
-        if self.shade == Shade.MEDIUM and soil >= 35:
-            if soil - 27 >= 25:
-                return 'HEAVYSTRIP'
-            return 'STRIP'
-        return None
+    def get_needed_strip(self, jss, max_clr):
+        strip = None
+        if self.shade in (Shade.LIGHT1, Shade.LIGHT2):
+            if max_clr == Shade.BLACK:
+                strip = 'HEAVYSTRIP'
+            elif max_clr in (Shade.MEDIUM, Shade.SOLUTION):
+                strip = 'STRIP'
+        elif self.shade == Shade.MEDIUM:
+            if max_clr == Shade.BLACK:
+                strip = 'HEAVYSTRIP'
+            elif max_clr == Shade.SOLUTION:
+                strip = 'STRIP'
+        
+        if strip is None and jss >= 9:
+            strip = 'STRIP'
+        
+        return strip

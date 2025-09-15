@@ -15,7 +15,7 @@ class FabricItem(SwmtBase, HasID[str],
                 hrs = 14
             case Shade.STRIP:
                 hrs = 7
-            case Shade.EMPTY | Shade.LIGHT | Shade.MEDIUM:
+            case Shade.EMPTY | Shade.LIGHT1 | Shade.LIGHT2 | Shade.MEDIUM:
                 hrs = 8
             case Shade.SOLUTION:
                 hrs = 6

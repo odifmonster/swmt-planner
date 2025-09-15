@@ -4,151 +4,89 @@ import datetime as dt
 
 from swmtplanner.support import SwmtBase, HasID, FloatRange, DateRange
 
-def _round_up_to_week(date: dt.datetime, hrs_open: FloatRange,
-                      days_open: FloatRange):
-    if date.weekday() == days_open.minval:
-        first_hour = dt.datetime(date.year, date.month, date.day, hour=hrs_open.minval)
-        if date - dt.timedelta(minutes=1) > first_hour:
-            date += dt.timedelta(days=1)
-    
-    days_til = days_open.minval - date.weekday()
-    if days_til < 0:
-        days_til += 7
+def _floor_day(date: dt.datetime):
+    return dt.datetime(date.year, date.month, date.day)
 
-    first_date = date + dt.timedelta(days=days_til)
-    first_date = dt.datetime(first_date.year, first_date.month, first_date.day,
-                             hour=hrs_open.minval)
-    
-    return first_date
+def _ceil_day(date: dt.datetime):
+    if date.time() == dt.time.min:
+        return date
+    return _floor_day(date + dt.timedelta(days=1))
 
-def _round_down_to_week(date: dt.datetime, hrs_open: FloatRange,
-                        days_open: FloatRange):
-    if date.weekday() == days_open.maxval:
-        last_hour = dt.datetime(date.year, date.month, date.day, hour=hrs_open.maxval)
-        if date + dt.timedelta(minutes=1) < last_hour:
-            date -= dt.timedelta(days=1)
-    
-    days_since = date.weekday() - days_open.maxval
-    if days_since < 0:
-        days_since += 7
+def _ceil_week(date: dt.datetime):
+    if date.weekday() == 0:
+        return date
+    return date + dt.timedelta(days=7-date.weekday())
 
-    last_date = date - dt.timedelta(days=days_since)
-    last_date = dt.datetime(last_date.year, last_date.month, last_date.day,
-                            hour=hrs_open.maxval)
-    
-    return last_date
+def _floor_week(date: dt.datetime):
+    return date - dt.timedelta(days=date.weekday())
 
-def _round_up_to_day(date: dt.datetime, hrs_open: FloatRange,
-                     days_open: FloatRange):
-    if not days_open.contains(date.weekday()):
-        return _round_up_to_week(date, hrs_open, days_open)
+class Schedule(SwmtBase, HasID[str]):
     
-    first_hour = dt.datetime(date.year, date.month, date.day,
-                             hour=hrs_open.minval)
-    if date.weekday() == days_open.maxval and \
-        date - dt.timedelta(minutes=1) > first_hour:
-        return _round_up_to_week(date, hrs_open, days_open)
+    def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
+        super().__init_subclass__(
+            read_only=('prefix','id','date_rng','hrs_open','days_open')+read_only,
+            priv=('jobs',)+priv)
     
-    if date - dt.timedelta(minutes=1) > first_hour:
-        first_hour += dt.timedelta(hours=24)
-    
-    return first_hour
-
-def _round_down_to_day(date: dt.datetime, hrs_open: FloatRange,
-                       days_open: FloatRange):
-    if not days_open.contains(date.weekday()):
-        return _round_down_to_week(date, hrs_open, days_open)
-    
-    last_hour = dt.datetime(date.year, date.month, date.day,
-                            hour=hrs_open.maxval)
-    if date.weekday() == days_open.minval and \
-        date + dt.timedelta(minutes=1) < last_hour:
-        return _round_down_to_week(date, hrs_open, days_open)
-    
-    if date + dt.timedelta(minutes=1) < last_hour:
-        last_hour -= dt.timedelta(hours=24)
-    
-    return last_hour
-
-def _total_time_open(date_rng: DateRange, hrs_open: FloatRange, days_open: FloatRange):
-    first_week1 = _round_up_to_week(date_rng.minval, hrs_open, days_open)
-    first_week2 = _round_down_to_week(first_week1, hrs_open, days_open)
-    first_week2 = dt.datetime(first_week2.year, first_week2.month, first_week2.day,
-                              hour=hrs_open.minval)
-
-    last_week1 = _round_down_to_week(date_rng.maxval, hrs_open, days_open)
-    last_week2 = _round_up_to_week(last_week1, hrs_open, days_open)
-
-    full_weeks = 0
-    if last_week2 > first_week1:
-        diff = last_week2 - first_week1
-        full_weeks = round(diff.total_seconds() / (3600*24*7))
-
-    first_day1 = _round_up_to_day(date_rng.minval, hrs_open, days_open)
-    last_day1 = _round_down_to_day(date_rng.maxval, hrs_open, days_open)
-    full_days = 0
-    if first_week2 > first_day1:
-        diff = first_week2 - first_day1
-        full_days += round(diff.total_seconds() / (3600*24))
-    
-    if last_day1 > last_week2:
-        diff = last_day1 - last_week2
-        full_days += round(diff.total_seconds() / (3600*24))
-    
-    hrs_per_day = hrs_open.maxval - hrs_open.minval
-    days_per_week = days_open.maxval - days_open.minval + 1
-    total_hrs = full_weeks * days_per_week * hrs_per_day + full_days * hrs_per_day
-
-    if days_open.contains(date_rng.minval.weekday()):
-        date = dt.datetime(date_rng.minval.year,
-                           date_rng.minval.month,
-                           date_rng.minval.day)
-        cur_hrs = DateRange(date + dt.timedelta(hours=hrs_open.minval),
-                            date + dt.timedelta(hours=hrs_open.maxval))
-        if cur_hrs.contains(date_rng.minval):
-            diff = cur_hrs.maxval - date_rng.minval
-            total_hrs += diff.total_seconds() / 3600
-    if days_open.contains(date_rng.maxval.weekday()):
-        date = dt.datetime(date_rng.maxval.year,
-                           date_rng.maxval.month,
-                           date_rng.maxval.day)
-        cur_hrs = DateRange(date + dt.timedelta(hours=hrs_open.minval),
-                            date + dt.timedelta(hours=hrs_open.maxval))
-        if cur_hrs.contains(date_rng.maxval):
-            diff = date_rng.maxval - cur_hrs.minval
-            total_hrs += diff.total_seconds() / 3600
-    
-    return dt.timedelta(hours=total_hrs)
-
-class Schedule(SwmtBase, HasID[str],
-               read_only=('prefix','id','date_rng','hrs_open','days_open'),
-               priv=('jobs',)):
-    
-    def __init__(self, prefix, sched_id, date_rng, hrs_open, days_open):
+    def __init__(self, prefix, sched_id, date_rng, hrs_open, days_open, run_out):
         SwmtBase.__init__(self, _prefix=prefix, _id=sched_id, _date_rng=date_rng,
                           _hrs_open=hrs_open, _days_open=days_open, _jobs=[])
+    
+    def _time_open(self, rng: DateRange):
+        rem_time = dt.timedelta()
+
+        hrs_per_day = self.hrs_open.maxval - self.hrs_open.minval
+        hrs_per_wk = (self.days_open.maxval + 1 - self.days_open.mi)
+
+        start_dt = rng.minval
+        start_day = _ceil_day(start_dt)
+        start_week = _ceil_week(start_day)
+        if start_day != start_dt and self.days_open.contains(start_dt.weekday()):
+            min_day1_start = _floor_day(start_dt) + \
+                dt.timedelta(hours=self.hrs_open.minval)
+            day1_end = _floor_day(start_dt) + dt.timedelta(hours=self.hrs_open.maxval)
+            day1_start = min(day1_end, max(start_dt, min_day1_start))
+            rem_time += day1_end - day1_start
+        if start_week != start_day and self.days_open.contains(start_day.weekday()):
+            min_wk1_start = _floor_week(start_day) + \
+                dt.timedelta(days=self.days_open.minval)
+            wk1_end = _floor_week(start_day) \
+                + dt.timedelta(days=self.days_open.maxval+1)
+            wk1_start = min(wk1_end, max(start_day, min_wk1_start))
+            days = round((wk1_end - wk1_start).total_seconds() / (3600*24))
+            rem_time += dt.timedelta(hours=days*hrs_per_day)
         
-    def _end_in_schedule(self, end_raw: dt.datetime):
-        if not self.days_open.contains(end_raw.weekday()):
-            return _round_up_to_week(end_raw, self.hrs_open, self.days_open)
-        cur_date = dt.datetime(end_raw.year, end_raw.month, end_raw.day)
-        cur_hrs = DateRange(cur_date + dt.timedelta(hours=self.hrs_open.minval),
-                            cur_date + dt.timedelta(hours=self.hrs_open.maxval))
-        if not cur_hrs.contains(end_raw):
-            return _round_up_to_day(end_raw, self.hrs_open, self.days_open)
-        return end_raw
-        
+        end_dt = rng.maxval
+        end_day = _floor_day(end_dt)
+        end_week = _floor_week(end_day)
+        if end_day != end_dt and self.days_open.contains(end_dt.weekday()):
+            max_day2_end = _floor_day(end_dt) + \
+                dt.timedelta(hours=self.hrs_open.maxval)
+            day2_start = _floor_day(end_dt) + dt.timedelta(hours=self.hrs_open.minval)
+            day2_end = max(day2_start, min(end_dt, max_day2_end))
+            rem_time += day2_end - day2_start
+        if end_week != end_day and self.days_open.contains(end_day.weekday()):
+            max_wk2_end = _floor_week(end_day) + \
+                dt.timedelta(days=self.days_open.maxval+1)
+            wk2_start = _floor_week(end_day) + dt.timedelta(days=self.days_open.minval)
+            wk2_end = max(wk2_start, min(end_day, max_wk2_end))
+            days = round((wk2_end - wk2_start).total_seconds() / (3600*24))
+            rem_time += dt.timedelta(hours=days*hrs_per_day)
+
+        weeks = round((end_week - start_week).total_seconds() / (3600*24*7))
+        weeks = max(weeks, 0)
+        rem_time += dt.timedelta(hours=weeks*hrs_per_wk)
+        return rem_time
+    
+    def _time_in_schedule(self, start: dt.datetime, cycle_time: dt.timedelta):
+        pass
+
     @property
     def end(self):
-        end_raw = self.date_rng.minval
-        if self._jobs:
-            end_raw = max(end_raw, self._jobs[-1].end)
-        return self._end_in_schedule(end_raw)
+        raise NotImplementedError()
     
     @property
     def rem_time(self):
-        rem_rng = DateRange(self.end, self.date_rng.maxval)
-        return _total_time_open(rem_rng, self.hrs_open, self.days_open)
+        raise NotImplementedError()
     
     @property
     def jobs(self):
@@ -159,27 +97,13 @@ class Schedule(SwmtBase, HasID[str],
         return list(map(lambda j: j.view(),
                         filter(lambda j: j.is_product, self._jobs)))
     
-    def can_insert_cycle(self, min_date, cycle_time, idx: int):
-        rng_min = max(min_date, self.date_rng.minval)
-        rng_max = self.date_rng.maxval
+    def can_add_cycle(self, min_date, cycle_time):
+        pass
 
-        jobs = self.prod_jobs
-        if idx < len(jobs):
-            if idx > 0 and jobs[idx-1].end > rng_min:
-                rng_min = self._end_in_schedule(jobs[idx-1].end)
-            if not jobs[idx].moveable:
-                rng_max = jobs[idx].start
-
-        if rng_max <= rng_min:
-            return False
-        
-        return _total_time_open(DateRange(rng_min, rng_max), self.hrs_open,
-                                self.days_open) + dt.timedelta(minutes=1) >= cycle_time
-
-    def can_insert_lots(self, lots, cycle_time, idx):
+    def can_add_lots(self, lots, cycle_time):
         raise NotImplementedError()
     
-    def insert_lots(self, lots, cycle_time, idx):
+    def add_lots(self, lots, cycle_time):
         raise NotImplementedError()
     
     def activate(self):

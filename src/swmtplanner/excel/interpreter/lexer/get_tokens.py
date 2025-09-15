@@ -115,6 +115,23 @@ def _next_number(f: CharStream, value: str, start: FilePos):
         f.backup()
     return TokType.NUMBER, value, start
 
+def _escaped_char(f: CharStream, start: FilePos):
+    c = f.read()
+
+    if len(c) == 0 or c == '\n':
+        if len(c) == 1:
+            f.backup()
+        raise _unexpected_err(f.get_pos(), c)
+    match c:
+        case 'n':
+            return '\n'
+        case 't':
+            return '\t'
+        case 'r':
+            return '\r'
+        case _:
+            return c
+
 def _next_string(f: CharStream, value: str, start: FilePos):
     c = f.read()
 
@@ -122,7 +139,9 @@ def _next_string(f: CharStream, value: str, start: FilePos):
         if len(c) == 1:
             f.backup()
         raise _unexpected_err(f.get_pos(), c)
-    if c == '"':
+    if c == '\\':
+        c = _escaped_char(f, start)
+    elif c == '"':
         return TokType.STRING, value+c, start
     return _next_string(f, value+c, start)
 

@@ -17,7 +17,7 @@ WORKBOOK = "PA plant orders against Lam demand 20250908.xlsx"
 dye_formulae:
     # This is always required, can be a file name or an absolute path to a file
     folder=$FOLDER
-    workbook="New XREF file.xlsx"
+    workbook=LamDemandPlanning.xlsx
     sheet=Xref # This is always required
     col_names="COLOR NAME", "COLOR NUMBER", "SHADE RATING"
 
@@ -25,10 +25,10 @@ dye_formulae:
 # which greige style they use, etc.)
 pa_fin_items:
     folder=$FOLDER
-    workbook="New XREF file.xlsx"
+    workbook=LamDemandPlanning.xlsx
     sheet=Xref
-    col_names="GREIGE ITEM", STYLE, Yield, "COLOR NAME", "COLOR NUMBER", "PA FIN ITEM", ...
-        $jets, "SHADE RATING"
+    col_names="GREIGE ITEM", STYLE, WD, Yield, STATUS, "COLOR NAME", "COLOR NUMBER", ...
+        "PA FIN ITEM", $jets, "SHADE RATING"
 
 greige_styles: # information about target lbs per greige style roll
     folder=$FOLDER
@@ -53,6 +53,14 @@ pa_inventory:
     workbook=$WORKBOOK
     sheet=1427
     col_names=Roll, Item, Quality, Pounds, ASSIGNED_ORDER
+    start_row=4
+
+pa_floor_mos:
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet=1427
+    col_names="Item\nType", Warehouse, Customer, Owner, Roll, Lot, Item, ...
+        Quality, "Nominal\nWidth", Quantity
     start_row=4
 
 adaptive_orders:

@@ -1,17 +1,16 @@
 #!/usr/bin/env python
 
-from enum import Enum
-from functools import total_ordering
+from enum import Enum, auto
 
-@total_ordering
 class Shade(Enum):
-    EMPTY = 0
-    HEAVYSTRIP = 1
-    STRIP = 2
-    SOLUTION = 3
-    LIGHT = 4
-    MEDIUM = 5
-    BLACK = 6
+    EMPTY = auto()
+    HEAVYSTRIP = auto()
+    STRIP = auto()
+    SOLUTION = auto()
+    LIGHT1 = auto()
+    LIGHT2 = auto()
+    MEDIUM = auto()
+    BLACK = auto()
 
     @classmethod
     def from_str(cls, val):
@@ -23,7 +22,8 @@ class Shade(Enum):
             case 'HEAVYSTRIP': return cls.HEAVYSTRIP
             case 'STRIP': return cls.STRIP
             case 'SOLUTION': return cls.SOLUTION
-            case 'LIGHT': return cls.LIGHT
+            case 'LIGHT1': return cls.LIGHT1
+            case 'LIGHT2': return cls.LIGHT2
             case 'MEDIUM': return cls.MEDIUM
             case 'BLACK': return cls.BLACK
             case _:
@@ -35,7 +35,8 @@ class Shade(Enum):
             msg = f'Cannot call Shade.from_int on type \'{type(val).__name__}\''
             raise TypeError(msg)
         match val:
-            case 1: return cls.LIGHT
+            case 0: return cls.LIGHT1
+            case 1: return cls.LIGHT2
             case 2: return cls.MEDIUM
             case 3: return cls.BLACK
             case 4: return cls.SOLUTION
@@ -44,8 +45,3 @@ class Shade(Enum):
             case 7: return cls.STRIP
             case _:
                 raise ValueError(f'Unknown shade value {val}')
-
-    def __lt__(self, other):
-        if self.__class__ is other.__class__:
-            return self.value < other.value
-        return NotImplemented

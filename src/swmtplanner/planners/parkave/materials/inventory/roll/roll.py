@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 
+from typing import NamedTuple
 from enum import Enum, auto
+import datetime as dt
 
 from swmtplanner.support import Quantity, SwmtBase, HasID, setter_like
 from swmtplanner.support.grouped import Data, DataView
 from swmtplanner.swmttypes.products import GreigeStyle
+from swmtplanner.swmttypes.materials import Status
 
 _CTR = 0
 
@@ -19,16 +22,23 @@ class GrgRollSize(Enum):
     PARTIAL = auto()
     ODD = auto()
 
-class GRollAlloc(SwmtBase, HasID[int], read_only=('id','roll_id','avail_date','weight')):
+class GRollAlloc(SwmtBase, HasID[int],
+                 read_only=('id','roll_id','status','avail_date','weight')):
     
-    def __init__(self, roll_id, avail_date, weight):
+    def __init__(self, roll_id, status, avail_date, weight):
         globals()['_CTR'] += 1
         SwmtBase.__init__(self, _id=globals()['_CTR'], _roll_id=roll_id,
-                          _avail_date=avail_date, _weight=weight)
+                        _status=status, _avail_date=avail_date, _weight=weight)
         
     @property
     def prefix(self):
         return 'GRollAlloc'
+    
+class PortLoad(NamedTuple):
+    rolls: tuple[GRollAlloc, ...]
+    status: Status
+    avail_date: dt.datetime
+    weight: Quantity
 
 class GrgRoll(Data[str], mut_in_group=False,
               read_only=('item','plant','status','received'),
@@ -75,7 +85,7 @@ class GrgRoll(Data[str], mut_in_group=False,
             raise ValueError(f'{lbs:.2f} lbs exceeds remaining roll weight ' + \
                              f'({max_lbs:.2g} lbs)')
         
-        ret = GRollAlloc(self.id, self.received, Quantity(lbs=lbs))
+        ret = GRollAlloc(self.id, self.status, self.received, Quantity(lbs=lbs))
         if snapshot is None:
             self._cur_wt -= ret.weight
             self._allocs.add(ret)
@@ -102,5 +112,6 @@ class GrgRoll(Data[str], mut_in_group=False,
         
         self._temp_allocs.clear()
 
-class GrgRollView(DataView[str], attrs=('item','plant','status','received','weight','size')):
+class GrgRollView(DataView[str], attrs=('item','plant','status','received',
+                                        'weight','size')):
     pass
