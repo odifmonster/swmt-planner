@@ -10,6 +10,13 @@ class DyeLot(SwmtBase, Lot[str, GreigeStyle, FabricItem],
              read_only=('id','rawmat','product','ports','status','received',
                         'cycle_time','fin_time'),
              priv=('start','view')):
+    @classmethod
+    def from_adaptive(cls, id: str, item: FabricItem, start: dt.datetime,
+                      end: dt.datetime) -> DyeLot: ...
+    @classmethod
+    def new_lot(cls, item: FabricItem, ports: list[PortLoad]) -> DyeLot: ...
+    @classmethod
+    def new_strip(cls, strip: FabricItem) -> DyeLot: ...
     def __init__(self, id: str, rawmat: GreigeStyle, product: FabricItem,
                  ports: list[PortLoad], status: Status, received: dt.datetime,
                  start: dt.datetime | None, cycle_time: dt.timedelta,

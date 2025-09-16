@@ -18,7 +18,14 @@ class DyeCycle(Job[GreigeStyle]):
     
     @property
     def is_product(self):
-        return self.shade not in (fabric.color.Shade.STRIP, fabric.color.Shade.HEAVYSTRIP)
+        is_strip = self.shade in (fabric.color.Shade.STRIP,
+                                  fabric.color.Shade.HEAVYSTRIP)
+        is_empty = self.shade == fabric.color.Shade.EMPTY and \
+            self.id[:5] == 'EMPTY'
+        return not (is_strip or is_empty)
+    
+    def copy_lots(self, start, cycle_time, moveable):
+        return DyeCycle(self._lots, start, moveable=moveable)
     
     def view(self):
         return DyeCycleView(self)

@@ -13,7 +13,9 @@ class Job[T](SwmtBase, HasID[str],
             globals()['_CTR'] += 1
             idx = globals()['_CTR']
 
-        job_id = ''.join([str(l.id) for l in lots]) + f'@{idx}'
+        job_id = ''.join([str(l.id) for l in lots])
+        if idx > 0:
+            job_id += f'@{idx}'
 
         SwmtBase.__init__(self, _id=job_id, _start=start, _end=start+cycle_time,
                           _cycle_time=cycle_time, _moveable=moveable,
@@ -29,6 +31,9 @@ class Job[T](SwmtBase, HasID[str],
     
     @property
     def is_product(self):
+        raise NotImplementedError()
+    
+    def copy_lots(self, start, cycle_time, moveable):
         raise NotImplementedError()
     
     def activate(self):

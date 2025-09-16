@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from functools import reduce
+import datetime as dt
 
 from swmtplanner.support import SwmtBase, Viewer, Quantity
 from swmtplanner.swmttypes.products import GreigeStyle, FabricItem
@@ -21,10 +22,24 @@ class DyeLot(SwmtBase, Lot[str, GreigeStyle, FabricItem],
              priv=('start','view')):
     
     @classmethod
+    def from_adaptive(cls, id, item, start, end):
+        return cls(id, item.greige, item, [], Status.ARRIVED,
+                   None, start, end - start, dt.timedelta(seconds=0))
+    
+    @classmethod
     def new_lot(cls, item, ports):
         globals()['_CTR'] += 1
         status = reduce(_reduce_status, map(lambda p: p.status, ports))
-        return cls(f'LOT{globals()['_CTR']:05}', item.greige, item, ports,)
+        received = max(map(lambda p: p.avail_date, ports))
+        return cls(f'LOT{globals()['_CTR']:05}', item.greige, item, ports, status,
+                   received, None, item.cycle_time, dt.timedelta(hours=16))
+    
+    @classmethod
+    def new_strip(cls, strip):
+        globals()['_CTR'] += 1
+        return cls(f'{strip.id}{globals()['_CTR']:05}', strip.greige,
+                   strip, [], Status.ARRIVED, dt.datetime.fromtimestamp(0),
+                   None, strip.cycle_time, dt.timedelta(0))
     
     def __init__(self, id, rawmat, product, ports, status, received,
                  start, cycle_time, fin_time):

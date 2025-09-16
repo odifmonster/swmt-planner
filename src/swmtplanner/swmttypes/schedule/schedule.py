@@ -20,7 +20,7 @@ def _ceil_week(date: dt.datetime):
 def _floor_week(date: dt.datetime):
     return date - dt.timedelta(days=date.weekday())
 
-class Schedule(SwmtBase, HasID[int]):
+class Schedule(SwmtBase, HasID[str]):
     
     def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
         super().__init_subclass__(
@@ -159,8 +159,18 @@ class Schedule(SwmtBase, HasID[int]):
     def can_add_lots(self, lots, cycle_time):
         raise NotImplementedError()
     
-    def add_lots(self, lots, cycle_time):
+    def add_lots(self, lots, cycle_time, idx = None):
         raise NotImplementedError()
+    
+    def add_job(self, job, force = False):
+        if not force and job.start - dt.timedelta(minutes=1) > self.end:
+            job_start = job.start.strftime('%m-%d %H:%M:%S')
+            sched_end = self.end.strftime('%m-%d %H:%M:%S')
+            msg = f'Cannot add job with start time {job_start} to schedule'
+            msg += f' with end time {sched_end}'
+            raise ValueError(msg)
+        
+        self._jobs.append(job)
     
     def activate(self):
         for job in self._jobs:
