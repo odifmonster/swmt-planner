@@ -54,4 +54,4 @@ class JobView[T](Viewer[Job[T]]):
         super().__init_subclass__(dunders=('hash','eq','repr')+dunders,
                                   attrs=('prefix','id','start','end','cycle_time','rawmat',
                                          'moveable','lots','is_product')+attrs,
-                                  funcs=funcs, read_only=read_only, priv=priv)
+                                  funcs=('copy_lots')+funcs, read_only=read_only, priv=priv)

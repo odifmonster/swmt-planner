@@ -1,0 +1,100 @@
+#!/usr/bin/env python
+
+import datetime as dt
+
+from swmtplanner.support import SwmtBase, HasID, FloatRange
+from .schedule import JetSched, DyeCycle
+
+class Jet(SwmtBase, HasID[str],
+          read_only=('prefix','id','n_ports','load_rng',
+                     'date_rng','days_open'),
+          priv=('sched',)):
+    
+    def __init__(self, id, n_ports, load_rng, date_rng,
+                 days_open = FloatRange(0, 5)):
+        init_sched = JetSched(id, n_ports, date_rng, days_open=days_open)
+        SwmtBase.__init__(self, _prefix='Jet', _id=id, _n_ports=n_ports,
+                          _load_rng=load_rng, _date_rng=date_rng,
+                          _days_open=days_open, _sched=init_sched)
+    
+    def _get_next_item(self, frozen, moveable, new, newidx, curidx, cursched):
+        if curidx == newidx:
+            return new
+        if not frozen:
+            return moveable.pop(0)
+        if not moveable:
+            return frozen.pop(0)
+        
+        if frozen[0].start <= moveable[0].start or \
+            cursched.expected_end(moveable[0].lots) > frozen[0].min_date:
+            return frozen.pop(0)
+        return moveable.pop(0)
+        
+    @property
+    def jobs(self):
+        return self._sched.jobs
+    
+    @property
+    def prod_jobs(self):
+        return self._sched.prod_jobs
+    
+    def get_start_idx(self, due_date: dt.datetime):
+        pjobs = self.prod_jobs
+        i = len(pjobs)
+        while i > 0:
+            prev_end = self._sched.nearest_time_open(pjobs[i-1].end)
+            if prev_end + dt.timedelta(weeks=3) < due_date:
+                break
+            i -= 1
+        return i
+    
+    def try_insert(self, lots, idx: int):
+        pjobs = self.prod_jobs
+        frozen = list(filter(lambda j: not j.moveable, pjobs))
+        moveable = list(filter(lambda j: j.moveable, pjobs))
+
+        curidx = 0
+        newsched = JetSched(self.id, self.n_ports, self.date_rng, days_open=self.days_open)
+        newjobs = []
+        kicked = []
+
+        while moveable and frozen:
+            nxt_item = self._get_next_item(frozen, moveable, lots, idx,
+                                           curidx, newsched)
+            if type(nxt_item) is list:
+                if not newsched.can_add_lots(lots):
+                    return None, [], []
+                newjobs += newsched.add_lots(lots, dt.timedelta(), idx=idx)
+            elif not nxt_item.moveable:
+                if not newsched.can_add_lots(nxt_item.lots):
+                    return None, [], []
+                newsched.add_job(nxt_item, force=True)
+            else:
+                if not newsched.can_add_lots(nxt_item.lots):
+                    kicked.append(nxt_item)
+                else:
+                    prev_lots = newsched.get_prev_lots(nxt_item.lots)
+                    start = newsched.end
+                    for l in prev_lots:
+                        newjob = DyeCycle([l], start, idx=-1)
+                        newjobs.append(newjob)
+                        newsched.add_job(newjob, force=True)
+                        start = newsched.end
+                    newjob = nxt_item.copy_lots(start, nxt_item.cycle_time, True)
+                    newjobs.append(newjob)
+            
+            curidx += 1
+
+        if curidx == idx:
+            if not newsched.can_add_lots(lots):
+                return None, [], []
+            newjobs += newsched.add_lots(lots, dt.timedelta(), idx=idx)
+        
+        return newsched, newjobs, kicked
+    
+    def set_sched(self, newsched: JetSched):
+        self._sched.deactivate()
+        temp = self._sched
+        newsched.activate()
+        self._sched = newsched
+        return temp

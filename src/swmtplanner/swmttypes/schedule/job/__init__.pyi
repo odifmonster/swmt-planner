@@ -95,7 +95,7 @@ class JobView[T: _Product](Viewer[Job[T]]):
             'is_product' are added automatically.
           funcs:
             Function names to be passed to the Viewer subclass
-            initializer.
+            initializer. 'copy_lots' is added automatically.
           read_only:
             Names to be passed to the Viewer subclass initializer.
           priv:
@@ -141,3 +141,5 @@ class JobView[T: _Product](Viewer[Job[T]]):
     def is_product(self) -> bool:
         """Whether this job is producing an item (as opposed to cleaning)."""
         ...
+    def copy_lots(self, start: dt.datetime, cycle_time: dt.timedelta,
+                  moveable: bool) -> Job[T]: ...

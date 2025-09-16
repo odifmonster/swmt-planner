@@ -24,7 +24,7 @@ class DyeLot(SwmtBase, Lot[str, GreigeStyle, FabricItem],
     @classmethod
     def from_adaptive(cls, id, item, start, end):
         return cls(id, item.greige, item, [], Status.ARRIVED,
-                   None, start, end - start, dt.timedelta(seconds=0))
+                   start, None, end - start, dt.timedelta(seconds=0))
     
     @classmethod
     def new_lot(cls, item, ports):

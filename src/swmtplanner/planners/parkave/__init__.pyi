@@ -1,3 +1,3 @@
-from . import materials
+from . import materials, jet
 
-__all__ = ['materials']
+__all__ = ['materials', 'jet']
