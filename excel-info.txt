@@ -2,6 +2,8 @@
 
 # Any text following a pound sign is ignored
 # End a line in ... if you want the next line to be included as part of the previous one
+# Names with spaces and special characters must be wrapped in quotes
+# All file paths must be wrapped in quotes
 
 # Values assigned outside of info blocks can be re-used elsewhere, with a preceding
 # '$' to mark it as a reference and not a regular name
@@ -15,7 +17,7 @@ WORKBOOK = "PA plant orders against Lam demand 20250915.xlsx"
     "FAB req'd WK4", "FAB req'd WK5"
 
 dye_formulae:
-    # This is always required, can be a file name or an absolute path to a file
+    # This is always required, must be an absolute path to a file
     folder=$FOLDER
     workbook=LamDemandPlanning.xlsx
     sheet=Xref # This is always required
@@ -68,7 +70,7 @@ adaptive_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
     sheet=Adaptive
-    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, Qty
+    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, Width, Qty
 
 si_release:
     folder=$FOLDER
