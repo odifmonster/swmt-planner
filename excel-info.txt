@@ -99,6 +99,6 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 9-15"
+    sheet="Fab shortage 9-17"
     col_names="PA Item", "Ply1 Item", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"

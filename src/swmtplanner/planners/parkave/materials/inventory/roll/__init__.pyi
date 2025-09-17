@@ -21,13 +21,15 @@ class GrgRollSize(Enum):
     ODD = ...
 
 class GRollAlloc(SwmtBase, HasID[int],
-                 read_only=('id','roll_id','status','avail_date','weight')):
+                 read_only=('id','roll_id','status','plant','avail_date','weight')):
     def __init__(self, roll_id: str, status: Status, avail_date: dt.datetime,
                  weight: Quantity) -> None: ...
     @property
     def roll_id(self) -> str: ...
     @property
     def status(self) -> Status: ...
+    @property
+    def plant(self) -> KnitPlant: ...
     @property
     def avail_date(self) -> str: ...
     @property
@@ -36,6 +38,7 @@ class GRollAlloc(SwmtBase, HasID[int],
 class PortLoad(NamedTuple):
     rolls: tuple[GRollAlloc, ...]
     status: Status
+    plant: KnitPlant
     avail_date: dt.datetime
     weight: Quantity
 

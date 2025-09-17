@@ -1,12 +1,14 @@
 from .roll import *
 
-from typing import Generator, overload
+from typing import Generator, NamedTuple, overload
+import datetime as dt
+from swmtplanner.support import FloatRange
 from swmtplanner.support.grouped import Atom, AtomView, Grouped, GroupedView
 from swmtplanner.swmttypes.products import GreigeStyle
-from swmtplanner.swmttypes.materials import Status
+from swmtplanner.swmttypes.materials import Status, Snapshot
 
 __all__ = ['KnitPlant', 'GrgRollSize', 'GRollAlloc', 'PortLoad', 'GrgRoll',
-           'GrgRollView', 'PAInv']
+           'GrgRollView', 'PAInv', 'SearchParams']
 
 class _RollAtom(Atom[str]):
     def __getitem__(self, key: tuple[()]) -> _RollAtomView: ...
@@ -137,6 +139,14 @@ class _StatusGroupView(GroupedView[str, KnitPlant]):
     def iterkeys(self) -> Generator[tuple[KnitPlant, GreigeStyle, GrgRollSize, str]]: ...
     def itervalues(self) -> Generator[GrgRollView]: ...
 
+class SearchParams(NamedTuple):
+    n_ports: int
+    create: bool = False
+    create_date: dt.datetime | None = None
+    new_only: bool = False
+    max_date: dt.datetime | None = None
+    plt: KnitPlant = KnitPlant.EITHER
+
 class PAInv(Grouped[str, Status]):
     def __init__(self) -> None:
         """Initialize a new Park Ave raw materials inventory."""
@@ -158,6 +168,14 @@ class PAInv(Grouped[str, Status]):
     def remove(self, dview: GrgRollView, remkey: bool = False) -> GrgRoll: ...
     def iterkeys(self) -> Generator[tuple[Status, KnitPlant, GreigeStyle, GrgRollSize, str]]: ...
     def itervalues(self) -> Generator[GrgRollView]: ...
+    def add_all_pieces(self, snapshot: Snapshot | None, loads: list[PortLoad]) \
+        -> None: ...
+    def get_comb_loads(self, snapshot: Snapshot | None, greige: GreigeStyle,
+                       wt_rng: FloatRange, params: SearchParams) \
+                       -> tuple[list[PortLoad], int]: ...
+    def get_port_loads(self, snapshot: Snapshot | None, greige: GreigeStyle,
+                       wt_rng: FloatRange, params: SearchParams) \
+                       -> list[PortLoad]: ...
     def view(self) -> _PAInvView: ...
 
 class _PAInvView(GroupedView[str, Status]):

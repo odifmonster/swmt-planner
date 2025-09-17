@@ -23,12 +23,13 @@ class GrgRollSize(Enum):
     ODD = auto()
 
 class GRollAlloc(SwmtBase, HasID[int],
-                 read_only=('id','roll_id','status','avail_date','weight')):
+                 read_only=('id','roll_id','status','plant','avail_date','weight')):
     
-    def __init__(self, roll_id, status, avail_date, weight):
+    def __init__(self, roll_id, status, plant, avail_date, weight):
         globals()['_CTR'] += 1
         SwmtBase.__init__(self, _id=globals()['_CTR'], _roll_id=roll_id,
-                        _status=status, _avail_date=avail_date, _weight=weight)
+                        _status=status, _plant=plant, _avail_date=avail_date,
+                        _weight=weight)
         
     @property
     def prefix(self):
@@ -37,6 +38,7 @@ class GRollAlloc(SwmtBase, HasID[int],
 class PortLoad(NamedTuple):
     rolls: tuple[GRollAlloc, ...]
     status: Status
+    plant: KnitPlant
     avail_date: dt.datetime
     weight: Quantity
 
@@ -85,7 +87,7 @@ class GrgRoll(Data[str], mut_in_group=False,
             raise ValueError(f'{lbs:.2f} lbs exceeds remaining roll weight ' + \
                              f'({max_lbs:.2g} lbs)')
         
-        ret = GRollAlloc(self.id, self.status, self.received, Quantity(lbs=lbs))
+        ret = GRollAlloc(self.id, self.status, self.plant, self.received, Quantity(lbs=lbs))
         if snapshot is None:
             self._cur_wt -= ret.weight
             self._allocs.add(ret)

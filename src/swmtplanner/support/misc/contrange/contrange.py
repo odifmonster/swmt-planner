@@ -3,6 +3,9 @@
 from typing import NamedTuple
 import datetime as dt
 
+def min_float_rng(rng1, rng2):
+    return FloatRange(max(rng1.minval, rng2.minval), min(rng1.maxval, rng2.maxval))
+
 class ContRange[T](NamedTuple):
     minval: T
     maxval: T

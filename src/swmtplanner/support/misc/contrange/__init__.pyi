@@ -1,7 +1,9 @@
 from typing import NamedTuple, Protocol
 import datetime as dt
 
-__all__ = ['ContRange', 'FloatRange', 'DateRange']
+__all__ = ['min_float_rng', 'ContRange', 'FloatRange', 'DateRange']
+
+def min_float_rng(rng1: FloatRange, rng2: FloatRange) -> FloatRange: ...
 
 class _SupportsComp(Protocol):
     def __eq__(self, other: '_SupportsComp') -> bool: ...
