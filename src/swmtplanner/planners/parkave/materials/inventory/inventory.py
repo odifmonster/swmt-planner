@@ -9,9 +9,6 @@ from swmtplanner.support.grouped import Grouped
 from swmtplanner.swmttypes.materials import Status
 from .roll import PortLoad, KnitPlant, GrgRollSize, GrgRoll
 
-from swmtplanner.swmttypes.products import GreigeStyle
-from .roll import GrgRoll, GrgRollView
-
 _CTR = 0
 
 def _reduce_status(prev: Status, cur: Status):
@@ -39,9 +36,8 @@ class PAInv(Grouped[str, Status]):
     def __init__(self):
         super().__init__('status','plant','item','size','id')
     
-    def _all_matching(self, greige: GreigeStyle, sizes: list[GrgRollSize],
-                      params: SearchParams):
-        views: set[GrgRollView] = set()
+    def _all_matching(self, greige, sizes: list[GrgRollSize], params: SearchParams):
+        views = set()
 
         for status in self:
             if params.new_only and status == Status.ARRIVED: continue
@@ -55,7 +51,7 @@ class PAInv(Grouped[str, Status]):
         
         return views
     
-    def _least_removed(self, roll_lbs: float, wt_rng: FloatRange):
+    def _least_removed(self, roll_lbs, wt_rng: FloatRange):
         min_sub = math.inf
         min_div = -1
 
@@ -86,7 +82,7 @@ class PAInv(Grouped[str, Status]):
             return None
         return roll_lbs - scaled_rng.maxval
 
-    def _comb_loads_helper(self, snapshot, greige: GreigeStyle, wt_rng: FloatRange,
+    def _comb_loads_helper(self, snapshot, greige, wt_rng: FloatRange,
                            params: SearchParams):
         odd_rviews = list(self._all_matching(greige,
                                              [GrgRollSize.PARTIAL, GrgRollSize.ODD],
@@ -130,7 +126,7 @@ class PAInv(Grouped[str, Status]):
                 roll.deallocate(piece, snapshot=snapshot)
                 self.add(roll)
 
-    def get_comb_loads(self, snapshot, greige: GreigeStyle, wt_rng: FloatRange,
+    def get_comb_loads(self, snapshot, greige, wt_rng: FloatRange,
                        params: SearchParams):
         loads: list[PortLoad] = []
         rem_ports = params.n_ports
@@ -154,14 +150,21 @@ class PAInv(Grouped[str, Status]):
         
         return loads, rem_ports
     
-    def get_port_loads(self, snapshot, greige: GreigeStyle, wt_rng: FloatRange,
+    def get_port_loads(self, snapshot, greige, wt_rng: FloatRange,
                        params: SearchParams):
+        for rview in self.itervalues():
+            roll: GrgRoll = self.remove(rview)
+            roll.snapshot = snapshot
+            self.add(roll)
+        
         loads: list[PortLoad] = []
         rem_ports = params.n_ports
         plt = params.plt
 
-        rviews = self._all_matching(greige, GrgRollSize.__members__.values(),
-                                    params)
+        rviews = list(self._all_matching(greige, [GrgRollSize.TWO_PORT,
+                                                  GrgRollSize.ONE_PORT],
+                                         params))
+        rviews += list(self._all_matching(greige, [GrgRollSize.ODD], params))
         for rview in rviews:
             to_sub, div = self._least_removed(rview.weight.lbs, wt_rng)
             if to_sub > 20 or div > rem_ports: continue
@@ -200,17 +203,19 @@ class PAInv(Grouped[str, Status]):
         while rem_ports > 0:
             new_lbs = greige.roll_rng.average()
             globals()['_CTR'] += 1
+            roll_ports = round(new_lbs / greige.port_rng.average())
+            if roll_ports > rem_ports:
+                new_lbs = new_lbs * (rem_ports / roll_ports)
+                roll_ports = rem_ports
+
             new_roll = GrgRoll(f'NEW{globals()['_CTR']:06}', greige,
                                KnitPlant.EITHER, Status.NEW, params.create_date,
                                new_lbs)
             
-            roll_ports = round(new_lbs / wt_rng.average())
-            cur_ports = min(roll_ports, rem_ports)
-            alloc_wt = (new_lbs / roll_ports) * cur_ports
-            piece = new_roll.allocate(alloc_wt, snapshot=snapshot)
+            piece = new_roll.allocate(new_lbs, snapshot=snapshot)
             self.add(new_roll)
             loads.append(PortLoad((piece,), Status.NEW, KnitPlant.EITHER,
-                                  params.create_date, Quantity(lbs=alloc_wt)))
-            rem_ports -= cur_ports
+                                  params.create_date, Quantity(lbs=new_lbs)))
+            rem_ports -= roll_ports
         
         return loads
