@@ -1,0 +1,59 @@
+# EDIT DATA SOURCE INFO HERE
+
+# Any text following a pound sign is ignored
+# End a line in ... if you want the next line to be included as part of the previous one
+# Names with spaces and special characters must be wrapped in quotes
+# All file paths must be wrapped in quotes
+
+# All variable names must be referenced with a '$' to be distinguished from
+# a string name
+
+# Lists can be "unpacked" using a *
+
+FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+WORKBOOK = "PA plant orders against Lam demand 20250915.xlsx"
+jets = [1, 2, 3, 4, 7, 8, 9, 10]
+
+[Grouped] dyes:
+    # A grouped block requires a source, which can be externally defined or
+    # defined directly in the block
+    [ExcelFile] source:
+        folder=$FOLDER
+        workbook=LamDemandPlanning.xlsx
+        sheet=Xref
+    by="COLOR NUMBER"
+    id="COLOR NUMBER"
+    name="COLOR NAME"
+    shade="SHADE RATING"
+
+[ExcelFile] fab_items:
+    folder=$FOLDER
+    workbook=LamDemandPlanning.xlsx
+    sheet=Xref
+    col_names=["GREIGE ITEM", STYLE, WD, Yield, STATUS, "COLOR NAME", ...
+        "COLOR NUMBER", "PA FIN ITEM", *Map($jets, i -> Concat("JET ", $i)), ...
+        "SHADE RATING"]
+
+[ExcelFile] greige_styles: # information about target lbs per greige style roll
+    folder=$FOLDER
+    workbook=LamDemandPlanning.xlsx
+    sheet="Griege Sizes"
+
+[ExcelFile] greige_translation:
+    folder=$FOLDER
+    workbook=LamDemandPlanning.xlsx
+    sheet="Greige Style Translation"
+    subst_names=inventory, plan # only use this if the workbook has no column names
+    col_ranges="A:B" # required if providing column names
+    start_row=2 # the first row of data to start reading
+
+[ExcelFile] jet_info:
+    folder=$FOLDER
+    workbook=master.xlsx
+    sheet=jets
+
+[ExcelFile] pa_inventory:
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet=1427
+    start_row=4
