@@ -296,7 +296,7 @@ def _load_pa_floor_mos():
     fpath, pdargs = INFO_MAP['pa_floor_mos']
     mo_df: pd.DataFrame = pd.read_excel(fpath, **pdargs)
     mo_df = df_cols_as_str(mo_df, 'Item\nType', 'Warehouse', 'Customer',
-                           'Roll', 'Lot', 'Item', 'Quality', 'Owner',
+                           'Roll', 'Lot', 'Item', 'Quality', 'Grade', 'Owner',
                            'DEFECT1', 'DEF1_REASON', 'DEFECT2', 'DEF2_REASON',
                            'DEFECT3', 'DEF3_REASON', 'MARKET_SEGMENT')
     
@@ -305,7 +305,7 @@ def _load_pa_floor_mos():
     slit = mo_df['Warehouse'] == 'BS'
     rework = mo_df['Warehouse'] == 'RW'
     mo_df = mo_df[insp | frame | slit | rework]
-    mo_df = mo_df[mo_df['Lot'] != '0']
+    mo_df = mo_df[(mo_df['Lot'] != '0') & (mo_df['Grade'] != 'LOC')]
 
     mo_df['Item2'] = mo_df[['Nominal\nWidth', 'Item']].agg(_get_alt_item1, axis=1).astype('string')
     mo_df['Style'] = mo_df['Item'].apply(_get_style).astype('string')
@@ -472,7 +472,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     orders_df = df_cols_as_str(orders_df, 'item')
 
     first = lambda srs: list(srs)[0]
-    mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')]
+    mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')
+                  & (mo_df['Grade'] != 'REJ')]
     mo_grp_df = mo_df.groupby(['Lot', 'Nominal\nWidth']).agg(
         Process=pd.NamedAgg('Process', first),
         Item=pd.NamedAgg('Item', first),
