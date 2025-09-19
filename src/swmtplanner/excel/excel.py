@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import typer, pandas as pd, re, math, datetime as dt
+import typer, pandas as pd, re, math, datetime as dt, os
 from pathlib import Path
 from typing import Annotated
 from enum import Enum
@@ -555,18 +555,27 @@ class _ReportName(str, Enum):
 _REPORT_HELP = 'Name of the report to generate'
 _ReportNameAnno = Annotated[_ReportName,
                             typer.Argument(help=_REPORT_HELP)]
-_RPRT_OUT_HELP = 'Path to the file to write the report to'
+_RPRT_OUT_HELP = 'Path to the folder to write the report to'
 _ReportOutAnno = Annotated[Path,
                            typer.Argument(help=_RPRT_OUT_HELP,
-                                          writable=True)]
+                                          dir_okay=True,
+                                          file_okay=False,
+                                          exists=True)]
 _START_HELP = 'Start date and time of 0th week of demand ' + \
     '(used to generate priority mos report)'
 _StartAnno = Annotated[dt.datetime,
                        typer.Option(help=_START_HELP)]
 def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
-                    outpath: _ReportOutAnno, start: _StartAnno = dt.datetime.now()):
+                    outdir: _ReportOutAnno, start: _StartAnno = dt.datetime.now()):
     load_info_map(infopath)
     mo_df = _load_pa_floor_mos()
+    today = dt.date.today().strftime('%Y%m%d')
+    fname = f'{name.name}_{today}.xlsx'
+    i = 1
+    while os.path.exists(os.path.join(outdir, fname)):
+        i += 1
+        fname = f'{name.name}_{today}_{i}.xlsx'
+    outpath = os.path.join(outdir, fname)
     writer = pd.ExcelWriter(outpath, date_format='MM/DD')
     match name:
         case _ReportName.pa_floor_status:
