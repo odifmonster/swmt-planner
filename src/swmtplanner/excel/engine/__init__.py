@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from . import file, lexer
+from . import file, lexer, parser
 
-__all__ = ['file', 'lexer']
+__all__ = ['file', 'lexer', 'parser']

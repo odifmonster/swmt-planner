@@ -6,7 +6,7 @@
 # All file paths must be wrapped in quotes
 
 # All variable names must be referenced with a '$' to be distinguished from
-# a string name
+# a column name.
 
 # Lists can be "unpacked" using a *
 
@@ -22,9 +22,8 @@ jets = [1, 2, 3, 4, 7, 8, 9, 10]
         workbook=LamDemandPlanning.xlsx
         sheet=Xref
     by="COLOR NUMBER"
-    id="COLOR NUMBER"
-    name="COLOR NAME"
-    shade="SHADE RATING"
+    name=First("COLOR NAME")
+    shade=First("SHADE RATING")
 
 [ExcelFile] fab_items:
     folder=$FOLDER
@@ -43,7 +42,7 @@ jets = [1, 2, 3, 4, 7, 8, 9, 10]
     folder=$FOLDER
     workbook=LamDemandPlanning.xlsx
     sheet="Greige Style Translation"
-    subst_names=inventory, plan # only use this if the workbook has no column names
+    subst_names=[inventory, plan] # only use this if the workbook has no column names
     col_ranges="A:B" # required if providing column names
     start_row=2 # the first row of data to start reading
 
@@ -57,3 +56,27 @@ jets = [1, 2, 3, 4, 7, 8, 9, 10]
     workbook=$WORKBOOK
     sheet=1427
     start_row=4
+
+[PAGreigeInv] pa_grg_inv:
+    current=$pa_inventory
+    item=Greige
+    si_daily="Expected SI daily"
+    wv_weekly="Expected WV 9/16"
+    [ExcelFile] future:
+        folder=$FOLDER
+        workbook=$WORKBOOK
+        sheet="Greige requirements"
+
+[PAReqs] pa_reqs:
+    [ExcelFile] source:
+        folder=$FOLDER
+        workbook=$WORKBOOK
+        sheet="Fab shortage 9-17"
+    item="PA Item"
+    fin_qty="PA Fin"
+    in_progress=[Inspection, Frame, "Dye Orders"]
+    overdue="FAB req'd past due"
+    weeks=0 to 5
+    demand=Map($pa_reqs.weeks, i -> Concat("Fab req'd WK", $i))
+    ship_day=Shipday
+    lam_day="Lam Day"

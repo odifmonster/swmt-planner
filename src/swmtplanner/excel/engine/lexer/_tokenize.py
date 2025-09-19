@@ -5,7 +5,7 @@ from .tokens import TokType, Token
 
 REGULAR, SKIP_NL, SKIP_IND = 0, 1, 2
 
-def _unexpected_err(f: File, c: str):
+def _unexpected_char(f: File, c: str):
     pos = f.tell()
     msg = f'Line {pos.line} at column {pos.column}: Unexpected '
     if len(c) == 0:
@@ -14,6 +14,11 @@ def _unexpected_err(f: File, c: str):
         msg += 'end of line'
     else:
         msg += f'character {repr(c)}'
+    return SyntaxError(msg)
+
+def _unexpected_tok(tok: Token):
+    msg = f'Line {tok.start.line} at column {tok.start.column}: '
+    msg += f'Unexpected {tok.kind.name.lower()} token ({repr(tok.value)})'
     return SyntaxError(msg)
 
 def _is_alpha(c: str):
@@ -57,14 +62,14 @@ def _next_float(f: File, value: str, at_start = False):
     if c == '.':
         if at_start:
             f.backup()
-            raise _unexpected_err(f, c)
+            raise _unexpected_char(f, c)
         return _next_ext(f, value+c, at_start=True)
     if _is_alpha(c):
         return _next_name(f, value+c, kind=TokType.STRING)
     if len(c) == 1:
         f.backup()
     if at_start:
-        raise _unexpected_err(f, c)
+        raise _unexpected_char(f, c)
     return TokType.FLOAT, value
 
 def _next_dots(f: File, value: str):
@@ -73,7 +78,7 @@ def _next_dots(f: File, value: str):
         return TokType.ELLIPSIS, value+c
     if len(c) == 1:
         f.backup()
-    raise _unexpected_err(f, c)
+    raise _unexpected_char(f, c)
 
 def _next_dot(f: File, value: str):
     c = f.read()
@@ -92,7 +97,7 @@ def _next_ref(f: File, value: str):
     if len(c) == 1:
         f.backup()
     if len(value) == 1:
-        raise _unexpected_err(f, c)
+        raise _unexpected_char(f, c)
     return TokType.REF, value
 
 def _escaped_char(f: File):
@@ -100,7 +105,7 @@ def _escaped_char(f: File):
     if len(c) == 0 or c in ('\n', '\t', '\r'):
         if len(c) == 1:
             f.backup()
-        raise _unexpected_err(f, c)
+        raise _unexpected_char(f, c)
     if c in ('n', 't', 'r'):
         match c:
             case 'n': return '\n'
@@ -113,7 +118,7 @@ def _next_string(f: File, value: str):
     if len(c) == 0 or c == '\n':
         if len(c) == 1:
             f.backup()
-        raise _unexpected_err(f, c)
+        raise _unexpected_char(f, c)
     if c == '"':
         return TokType.STRING, value+c
     if c == '\\':
@@ -127,12 +132,12 @@ def _next_ext(f: File, value: str, at_start = False):
     if c == '.':
         if at_start:
             f.backup()
-            raise _unexpected_err(f, c)
+            raise _unexpected_char(f, c)
         return _next_ext(f, value+c, at_start=True)
     if len(c) == 1:
         f.backup()
     if at_start:
-        raise _unexpected_err(f, c)
+        raise _unexpected_char(f, c)
     return TokType.STRING, value
 
 def _next_name(f: File, value: str, kind: TokType = TokType.NAME):
@@ -147,7 +152,7 @@ def _next_name(f: File, value: str, kind: TokType = TokType.NAME):
 
 def _next_int(f: File, value: str):
     c = f.read()
-    if _is_num(c):
+    if _is_num(c) and value != '0':
         return _next_int(f, value+c)
     if c == '.':
         return _next_float(f, value+c)
@@ -181,8 +186,6 @@ def _raw_tokens(f: File):
         
         if c in tok_map:
             kind, value = tok_map[c], c
-        elif c == '0':
-            kind, value = _next_name(f, c, kind=TokType.STRING)
         elif _is_alpha(c):
             kind, value = _next_name(f, c)
         elif _is_num(c):
@@ -207,7 +210,7 @@ def _raw_tokens(f: File):
                     kind, value = _next_string(f, c)
                 case _:
                     f.backup()
-                    raise _unexpected_err(f, c)
+                    raise _unexpected_char(f, c)
         
         if kind == TokType.NAME and value in kw_map:
             kind = kw_map[value]
@@ -231,25 +234,32 @@ def tokenize(f: File):
         nxt_state = state
 
         if cur.kind == TokType.END:
+            while len(indentation) > 1:
+                indentation.pop()
+                yield Token(TokType.DEDENT, '', cur.start)
             yield cur
             return
         
-        if cur.kind == TokType.ELLIPSIS:
-            if state == REGULAR:
-                nxt_state = SKIP_NL
-            else:
-                msg = f'Line {cur.start.line} at column {cur.start.column}'
-                msg += f': Unexpected {cur.kind.name.lower()} token '
-                msg += f'({repr(cur.value)})'
-                raise SyntaxError(msg)
-        elif cur.kind == TokType.NEWLINE and state == SKIP_NL:
-            state = SKIP_IND
-            continue
-        elif state == SKIP_IND:
+        if state == SKIP_IND:
+            # print(cur)
             nxt_state = REGULAR
             if cur.kind == TokType.RAW_INDENT:
                 state = nxt_state
                 continue
+            if cur.kind == TokType.ELLIPSIS:
+                raise _unexpected_tok(cur)
+        elif state == SKIP_NL:
+            # print(cur)
+            if cur.kind != TokType.NEWLINE:
+                raise _unexpected_tok(cur)
+            state = SKIP_IND
+            continue
+
+        if cur.kind == TokType.ELLIPSIS:
+            if state == REGULAR:
+                state = SKIP_NL
+                continue
+            raise _unexpected_tok(cur)
         
         if cur.kind == TokType.RAW_INDENT:
             cur_ind = len(cur.value)
@@ -270,3 +280,5 @@ def tokenize(f: File):
                     raise SyntaxError(msg)
         else:
             yield cur
+
+        state = nxt_state
