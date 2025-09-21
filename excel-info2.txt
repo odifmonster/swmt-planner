@@ -10,6 +10,8 @@
 
 # Lists can be "unpacked" using a *
 
+use format_item_width from info_help
+
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 WORKBOOK = "PA plant orders against Lam demand 20250915.xlsx"
 jets = [1, 2, 3, 4, 7, 8, 9, 10]
@@ -56,6 +58,25 @@ jets = [1, 2, 3, 4, 7, 8, 9, 10]
     workbook=$WORKBOOK
     sheet=1427
     start_row=4
+
+[PASched] pa_sched:
+    [ExcelFile] adaptive:
+        folder=$FOLDER
+        workbook=$WORKBOOK
+        sheet=Adaptive
+    [ExcelFile] pa_714:
+        folder=$FOLDER
+        workbook=$WORKBOOK
+        sheet=714
+    [Table] wip_to_fin:
+        [ExcelFile] source:
+            folder=$FOLDER
+            workbook=$WORKBOOK
+            sheet=Xref
+            col_names=[STYLE, WD, "Wide width conversion", "COLOR NUMBER"]
+        fin_item=Concat(STYLE, "-", "COLOR NUMBER", "-", format_item_width(WD))
+        wip_item1=Concat(STYLE, "-", "COLOR NUMBER", "-", format_item_width(WD*"Wide width conversion"))
+        wip_item2=Concat(STYLE, "-", "COLOR NUMBER", "-", format_item_width(WD*("Wide width conversion"+1)))
 
 [PAGreigeInv] pa_grg_inv:
     current=$pa_inventory
