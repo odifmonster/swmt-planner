@@ -1,6 +1,6 @@
 from .roll import *
 
-from typing import Generator, NamedTuple, overload
+from typing import Generator, NamedTuple, TypedDict, Required, Unpack, overload
 import datetime as dt
 from swmtplanner.support import FloatRange
 from swmtplanner.support.grouped import Atom, AtomView, Grouped, GroupedView
@@ -140,12 +140,28 @@ class _StatusGroupView(GroupedView[str, KnitPlant]):
     def itervalues(self) -> Generator[GrgRollView]: ...
 
 class SearchParams(NamedTuple):
+    snapshot: Snapshot | None
+    greige: GreigeStyle
+    wt_rng: FloatRange
     n_ports: int
+    split_date: dt.datetime
     create: bool = False
     create_date: dt.datetime | None = None
     new_only: bool = False
     max_date: dt.datetime | None = None
     plt: KnitPlant = KnitPlant.EITHER
+
+class _SearchKWArgs(TypedDict, total=False):
+    snapshot: Required[Snapshot | None]
+    greige: Required[GreigeStyle]
+    wt_rng: Required[FloatRange]
+    n_ports: Required[int]
+    split_date: Required[dt.datetime]
+    create: bool
+    create_date: dt.datetime | None
+    new_only: bool
+    max_date: dt.datetime | None
+    plt: KnitPlant
 
 class PAInv(Grouped[str, Status]):
     def __init__(self) -> None:
@@ -170,12 +186,8 @@ class PAInv(Grouped[str, Status]):
     def itervalues(self) -> Generator[GrgRollView]: ...
     def add_all_pieces(self, snapshot: Snapshot | None, loads: list[PortLoad]) \
         -> None: ...
-    def get_comb_loads(self, snapshot: Snapshot | None, greige: GreigeStyle,
-                       wt_rng: FloatRange, params: SearchParams) \
-                       -> tuple[list[PortLoad], int]: ...
-    def get_port_loads(self, snapshot: Snapshot | None, greige: GreigeStyle,
-                       wt_rng: FloatRange, params: SearchParams) \
-                       -> list[PortLoad]: ...
+    def get_port_loads(self, split_point: int | None, **kwargs: Unpack[_SearchKWArgs]) \
+        -> list[PortLoad] | None: ...
     def view(self) -> _PAInvView: ...
 
 class _PAInvView(GroupedView[str, Status]):

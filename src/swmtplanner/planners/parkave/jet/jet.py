@@ -17,9 +17,20 @@ class Jet(SwmtBase, HasID[str],
                           _load_rng=load_rng, _date_rng=date_rng,
                           _days_open=days_open, _sched=init_sched)
     
-    def _get_next_item(self, frozen, moveable, new, newidx, curidx, cursched):
+    def _get_next_item1(self, frozen, moveable, new, newidx, curidx, cursched):
         if curidx == newidx:
             return new
+        if not frozen:
+            return moveable.pop(0)
+        if not moveable:
+            return frozen.pop(0)
+        
+        if frozen[0].start <= moveable[0].start or \
+            cursched.expected_end(moveable[0].lots) > frozen[0].min_date:
+            return frozen.pop(0)
+        return moveable.pop(0)
+    
+    def _get_next_item2(self, frozen, moveable, cursched):
         if not frozen:
             return moveable.pop(0)
         if not moveable:
@@ -48,8 +59,16 @@ class Jet(SwmtBase, HasID[str],
             i -= 1
         return i
     
-    def try_insert(self, lots, idx: int):
+    def try_modify(self, idx: int, lots = None):
         pjobs = self.prod_jobs
+        if lots is None:
+            if idx < 0 or idx >= len(pjobs):
+                raise IndexError(f'Index {idx} out of bounds for schedule with' + \
+                                 f' {len(pjobs)} jobs')
+            if not pjobs[idx].moveable:
+                raise ValueError(f'Job at index {idx} ({repr(pjobs[idx])}) is not moveable')
+            pjobs = pjobs[:idx] + pjobs[idx+1:]
+
         frozen = list(filter(lambda j: not j.moveable, pjobs))
         moveable = list(filter(lambda j: j.moveable, pjobs))
 
@@ -59,9 +78,12 @@ class Jet(SwmtBase, HasID[str],
         kicked = []
 
         while moveable and frozen:
-            nxt_item = self._get_next_item(frozen, moveable, lots, idx,
-                                           curidx, newsched)
-            if type(nxt_item) is list:
+            if lots is not None:
+                nxt_item = self._get_next_item1(frozen, moveable, lots, idx,
+                                                curidx, newsched)
+            else:
+                nxt_item = self._get_next_item2(frozen, moveable, newsched)
+            if type(nxt_item) is list and lots is not None:
                 if not newsched.can_add_lots(lots):
                     return None, [], []
                 newjobs += newsched.add_lots(lots, dt.timedelta(), idx=idx)
@@ -85,7 +107,7 @@ class Jet(SwmtBase, HasID[str],
             
             curidx += 1
 
-        if curidx == idx:
+        if curidx == idx and lots is not None:
             if not newsched.can_add_lots(lots):
                 return None, [], []
             newjobs += newsched.add_lots(lots, dt.timedelta(), idx=idx)

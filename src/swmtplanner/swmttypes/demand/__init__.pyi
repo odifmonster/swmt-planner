@@ -21,14 +21,14 @@ class OrderQty(NamedTuple):
 type _Product = GreigeStyle | FabricItem
 
 class Order[T: Hashable, U: _Product](
-    Data[T], mut_in_group=True, read_only=('item','hard_date','soft_date'),
+    Data[T], mut_in_group=True, read_only=('item','pnum','hard_date','soft_date'),
     priv=('qty_map','req')):
     """
     A class representing individual orders for a product. Has
     hard (i.e. minimum), soft (i.e. needed for schedule), and
     safety-replenishment components.
     """
-    def __init__(self, id: T, item: U, req: Req[U],
+    def __init__(self, id: T, item: U, req: Req[U], pnum: int,
                  hard_qty: OrderQty, hard_date: dt.datetime,
                  soft_qty: OrderQty, soft_date: dt.datetime,
                  safety_qty: OrderQty) -> None:
@@ -60,6 +60,10 @@ class Order[T: Hashable, U: _Product](
     @property
     def item(self) -> U:
         """The item being ordered."""
+        ...
+    @property
+    def pnum(self) -> int:
+        """The priority number (i.e. week bucket) of this item."""
         ...
     @property
     def hard_date(self) -> dt.datetime:
@@ -108,13 +112,17 @@ class Order[T: Hashable, U: _Product](
     def view(self) -> OrderView[T, U]: ...
 
 class OrderView[T: Hashable, U: _Product](
-    DataView[T], attrs=('item','hard_date','soft_date'),
+    DataView[T], attrs=('item','pnum','hard_date','soft_date'),
     funcs=('late','remaining')):
     """A class for views of Order objects."""
     def __init__(self, link: Order[T, U]) -> None: ...
     @property
     def item(self) -> U:
         """The item being ordered."""
+        ...
+    @property
+    def pnum(self) -> int:
+        """The priority number (i.e. week bucket) of this item."""
         ...
     @property
     def hard_date(self) -> dt.datetime:

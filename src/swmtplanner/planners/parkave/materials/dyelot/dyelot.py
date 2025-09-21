@@ -72,6 +72,15 @@ class DyeLot(SwmtBase, Lot[str, GreigeStyle, FabricItem],
         if new is not None and self._start is not None:
             raise AttributeError('Cannot activate more than one Job on the same DyeLot')
         self._start = new
+        
+        if new is None:
+            set_date = dt.datetime.fromtimestamp(0)
+        else:
+            set_date = new
+
+        for port in self.ports:
+            for al in port.rolls:
+                al._use_date = set_date
 
     @property
     def fin(self):

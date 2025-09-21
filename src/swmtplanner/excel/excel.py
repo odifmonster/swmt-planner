@@ -143,14 +143,14 @@ def _grg_style_file(outpath):
     for i in df.index:
         item = df.loc[i, 'GreigeAlt']
         roll_tgt = df.loc[i, 'Target']
-        roll_diff = 40
+        roll_diff = 60
         if roll_tgt <= 400:
             load_tgt = roll_tgt
-            roll_diff = 20
+            roll_diff = 30
         else:
             load_tgt = roll_tgt / 2
 
-        outfile.write(f'{item}\t{load_tgt-20:.1f}\t{load_tgt+20:.1f}\t')
+        outfile.write(f'{item}\t{load_tgt-30:.1f}\t{load_tgt+30:.1f}\t')
         outfile.write(f'{roll_tgt-roll_diff:.1f}\t{roll_tgt+roll_diff:.1f}\n')
 
     outfile.truncate()
@@ -305,7 +305,7 @@ def _load_pa_floor_mos():
     slit = mo_df['Warehouse'] == 'BS'
     rework = mo_df['Warehouse'] == 'RW'
     mo_df = mo_df[insp | frame | slit | rework]
-    mo_df = mo_df[(mo_df['Lot'] != '0') & (mo_df['Grade'] != 'LOC')]
+    mo_df = mo_df[(mo_df['Lot'] != '0') & (pd.isna(mo_df['Grade']) | (mo_df['Grade'] != 'LOC'))]
 
     mo_df['Item2'] = mo_df[['Nominal\nWidth', 'Item']].agg(_get_alt_item1, axis=1).astype('string')
     mo_df['Style'] = mo_df['Item'].apply(_get_style).astype('string')
@@ -332,6 +332,15 @@ def _pa_process_report(mo_df: pd.DataFrame, writer):
     mo_df['ItemCode'] = mo_df['Item'].apply(get_code).astype('string')
 
     first = lambda srs: list(srs)[0]
+    def first_market(srs: pd.Series):
+        no_na = srs.dropna()
+        if len(no_na) == 0:
+            return 'NON-AUTO'
+        x = list(no_na)[0]
+        if x == 'AUTO INT':
+            return 'AUTO'
+        return 'NON-AUTO'
+    
     by_lot = mo_df.groupby(['Process', 'Lot', 'Quality']).agg(
         Code=pd.NamedAgg(column='ItemCode', aggfunc=first),
         Item=pd.NamedAgg(column='Item', aggfunc=first),
@@ -339,6 +348,7 @@ def _pa_process_report(mo_df: pd.DataFrame, writer):
         Color=pd.NamedAgg(column='Color', aggfunc=first),
         Customer=pd.NamedAgg(column='Customer', aggfunc=first),
         Owner=pd.NamedAgg(column='Owner', aggfunc=first),
+        Market=pd.NamedAgg(column='MARKET_SEGMENT', aggfunc=first_market),
         Width=pd.NamedAgg(column='Nominal\nWidth', aggfunc=first),
         Quantity=pd.NamedAgg(column='Quantity', aggfunc='sum'))
     by_lot = by_lot.reset_index()
@@ -473,7 +483,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
 
     first = lambda srs: list(srs)[0]
     mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')
-                  & (mo_df['Grade'] != 'REJ')]
+                  & ((mo_df['Grade'] != 'REJ') | pd.isna(mo_df['Grade']))]
     mo_grp_df = mo_df.groupby(['Lot', 'Nominal\nWidth']).agg(
         Process=pd.NamedAgg('Process', first),
         Item=pd.NamedAgg('Item', first),

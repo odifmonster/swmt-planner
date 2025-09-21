@@ -16,12 +16,12 @@ class OrderQty(NamedTuple):
     cumulative: Quantity
 
 class Order[T, U](Data[T], mut_in_group=True,
-                  read_only=('item','hard_date','soft_date'),
+                  read_only=('item','pnum','hard_date','soft_date'),
                   priv=('qty_map','req')):
     
-    def __init__(self, id, item, req, hard_qty, hard_date, soft_qty, soft_date,
+    def __init__(self, id, item, req, pnum, hard_qty, hard_date, soft_qty, soft_date,
                  safety_qty):
-        super().__init__('Order', id, OrderView[T, U](self), _item=item,
+        super().__init__('Order', id, OrderView[T, U](self), _item=item, _pnum=pnum,
                          _hard_date=hard_date, _soft_date=soft_date, _req=req,
                          _qty_map={
                              OrderKind.HARD: hard_qty,
@@ -74,6 +74,6 @@ class Order[T, U](Data[T], mut_in_group=True,
     def unassign(self, lot):
         self._req.unassign(lot)
             
-class OrderView[T, U](DataView[T], attrs=('item','hard_date','soft_date'),
+class OrderView[T, U](DataView[T], attrs=('item','pnum','hard_date','soft_date'),
                       funcs=('late','remaining')):
     pass

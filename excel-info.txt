@@ -59,8 +59,8 @@ pa_inventory:
 
 pa_floor_mos:
     folder=$FOLDER
-    workbook=$WORKBOOK
-    sheet=1427
+    workbook="1427_09202025.xlsx"
+    sheet=1427_PACOHINVDCSH
     col_names="Item\nType", Warehouse, Customer, Owner, Roll, Lot, Item, ...
         Quality, Grade, "Nominal\nWidth", Quantity, DEFECT1, DEF1_REASON, DEFECT2, ...
         DEF2_REASON, DEFECT3, DEF3_REASON, MARKET_SEGMENT

@@ -2,9 +2,10 @@ from .dyecycle import DyeCycle, DyeCycleView
 
 import datetime as dt
 from swmtplanner.support import DateRange, FloatRange
+from swmtplanner.swmttypes.products import GreigeStyle
 from swmtplanner.swmttypes.products.fabric.color import Shade
 from swmtplanner.swmttypes.schedule import Schedule
-from swmtplanner.planners.parkave.materials import DyeLot
+from swmtplanner.planners.parkave.materials import DyeLot, PortLoad
 
 __all__ = ['DyeCycle', 'DyeCycleView']
 
@@ -29,3 +30,4 @@ class JetSched(Schedule, read_only=('jet','n_ports','jss','mss')):
     def add_lots(self, lots: list[DyeLot], _: dt.timedelta,
                  idx: int | None = None) -> list[DyeCycle]: ...
     def add_job(self, job: DyeCycle, force: bool = False) -> None: ...
+    def freed_greige(self) -> dict[GreigeStyle, list[PortLoad]]: ...

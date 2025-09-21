@@ -23,12 +23,14 @@ class GrgRollSize(Enum):
     ODD = auto()
 
 class GRollAlloc(SwmtBase, HasID[int],
-                 read_only=('id','roll_id','status','plant','avail_date','weight')):
+                 read_only=('id','roll_id','status','plant','avail_date','use_date',
+                            'weight')):
     
     def __init__(self, roll_id, status, plant, avail_date, weight):
         globals()['_CTR'] += 1
         SwmtBase.__init__(self, _id=globals()['_CTR'], _roll_id=roll_id,
                         _status=status, _plant=plant, _avail_date=avail_date,
+                        _use_date=dt.datetime.fromtimestamp(0),
                         _weight=weight)
         
     @property
@@ -37,6 +39,7 @@ class GRollAlloc(SwmtBase, HasID[int],
     
 class PortLoad(NamedTuple):
     rolls: tuple[GRollAlloc, ...]
+    nports: int
     status: Status
     plant: KnitPlant
     avail_date: dt.datetime
@@ -75,6 +78,18 @@ class GrgRoll(Data[str], mut_in_group=False,
             return GrgRollSize.TWO_PORT
         
         return GrgRollSize.ODD
+    
+    @property
+    def first_date_used(self):
+        if not self._allocs:
+            return dt.datetime.fromtimestamp(0)
+        
+        return min(map(lambda al: al.use_date, self._allocs))
+    
+    @property
+    def n_splits(self):
+        epoch = dt.datetime.fromtimestamp(0)
+        return len(list(filter(lambda al: al.use_date > epoch, self._allocs)))
     
     @setter_like
     def allocate(self, lbs, snapshot = None):

@@ -3,10 +3,10 @@
 import datetime as dt
 
 from swmtplanner.support import FloatRange, DateRange
-from swmtplanner.swmttypes.products import fabric
+from swmtplanner.swmttypes.products import fabric, GreigeStyle
 from swmtplanner.swmttypes.products.fabric.color import Shade
 from swmtplanner.swmttypes.schedule import Schedule
-from .dyecycle import DyeCycle
+from .dyecycle import DyeCycle, DyeCycleView
 from ...materials import DyeLot
 
 _CTRS = {}
@@ -120,3 +120,14 @@ class JetSched(Schedule, read_only=('jet','n_ports','jss','mss')):
         else:
             self._jss += 1
             self._mss = _max_shade(self.mss, job.shade)
+    
+    def freed_greige(self):
+        avail: dict[GreigeStyle, list] = {}
+        pjobs: list[DyeCycleView] = self.prod_jobs
+        for job in pjobs:
+            for lot in job.lots:
+                if not lot.start is None: continue
+                if lot.rawmat not in avail:
+                    avail[lot.rawmat] = []
+                avail[lot.rawmat] += list(lot.ports)
+        return avail
