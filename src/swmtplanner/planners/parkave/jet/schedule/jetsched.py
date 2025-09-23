@@ -80,22 +80,29 @@ class JetSched(Schedule, read_only=('jet','n_ports','jss','mss')):
         start = max(self.end_in_schedule(min_date), self.end)
         return start + cycle_time <= self.date_rng.maxval + dt.timedelta(hours=2)
     
-    def can_add_lots(self, lots: list[DyeLot], _: dt.timedelta):
+    def can_add_lots(self, new: list[DyeLot] | DyeCycleView, _: dt.timedelta):
         start = self.end
-        prev_lots: list[DyeLot] = self.get_prev_lots(lots)
+        if type(new) is not list:
+            _lots = new.lots
+        else:
+            _lots = new
+        prev_lots: list[DyeLot] = self.get_prev_lots(_lots)
 
         for l in prev_lots:
             if not self.can_add_cycle(start, l.cycle_time):
                 return False
             start = self.nearest_time_open(start + l.cycle_time)
 
-        start = max(self.nearest_time_open(max(map(lambda l: l.received, lots))),
+        start = max(self.nearest_time_open(max(map(lambda l: l.received, _lots))),
                     start)
-        return self.can_add_cycle(start, lots[0].cycle_time)
+        return self.can_add_cycle(start, _lots[0].cycle_time)
     
-    def add_lots(self, lots: list[DyeLot], _, idx = None):
+    def add_lots(self, new: list[DyeLot] | DyeCycleView, _, idx = None):
         start = self.end
-        prev_lots: list[DyeLot] = self.get_prev_lots(lots)
+        if type(new) is not list:
+            _lots = new.lots
+
+        prev_lots: list[DyeLot] = self.get_prev_lots(_lots)
         new_jobs: list[DyeCycle] = []
 
         for l in prev_lots:
@@ -103,9 +110,13 @@ class JetSched(Schedule, read_only=('jet','n_ports','jss','mss')):
             new_jobs.append(cur_job)
             self.add_job(cur_job)
         
-        start = max(self.nearest_time_open(max(map(lambda l: l.received, lots))),
+        start = max(self.nearest_time_open(max(map(lambda l: l.received, _lots))),
                     start)
-        cur_job = DyeCycle(lots, start, idx=idx)
+        if type(new) is not list:
+            cur_job = new.copy_lots(start, dt.timedelta(), True, idx=idx)
+        else:
+            cur_job = DyeCycle(new, start, idx=idx)
+            
         new_jobs.append(cur_job)
         self.add_job(cur_job)
 
@@ -120,6 +131,38 @@ class JetSched(Schedule, read_only=('jet','n_ports','jss','mss')):
         else:
             self._jss += 1
             self._mss = _max_shade(self.mss, job.shade)
+
+    def get_costs(self, nweeks: int):
+        pjobs = self.prod_jobs
+        total_ports = max(1, len(pjobs) * self.n_ports)
+        cost_port_12_hours = 150
+
+        all_jobs: list[DyeCycleView] = self.jobs
+
+        def is_non_prod(j: DyeCycleView):
+            if j.shade in (Shade.STRIP, Shade.HEAVYSTRIP):
+                return True
+            return not j.moveable and j.shade == Shade.EMPTY
+        
+        non_prod_jobs = list(filter(is_non_prod, all_jobs))
+
+        strip_cost = 0
+        empty_cost = 0
+        for j in non_prod_jobs:
+            hrs = (j.end - j.start).total_seconds() / 3600
+            cur_cost = cost_port_12_hours * self.n_ports * (hrs / 12)
+            if j.shade == Shade.EMPTY:
+                empty_cost += cur_cost
+            else:
+                strip_cost += cur_cost
+        
+        total_lbs = map(lambda j: sum(map(lambda l: l.qty.lbs, j.lots)),
+                        pjobs)
+        ndays = nweeks * 5
+        max_lbs = 36000 * self.n_ports / 39
+        over_max = max(0, total_lbs / ndays - max_lbs)
+        
+        return strip_cost / total_ports, empty_cost, over_max
     
     def freed_greige(self):
         avail: dict[GreigeStyle, list] = {}

@@ -275,6 +275,7 @@ class PAInv(Grouped[str, Status]):
                 continue
 
             rviews: list[GrgRollView] = list(self[status, plt, params.greige].itervalues())
+            rviews = sorted(rviews, key=lambda r: r.received)
             for rview in rviews:
                 if params.max_date is not None and rview.received > params.max_date:
                     continue
@@ -310,18 +311,16 @@ class PAInv(Grouped[str, Status]):
             
             while rem_ports > 0:
                 globals()['_CTR'] += 1
+                nports = min(std_roll_ports, rem_ports)
+                new_lbs = nports * load_avg
                 new_roll = GrgRoll(f'NEW{globals()['_CTR']:06}', params.greige,
                                    KnitPlant.EITHER, Status.NEW, params.create_date,
-                                   params.greige.roll_rng.average())
+                                   new_lbs)
                 new_roll.snapshot = params.snapshot
-                if std_roll_ports > rem_ports:
-                    load_lbs = rem_ports * load_avg
-                else:
-                    load_lbs = new_roll.weight.lbs
                 
-                piece = new_roll.allocate(load_lbs, snapshot=params.snapshot)
-                load = PortLoad((piece,), min(std_roll_ports, rem_ports),
-                                Status.NEW, KnitPlant.EITHER, params.create_date,
+                piece = new_roll.allocate(new_lbs, snapshot=params.snapshot)
+                load = PortLoad((piece,), nports, Status.NEW,
+                                KnitPlant.EITHER, params.create_date,
                                 Quantity(lbs=load_lbs))
                 loads.append(load)
                 self.add(new_roll)

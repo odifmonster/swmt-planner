@@ -5,6 +5,10 @@ from .order import OrderKind, OrderQty, Order
 
 class Req[T](SwmtBase, read_only=('item',), priv=('orders','lots')):
 
+    def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
+        return super().__init_subclass__(read_only=('item',)+read_only,
+                                         priv=('orders','lots')+priv)
+
     def __init__(self, item):
         super().__init__(_item=item, _orders=[], _lots=[])
 
