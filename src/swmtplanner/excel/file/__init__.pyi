@@ -1,0 +1,14 @@
+from typing import NamedTuple
+from io import TextIOBase
+
+__all__ = ['Pos', 'File']
+
+class Pos(NamedTuple):
+    line: int
+    column: int
+
+class File:
+    def __init__(self, buffer: TextIOBase) -> None: ...
+    def read(self) -> str: ...
+    def backup(self, n: int) -> None: ...
+    def tell(self) -> Pos: ...
