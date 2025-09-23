@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from .demand import FabOrder, FabOrderView, FabDemand
+from .demand import FabOrder, FabOrderView, FabReq, FabDemand
 
-__all__ = ['FabOrder', 'FabOrderView', 'FabDemand']
+__all__ = ['FabOrder', 'FabOrderView', 'FabReq', 'FabDemand']

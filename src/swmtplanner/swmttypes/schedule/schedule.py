@@ -156,10 +156,10 @@ class Schedule(SwmtBase, HasID[str]):
         start = self.nearest_open_time(start)
         return self.end_in_schedule(start, cycle_time) <= self.date_rng.maxval
 
-    def can_add_lots(self, lots, cycle_time):
+    def can_add_lots(self, new, cycle_time):
         raise NotImplementedError()
     
-    def add_lots(self, lots, cycle_time, idx = None):
+    def add_lots(self, new, cycle_time, idx = None):
         raise NotImplementedError()
     
     def add_job(self, job, force = False):

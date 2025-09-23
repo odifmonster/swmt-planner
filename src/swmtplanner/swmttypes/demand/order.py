@@ -19,6 +19,12 @@ class Order[T, U](Data[T], mut_in_group=True,
                   read_only=('item','pnum','hard_date','soft_date'),
                   priv=('qty_map','req')):
     
+    def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
+        super().__init_subclass__(mut_in_group=True,
+                                  read_only=('item','pnum','hard_date',
+                                             'soft_date')+read_only,
+                                  priv=('qty_map','req')+priv)
+    
     def __init__(self, id, item, req, pnum, hard_qty, hard_date, soft_qty, soft_date,
                  safety_qty):
         super().__init__('Order', id, OrderView[T, U](self), _item=item, _pnum=pnum,
@@ -43,8 +49,9 @@ class Order[T, U](Data[T], mut_in_group=True,
         
         due_date = self.hard_date if kind == OrderKind.HARD else self.soft_date
         total = self._req.total_prod(by=due_date)
-        lots = sorted(self._req._lots,
-                      lambda l: l.fin is not None and l.fin > due_date)
+        lots = sorted(filter(self._req._lots,
+                             lambda l: l.fin is not None and l.fin > due_date),
+                      key=lambda l: l.fin)
         
         table = []
         init_qty: OrderQty = self._qty_map[kind]
@@ -76,4 +83,10 @@ class Order[T, U](Data[T], mut_in_group=True,
             
 class OrderView[T, U](DataView[T], attrs=('item','pnum','hard_date','soft_date'),
                       funcs=('late','remaining')):
-    pass
+    
+    def __init_subclass__(cls, dunders = tuple(), attrs = tuple(), funcs = tuple(),
+                          read_only = tuple(), priv = tuple()):
+        super().__init_subclass__(dunders=dunders,
+                                  attrs=('item','pnum','hard_date','soft_date')+attrs,
+                                  funcs=('late','remaining')+funcs,
+                                  read_only=read_only, priv=priv)

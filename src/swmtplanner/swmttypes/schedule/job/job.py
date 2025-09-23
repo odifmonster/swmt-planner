@@ -8,6 +8,11 @@ class Job[T](SwmtBase, HasID[str],
           read_only=('id','start','end','cycle_time','rawmat','moveable'),
           priv=('lots',)):
     
+    def __init_subclass__(cls, read_only = tuple(), priv = tuple()):
+        super().__init_subclass__(read_only=('id','start','end','cycle_time',
+                                             'rawmat','moveable')+read_only,
+                                  priv=('lots',)+priv)
+    
     def __init__(self, lots, start, cycle_time, moveable, idx = None):
         if idx is None:
             globals()['_CTR'] += 1
@@ -33,7 +38,7 @@ class Job[T](SwmtBase, HasID[str],
     def is_product(self):
         raise NotImplementedError()
     
-    def copy_lots(self, start, cycle_time, moveable):
+    def copy_lots(self, start, cycle_time, moveable, idx = None):
         raise NotImplementedError()
     
     def activate(self):

@@ -1,9 +1,11 @@
 from typing import Generator, overload
+import datetime as dt
 from swmtplanner.swmttypes.products import fabric, FabricItem, GreigeStyle
-from swmtplanner.swmttypes.demand import Order, OrderView
+from swmtplanner.swmttypes.demand import OrderKind, Order, OrderView, Req
 from swmtplanner.support.grouped import Atom, AtomView, Grouped, GroupedView
+from swmtplanner.planners.parkave.materials import DyeLot, DyeLotView
 
-__all__ = ['FabOrder', 'FabOrderView', 'FabDemand']
+__all__ = ['FabOrder', 'FabOrderView', 'FabReq', 'FabDemand']
 
 class FabOrder(Order[str, FabricItem]):
     @property
@@ -14,9 +16,12 @@ class FabOrder(Order[str, FabricItem]):
     def color(self) -> fabric.Color:
         """The color of the fabric being ordered."""
         ...
+    def assign(self, lot: DyeLot) -> None: ...
+    def unassign(self, lot: DyeLotView) -> None: ...
+    def late_cost(self, kind: OrderKind) -> float: ...
     def view(self) -> FabOrderView: ...
 
-class FabOrderView(OrderView[str, FabricItem]):
+class FabOrderView(OrderView[str, FabricItem], funcs=('late_cost',)):
     @property
     def greige(self) -> GreigeStyle:
         """The greige style used by the fabric being ordered."""
@@ -25,6 +30,14 @@ class FabOrderView(OrderView[str, FabricItem]):
     def color(self) -> fabric.Color:
         """The color of the fabric being ordered."""
         ...
+    def late_cost(self, kind: OrderKind) -> float: ...
+
+class FabReq(Req[FabricItem]):
+    @property
+    def orders(self) -> list[FabOrderView]: ...
+    @property
+    def lots(self) -> list[DyeLotView]: ...
+    def excess_inv(self, by_date: dt.datetime) -> float: ...
 
 class _FabAtom(Atom[str]):
     def __getitem__(self, key: tuple[()]) -> _FabAtomView: ...

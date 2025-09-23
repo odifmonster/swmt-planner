@@ -34,8 +34,8 @@ class DyeCycle(Job[GreigeStyle]):
             return max(map(lambda l: l.received, self.lots))
         return self.start
     
-    def copy_lots(self, start, cycle_time, moveable):
-        return DyeCycle(self._lots, start, moveable=moveable)
+    def copy_lots(self, start, cycle_time, moveable, idx = None):
+        return DyeCycle(self._lots, start, moveable=moveable, idx=idx)
     
     def view(self):
         return DyeCycleView(self)

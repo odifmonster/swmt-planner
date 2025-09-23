@@ -413,9 +413,11 @@ def _map_ship_day(item, ship_days_data):
 def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     shippath, shipargs = INFO_MAP['lam_ship_dates']
     ship_df: pd.DataFrame = pd.read_excel(shippath, **shipargs)
+    ship_df = df_cols_as_str(ship_df, 'Stock Item', 'Ply1 Item', 'Ship Day')
 
     reqpath, reqargs = INFO_MAP['pa_reqs']
     reqs_df: pd.DataFrame = pd.read_excel(reqpath, **reqargs)
+    reqs_df = df_cols_as_str(reqs_df, 'PA Item', 'Ply1 Item')
 
     ship_df = ship_df[ship_df['Ply1 Item'] != '0']
 
@@ -446,10 +448,13 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
         pairs.append((i, f'WK{i}'))
 
     req_data = {
-        'item': [], 'pnum': [], 'due_date': [], 'yds': [], 'cum_yds': []
+        'plant': [], 'item': [], 'lam_item': [], 'pnum': [], 'due_date': [],
+        'yds': [], 'cum_yds': []
     }
 
     for i in reqs_df.index:
+        plant = reqs_df.loc[i, 'Plant']
+        lam_id = reqs_df.loc[i, 'Ply1 Item']
         fab_id = reqs_df.loc[i, 'PA Item']
         fin = reqs_df.loc[i, 'PA Fin']
         cum_req = 0
@@ -472,6 +477,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             cum_req += req_raw
             cur_req_yds = max(0, min(req_raw, cum_req - fin))
 
+            req_data['plant'].append(plant)
+            req_data['lam_item'].append(lam_id)
             req_data['item'].append(fab_id)
             req_data['pnum'].append(pnum)
             req_data['due_date'].append(due_date)
@@ -493,16 +500,16 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     mo_df = mo_grp_df.reset_index()
 
     mo_data = {
-        'mo': [], 'process': [], 'item': [], 'raw_yds': [], 'fin_yds_expected': [],
-        'ordered_yds': [], 'pnum': [], 'due_date': []
+        'mo': [], 'process': [], 'plant': [], 'lam_item': [], 'pa_item': [], 'raw_yds': [],
+        'fin_yds_expected': [], 'ordered_yds': [], 'pnum': [], 'due_date': []
     }
 
-    for item in orders_df['item'].unique():
-        order_idxs = list(orders_df[orders_df['item'] == item].index)
-        mo_idxs = list(mo_df[(mo_df['ItemWidth'] == item) & (mo_df['Process'] == 'INSPECTION')].index)
+    for pa_item in orders_df['item'].unique():
+        order_idxs = list(orders_df[orders_df['item'] == pa_item].index)
+        mo_idxs = list(mo_df[(mo_df['ItemWidth'] == pa_item) & (mo_df['Process'] == 'INSPECTION')].index)
 
         try:
-            item_comps = item.split('-')
+            item_comps = pa_item.split('-')
             item_no_wd = '-'.join(item_comps[:-1])
             item_wd = float(item_comps[-1])
         except:
@@ -521,14 +528,18 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             o_idx = order_idxs[i]
             m_idx = mo_idxs[j]
 
-            item = orders_df.loc[o_idx, 'item']
+            pa_item = orders_df.loc[o_idx, 'item']
+            lam_item = orders_df.loc[o_idx, 'lam_item']
+            plant = orders_df.loc[o_idx, 'plant']
 
             mo_data['mo'].append(mo_df.loc[m_idx, 'Lot'])
             mo_data['process'].append(mo_df.loc[m_idx, 'Process'])
-            mo_data['item'].append(item)
+            mo_data['plant'].append(plant)
+            mo_data['lam_item'].append(lam_item)
+            mo_data['pa_item'].append(pa_item)
             mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
 
-            item_wd = float(item.split('-')[-1])
+            item_wd = float(pa_item.split('-')[-1])
             true_qty = mo_df.loc[m_idx, 'Quantity']
             if mo_df.loc[m_idx, 'Process'] != 'INSPECTION':
                 if mo_df.loc[m_idx, 'Nominal\nWidth'] == item_wd*2:
@@ -551,7 +562,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 j += 1
     
     prty_mo_df = pd.DataFrame(data=mo_data)
-    prty_mo_df = df_cols_as_str(prty_mo_df, 'mo', 'process', 'item')
+    prty_mo_df = df_cols_as_str(prty_mo_df, 'mo', 'process', 'lam_item', 'pa_item')
 
     prty_mo_df.to_excel(writer, sheet_name='mo_priorities', float_format='%.2f',
                         index=False)

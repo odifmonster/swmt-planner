@@ -3,7 +3,7 @@
 import datetime as dt
 
 from swmtplanner.support import SwmtBase, HasID, FloatRange
-from .schedule import JetSched, DyeCycle
+from .schedule import JetSched, DyeCycle, DyeCycleView
 
 class Jet(SwmtBase, HasID[str],
           read_only=('prefix','id','n_ports','load_rng',
@@ -17,9 +17,9 @@ class Jet(SwmtBase, HasID[str],
                           _load_rng=load_rng, _date_rng=date_rng,
                           _days_open=days_open, _sched=init_sched)
     
-    def _get_next_item1(self, frozen, moveable, new, newidx, curidx, cursched):
+    def _get_next_item1(self, frozen, moveable, newidx, curidx, cursched):
         if curidx == newidx:
-            return new
+            return 'new job'
         if not frozen:
             return moveable.pop(0)
         if not moveable:
@@ -76,16 +76,23 @@ class Jet(SwmtBase, HasID[str],
         newsched = JetSched(self.id, self.n_ports, self.date_rng, days_open=self.days_open)
         newjobs = []
         kicked = []
+        if lots is None:
+            kicked.append(pjobs[idx])
 
         while moveable and frozen:
             if lots is not None:
-                nxt_item = self._get_next_item1(frozen, moveable, lots, idx,
-                                                curidx, newsched)
+                nxt_item = self._get_next_item1(frozen, moveable, idx, curidx,
+                                                newsched)
             else:
                 nxt_item = self._get_next_item2(frozen, moveable, newsched)
-            if type(nxt_item) is list and lots is not None:
-                if not newsched.can_add_lots(lots):
+            if type(nxt_item) is str:
+                if type(lots) is not list:
+                    lots2 = lots.lots
+                else:
+                    lots2 = lots
+                if not newsched.can_add_lots(lots2):
                     return None, [], []
+                
                 newjobs += newsched.add_lots(lots, dt.timedelta(), idx=idx)
             elif not nxt_item.moveable:
                 if not newsched.can_add_lots(nxt_item.lots):
