@@ -1,0 +1,57 @@
+# EDIT DATA SOURCE INFO HERE
+
+# Any text following a pound sign is ignored
+# End a line in ... if you want the next line to be included as part of the previous one
+
+# Info blocks also count as variables, and their members can be referenced outside of
+# those blocks with a '.'
+
+use FilterAllNA, FilterAnyNA from helpers
+
+FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+WORKBOOK = "PA plant orders against Lam demand 20250922.xlsx"
+
+jets = Map(i -> Concat("JET ", i), [1, 2, 3, 4, 7, 8, 9, 10])
+req_wks = Map(i -> Concat("FAB req'd WK", i), 0 to 5)
+
+[ExcelFile] greige_translation:
+    folder=FOLDER
+    workbook="LamDemandPlanning.xlsx"
+    sheet="Greige Style Translation"
+    subst_names=["inventory", "plan"]
+        # only use this if the sheet has no column names
+    col_ranges="A:B" # required if providing column names
+    start_row=2 # the first row of data to start reading
+
+[ExcelFile] greige_styles:
+    folder=FOLDER
+    workbook="LamDemandPlanning.xlsx"
+    sheet="Griege Sizes"
+
+[Grouped] dye_formulae:
+    [ExcelFile] raw_source:
+        folder=FOLDER
+        workbook="LamDemandPlanning.xlsx"
+        sheet="Xref"
+    source=FilterAnyNA(raw_source, ["COLOR NUMBER", "SHADE RATING"])
+    by=["COLOR NUMBER"]
+    by_names=["number"]
+    [Columns] cols:
+        name=First(Column("COLOR NAME"))
+        shade=First(Column("SHADE RATING"))
+
+[ExcelFile] jet_info:
+    folder=FOLDER
+    workbook="master.xlsx"
+    sheet="jets"
+
+[ExcelFile] pa_1427:
+    folder=FOLDER
+    workbook=WORKBOOK
+    sheet="1427"
+    col_names=["Item\nType", "Warehouse", "Customer", "Owner", "Roll", "Lot", "Item", ...
+        "Quality", "Grade", "Nominal\nWidth", "Quantity", "UOM", ...
+        *Map(i -> Concat("DEFECT", i), 1 to 3), ...
+        *Map(i -> Concat("DEF", i, "_REASON", 1 to 3)), ...
+        "MARKET_SEGMENT", "ASSIGNED_ORDER"]
+    start_row=4

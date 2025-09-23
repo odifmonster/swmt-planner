@@ -17,18 +17,19 @@ class File:
         if self._line_num == len(self._lines) - 1 and \
             self._col_num == len(self._lines[self._line_num]):
             c = self._buffer.read(1)
+            self._lines[self._line_num] += c
         else:
             c = self._lines[self._line_num][self._col_num]
-            self._lines[self._line_num] += c
 
-        self._col_num += 1
-        self._offset += 1
+        if len(c) == 1:
+            self._col_num += 1
+            self._offset += 1
 
-        if c == '\n':
-            self._col_num = 0
-            self._line_num += 1
-            if self._line_num == len(self._lines):
-                self._lines.append('')
+            if c == '\n':
+                self._col_num = 0
+                self._line_num += 1
+                if self._line_num == len(self._lines):
+                    self._lines.append('')
         
         return c
     
