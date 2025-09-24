@@ -532,13 +532,6 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             lam_item = orders_df.loc[o_idx, 'lam_item']
             plant = orders_df.loc[o_idx, 'plant']
 
-            mo_data['mo'].append(mo_df.loc[m_idx, 'Lot'])
-            mo_data['process'].append(mo_df.loc[m_idx, 'Process'])
-            mo_data['plant'].append(plant)
-            mo_data['lam_item'].append(lam_item)
-            mo_data['pa_item'].append(pa_item)
-            mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
-
             item_wd = float(pa_item.split('-')[-1])
             true_qty = mo_df.loc[m_idx, 'Quantity']
             if mo_df.loc[m_idx, 'Process'] != 'INSPECTION':
@@ -549,10 +542,17 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             else:
                 true_qty *= 0.9
 
-            mo_data['fin_yds_expected'].append(true_qty)
-            mo_data['ordered_yds'].append(orders_df.loc[o_idx, 'yds'])
-            mo_data['pnum'].append(orders_df.loc[o_idx, 'pnum'])
-            mo_data['due_date'].append(orders_df.loc[o_idx, 'due_date'])
+            if total_req + orders_df.loc[o_idx, 'yds'] - (total_prod + true_qty) >= 100:
+                mo_data['mo'].append(mo_df.loc[m_idx, 'Lot'])
+                mo_data['process'].append(mo_df.loc[m_idx, 'Process'])
+                mo_data['plant'].append(plant)
+                mo_data['lam_item'].append(lam_item)
+                mo_data['pa_item'].append(pa_item)
+                mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
+                mo_data['fin_yds_expected'].append(true_qty)
+                mo_data['ordered_yds'].append(orders_df.loc[o_idx, 'yds'])
+                mo_data['pnum'].append(orders_df.loc[o_idx, 'pnum'])
+                mo_data['due_date'].append(orders_df.loc[o_idx, 'due_date'])
 
             if total_prod + true_qty >= total_req + orders_df.loc[o_idx, 'yds']:
                 total_req += orders_df.loc[o_idx, 'yds']
