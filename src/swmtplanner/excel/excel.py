@@ -503,6 +503,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
         'mo': [], 'process': [], 'plant': [], 'lam_item': [], 'pa_item': [], 'raw_yds': [],
         'fin_yds_expected': [], 'ordered_yds': [], 'pnum': [], 'due_date': []
     }
+    added_mos: set[tuple[str, str]] = set()
 
     for pa_item in orders_df['item'].unique():
         order_idxs = list(orders_df[orders_df['item'] == pa_item].index)
@@ -542,9 +543,12 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             else:
                 true_qty *= 0.9
 
-            if total_req + orders_df.loc[o_idx, 'yds'] - (total_prod + true_qty) >= 100:
-                mo_data['mo'].append(mo_df.loc[m_idx, 'Lot'])
-                mo_data['process'].append(mo_df.loc[m_idx, 'Process'])
+            rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - (total_prod + true_qty)
+            cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Process'])
+            if rem_qty >= 100 and cur_pair not in added_mos:
+                added_mos.add(cur_pair)
+                mo_data['mo'].append(cur_pair[0])
+                mo_data['process'].append(cur_pair[1])
                 mo_data['plant'].append(plant)
                 mo_data['lam_item'].append(lam_item)
                 mo_data['pa_item'].append(pa_item)
