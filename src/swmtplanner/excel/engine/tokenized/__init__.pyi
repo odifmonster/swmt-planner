@@ -2,7 +2,7 @@ from typing import NamedTuple, Generator
 from enum import Enum
 from swmtplanner.excel.engine import file
 
-__all__ = ['TokType', 'Token', 'tokenize']
+__all__ = ['TokType', 'Token', 'tokenize', 'Tokenized']
 
 def tokenize(f: file.File) -> Generator[Token]: ...
 
@@ -41,3 +41,12 @@ class Token(NamedTuple):
     kind: TokType
     value: str
     start: file.Pos
+
+class Tokenized:
+    def __init__(self, file: file.File) -> None: ...
+    @property
+    def ended(self) -> bool: ...
+    @property
+    def last_tok(self) -> Token: ...
+    def advance(self) -> Token: ...
+    def backup(self, n: int) -> None: ...
