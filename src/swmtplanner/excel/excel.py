@@ -139,7 +139,6 @@ def _grg_style_file(outpath):
 
     outfile = open(outpath, mode='w+')
 
-
     for i in df.index:
         item = df.loc[i, 'GreigeAlt']
         roll_tgt = df.loc[i, 'Target']
@@ -543,7 +542,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             else:
                 true_qty *= 0.9
 
-            rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - (total_prod + true_qty)
+            rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
             cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Process'])
             if rem_qty >= 100 and cur_pair not in added_mos:
                 added_mos.add(cur_pair)
