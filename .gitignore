@@ -1,7 +1,7 @@
 tests/misc*.py
 __pycache__/
 temp*.txt
-parsed.txt
+ast.txt
 tokenized.txt
 .ipynb_checkpoints/
 *.ipynb
