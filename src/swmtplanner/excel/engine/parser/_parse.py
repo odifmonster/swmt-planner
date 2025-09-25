@@ -7,7 +7,7 @@ from .trees import *
 
 def _match_tok(tstream: Tokenized, tgt: TokType | frozenset[TokType],
                converter = None):
-    if type(tgt) is list:
+    if type(tgt) is frozenset:
         is_tgt = lambda t: t.kind in tgt
     else:
         is_tgt = lambda t: t.kind == tgt
@@ -122,10 +122,16 @@ def _match_exps(tstream: Tokenized):
     return exps, total
 
 def _match_call(tstream: Tokenized):
-    func, total = _match_atom(tstream, kind=TokType.NAME)
-    if func is None:
+    res, total = _match_all(
+        tstream, [lambda s: _match_atom(s, kind=TokType.NAME),
+                  _get_tok_matcher(TokType.LPAREN),
+                  _match_exps,
+                  _get_tok_matcher(TokType.RPAREN)],
+                 [None, None, [], None])
+    if res is None:
         return None, 0
     
+    func = CallExp(res[0], res[2])
     while True:
         items, consumed = _match_all(
             tstream, [_get_tok_matcher(TokType.LPAREN),
@@ -150,8 +156,8 @@ def _match_unpack(tstream: Tokenized):
             return None, 0
         total += consumed
         return UnpackExp(child), total
-    res, total = _match_one(tstream [_match_call, _match_access, _match_group,
-                                     _match_atom, _match_list])
+    res, total = _match_one(tstream, [_match_call, _match_access, _match_group,
+                                      _match_atom, _match_list])
     return res, total
 
 def _match_prod(tstream: Tokenized):
@@ -300,15 +306,16 @@ def _match_block(tstream: Tokenized):
                   lambda s: _match_atom(s, kind=TokType.NAME),
                   _get_tok_matcher(TokType.RBRACK),
                   lambda s: _match_atom(s, kind=TokType.NAME),
+                  _get_tok_matcher(TokType.COLON),
                   _get_tok_matcher(TokType.NEWLINE),
                   _get_tok_matcher(TokType.INDENT),
                   _match_stmts,
                   _get_tok_matcher(TokType.DEDENT)])
     if items is not None:
-        if len(items[6]) == 0:
+        if len(items[7]) == 0:
             tstream.backup(total)
             return None, 0
-        return BlockStmt(items[1], items[3], items[6]), total
+        return BlockStmt(items[1], items[3], items[7]), total
     return None, 0
 
 def _match_stmt(tstream: Tokenized):
@@ -316,7 +323,8 @@ def _match_stmt(tstream: Tokenized):
 
 def parse(tstream: Tokenized):
     stmts, _ = _match_stmts(tstream)
-    if not tstream.ended:
+    end, _ = _match_tok(tstream, TokType.END)
+    if end is None:
         bad_tok = tstream.last_tok
         msg = f'Line {bad_tok.start.line} at column {bad_tok.start.column}:'
         msg += ' Failed to parse'

@@ -33,10 +33,11 @@ req_wks = Map(i -> Concat("FAB req'd WK", i), 0 to 5)
         folder=FOLDER
         workbook="LamDemandPlanning.xlsx"
         sheet="Xref"
-    source=FilterAnyNA(raw_source, ["COLOR NUMBER", "SHADE RATING"])
+    source=FilterAnyNA(dye_formulae.raw_source, ...
+            ["COLOR NUMBER", "SHADE RATING"])
     by=["COLOR NUMBER"]
     by_names=["number"]
-    [Columns] cols:
+    [AggedCols] agged:
         name=First(Column("COLOR NAME"))
         shade=First(Column("SHADE RATING"))
 
@@ -52,6 +53,24 @@ req_wks = Map(i -> Concat("FAB req'd WK", i), 0 to 5)
     col_names=["Item\nType", "Warehouse", "Customer", "Owner", "Roll", "Lot", "Item", ...
         "Quality", "Grade", "Nominal\nWidth", "Quantity", "UOM", ...
         *Map(i -> Concat("DEFECT", i), 1 to 3), ...
-        *Map(i -> Concat("DEF", i, "_REASON", 1 to 3)), ...
+        *Map(i -> Concat("DEF", i, "_REASON"), 1 to 3), ...
         "MARKET_SEGMENT", "ASSIGNED_ORDER"]
     start_row=4
+
+[PASched] pa_sched:
+    [ExcelFile] adaptive:
+        folder=FOLDER
+        workbook=WORKBOOK
+        sheet="Adaptive"
+    [Table] pa_714:
+        [Table] raw_source:
+            [ExcelFile] source:
+                folder=FOLDER
+                workbook=WORKBOOK
+                sheet="714"
+            [Columns] cols:
+                item=Column("Item")
+                width=AsType(Number, Column("Line Width"))
+                qty=AsType(Number, Column("DO Qty"))
+                mo=AsType(Number, Column("Dye Order"))
+        source=FilterAnyNA(pa_sched.pa_714.raw_source, ["item", "width", "qty", "mo"])
