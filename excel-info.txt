@@ -70,7 +70,8 @@ adaptive_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
     sheet=Adaptive
-    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, Width, Qty
+    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, JobID, ...
+        Width, Qty
 
 si_release:
     folder=$FOLDER
@@ -102,3 +103,9 @@ pa_reqs:
     sheet="Fab shortage 9-25"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
+
+pa_714:
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet=714
+    col_names="Sales Rep", Item, "Order Type", "Line Width", "Dye Order", "DO Qty"

@@ -316,6 +316,44 @@ def _load_pa_floor_mos():
 
     return mo_df
 
+def _load_dye_orders():
+    schedpath, schedargs = INFO_MAP['adaptive_orders']
+    dyepath, dyeargs = INFO_MAP['pa_714']
+    dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
+    adaptive: pd.DataFrame = pd.read_excel(schedpath, **schedargs)
+
+    bad_rows = dye_df[dye_df['Sales Rep'] == 'Sales Rep']
+    dye_df = dye_df.drop(bad_rows.index)
+    for col in ('Line Width', 'Dye Order', 'DO Qty'):
+        dye_df[col] = dye_df[col].astype('float64')
+    
+    def convert_dye_order(x):
+        if pd.isna(x):
+            return ''
+        return f'{int(x):010}'
+    dye_df['mo'] = dye_df['Dye Order'].apply(convert_dye_order).astype('string')
+
+    dye_data = {
+        'job': [], 'dyelot': [], 'machine': [], 'start': [], 'end': []
+    }
+    for i in adaptive.index:
+        if pd.isna(adaptive.loc[i, 'StartTime']): continue
+        if pd.isna(adaptive.loc[i, 'EndTime']): continue
+        
+        job_id = adaptive.loc[i, 'JobID']
+        lots = job_id.split('@')[0].split('/')
+        for lot in lots:
+            if re.match('[0-9]{9}0', lot):
+                dye_data['job'].append(job_id)
+                dye_data['dyelot'].append(lot)
+                dye_data['machine'].append(adaptive.loc[i, 'Machine'])
+                dye_data['start'].append(adaptive.loc[i, 'StartTime'])
+                dye_data['end'].append(adaptive.loc[i, 'EndTime'])
+    sched_df = pd.DataFrame(data=dye_data).merge(dye_df, left_on='dyelot', right_on='mo')
+    sched_df = sched_df.sort_values(by='start')
+
+    return sched_df
+
 def _map_warehouse(wh):
     match wh:
         case 'BG':
@@ -496,6 +534,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     orders_df = pd.DataFrame(data=req_data)
     orders_df = df_cols_as_str(orders_df, 'item')
 
+    dye_df = _load_dye_orders()
+
     first = lambda srs: list(srs)[0]
     mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')
                   & ((mo_df['Grade'] != 'REJ') | pd.isna(mo_df['Grade']))]
@@ -516,6 +556,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     for pa_item in orders_df['item'].unique():
         order_idxs = list(orders_df[orders_df['item'] == pa_item].index)
         mo_idxs = []
+        dye_idxs = []
         for proc in ('F1', 'FF', 'BP', 'BG'):
             sub_df = mo_df[(mo_df['ItemWidth'] == pa_item) & (mo_df['Warehouse'] == proc)]
             mo_idxs += list(sub_df.index)
@@ -533,29 +574,50 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             wd3_df = sub_df[sub_df['Nominal\nWidth'] == item_wd*3]
             mo_idxs += list(wd2_df.index)
             mo_idxs += list(wd3_df.index)
+        
+        sub_df = dye_df[dye_df['Item'] == item_no_wd]
+        wd2_df = sub_df[sub_df['Line Width'] == item_wd*2]
+        wd3_df = sub_df[sub_df['Line Width'] == item_wd*3]
+        dye_idxs = list(wd2_df.index) + list(wd3_df.index)
 
-        i, j = 0, 0
+        i, j, k = 0, 0, 0
         total_prod, total_req = 0, 0
-        while i < len(order_idxs) and j < len(mo_idxs):
+        while i < len(order_idxs) and (j < len(mo_idxs) or k < len(dye_idxs)):
             o_idx = order_idxs[i]
-            m_idx = mo_idxs[j]
+            if j < len(mo_idxs):
+                m_idx = mo_idxs[j]
+                d_idx = -1
+            else:
+                m_idx = -1
+                d_idx = dye_idxs[k]
 
             pa_item = orders_df.loc[o_idx, 'item']
             lam_item = orders_df.loc[o_idx, 'lam_item']
             plant = orders_df.loc[o_idx, 'plant']
-
             item_wd = float(pa_item.split('-')[-1])
-            true_qty = mo_df.loc[m_idx, 'Quantity']
-            if mo_df.loc[m_idx, 'Warehouse'] in ('BF', 'BS'):
-                if mo_df.loc[m_idx, 'Nominal\nWidth'] == item_wd*2:
-                    true_qty *= 2 * 0.85
-                elif mo_df.loc[m_idx, 'Nominal\nWidth'] == item_wd*3:
-                    true_qty *= 3 * 0.85
-            elif mo_df.loc[m_idx, 'Warehouse'] == 'BG':
-                true_qty *= 0.9
 
-            rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
-            cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Warehouse'])
+            if m_idx >= 0:
+                true_qty = mo_df.loc[m_idx, 'Quantity']
+                if mo_df.loc[m_idx, 'Warehouse'] in ('BF', 'BS'):
+                    if mo_df.loc[m_idx, 'Nominal\nWidth'] == item_wd*2:
+                        true_qty *= 2 * 0.85
+                    elif mo_df.loc[m_idx, 'Nominal\nWidth'] == item_wd*3:
+                        true_qty *= 3 * 0.85
+                elif mo_df.loc[m_idx, 'Warehouse'] == 'BG':
+                    true_qty *= 0.9
+
+                rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
+                cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Warehouse'])
+            else:
+                true_qty = dye_df.loc[d_idx, 'DO Qty']
+                if dye_df.loc[d_idx, 'Line Width'] == item_wd*2:
+                    true_qty *= 2 * 0.85
+                elif dye_df.loc[d_idx, 'Line Width'] == item_wd*3:
+                    true_qty *= 3 * 0.85
+                
+                rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
+                cur_pair = (dye_df.loc[d_idx, 'mo'], 'DYEHOUSE')
+
             if rem_qty >= 100 and cur_pair not in added_mos:
                 added_mos.add(cur_pair)
                 mo_data['mo'].append(cur_pair[0])
@@ -563,7 +625,10 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 mo_data['plant'].append(plant)
                 mo_data['lam_item'].append(lam_item)
                 mo_data['pa_item'].append(pa_item)
-                mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
+                if m_idx >= 0:
+                    mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
+                else:
+                    mo_data['raw_yds'].append(dye_df.loc[d_idx, 'DO Qty'])
                 mo_data['fin_yds_expected'].append(true_qty)
                 mo_data['ordered_yds'].append(orders_df.loc[o_idx, 'yds'])
                 mo_data['pnum'].append(orders_df.loc[o_idx, 'pnum'])
@@ -574,7 +639,10 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 i += 1
             else:
                 total_prod += true_qty
-                j += 1
+                if j < len(mo_idxs):
+                    j += 1
+                else:
+                    k += 1
     
     prty_mo_df = pd.DataFrame(data=mo_data)
     prty_mo_df = df_cols_as_str(prty_mo_df, 'mo', 'warehouse', 'lam_item', 'pa_item')
