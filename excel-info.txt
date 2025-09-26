@@ -109,3 +109,13 @@ pa_714:
     workbook=$WORKBOOK
     sheet=714
     col_names="Sales Rep", Item, "Order Type", "Line Width", "Dye Order", "DO Qty"
+
+dye_plan:
+    folder=$FOLDER
+    workbook=output_20250926.xlsx
+    sheet=roll_allocation
+
+dye_plan_inv:
+    folder=$FOLDER
+    workbook=output_20250926.xlsx
+    sheet=inventory
