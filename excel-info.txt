@@ -9,7 +9,8 @@
 # '$' to mark it as a reference and not a regular name
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
-WORKBOOK = "PA plant orders against Lam demand 20250922.xlsx"
+REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
+WORKBOOK = "PA plant orders against Lam demand 20250929.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
@@ -66,12 +67,18 @@ pa_floor_mos:
         DEF2_REASON, DEFECT3, DEF3_REASON, MARKET_SEGMENT
     start_row=4
 
-adaptive_orders:
+adaptive1_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
     sheet=Adaptive
     col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, JobID, ...
         Width, Qty
+
+adaptive2_orders:
+    folder=$FOLDER
+    workbook=$WORKBOOK
+    sheet=Adaptive2
+    col_names=Machine, StartTime, EndTime, JobID
 
 si_release:
     folder=$FOLDER
@@ -100,7 +107,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 9-25"
+    sheet="Fab shortage 10-3"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
@@ -119,3 +126,8 @@ dye_plan_inv:
     folder=$FOLDER
     workbook=output_20250926.xlsx
     sheet=inventory
+
+pa_2010:
+    folder=$REPORTS
+    workbook="2010"
+    sheet=Placeholder

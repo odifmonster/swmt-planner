@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import typer, pandas as pd, datetime as dt, os
+import typer, pandas as pd, numpy as np, datetime as dt, os
 from pathlib import Path
 from typing import Annotated
 from enum import Enum
@@ -149,41 +149,149 @@ def update_file(infopath: _InfoPathAnno, outpath: _OutPathAnno,
         case _:
             print('No file to update.')
 
-def _grg_dmnd(start: dt.datetime, writer):
-    schedpath, schedargs = INFO_MAP['dye_plan']
-    sched_df: pd.DataFrame = pd.read_excel(schedpath, **schedargs)
-    sched_df = df_cols_as_str(sched_df, 'jet', 'job', 'lot', 'greige', 'roll1',
-                              'roll2', 'item', 'color')
+def _audit_summary(date: dt.datetime, writer):
+    fpath, _ = INFO_MAP['pa_2010']
+    fpath += f'_{date.strftime('%Y%m%d')}.csv'
     
-    def get_wk_num(d: dt.datetime):
-        return d.isocalendar().week
-    sched_df['week'] = sched_df['start'].apply(get_wk_num)
-    sched_df['is_new'] = sched_df['roll1'].str.contains('PLAN') | \
-        sched_df['roll1'].str.contains('NEW') | sched_df['roll2'].str.contains('PLAN') | \
-        sched_df['roll2'].str.contains('NEW')
+    audit = pd.read_csv(fpath, dtype={'Lot': 'string'})
+    drop_rows = audit[~audit['Valid Lot'] | (audit['Lot'].str[-1] != '0')].index
+    audit = audit.drop(drop_rows, axis=0)
+
+    def _split_raw_dt_val(raw):
+        raw = int(raw)
+        val3 = raw % 100
+        val2 = int((raw % 10000 - val3) / 100)
+        val1 = int((raw - val2*100 - val3) / 10000)
+        return val1, val2, val3
     
-    invpath, invargs = INFO_MAP['dye_plan_inv']
-    inv_df: pd.DataFrame = pd.read_excel(invpath, **invargs)
-    inv_df = df_cols_as_str(inv_df, 'roll_id', 'greige')
-
-    grgpath, grgargs = INFO_MAP['greige_styles']
-    grg_df: pd.DataFrame = pd.read_excel(grgpath, **grgargs)
-    grg_df = df_cols_as_str(grg_df, 'GreigeAlt', 'GreigeAlt2')
-
-    inv_df = inv_df[(inv_df['lbs'] > 100) & ~(inv_df['roll_id'].str.contains('NEW') | \
-                                              inv_df['roll_id'].str.contains('PLAN'))]
+    def _get_timestamp(row):
+        y, m, d = _split_raw_dt_val(row['Trans Date'])
+        hour, minute, sec = _split_raw_dt_val(row['Trans Time'])
+        return dt.datetime(y, m, d, hour=hour, minute=minute, second=sec)
     
-    weeks = sched_df['week'].unique()
-    grg_data = { str(week): [] for week in sorted(weeks) }
-    grg_idxs = []
+    audit['Timestamp'] = audit[['Trans Date', 'Trans Time']].agg(_get_timestamp, axis=1)
 
-    for grg, group in sched_df.groupby('greige'):
-        grg_idxs += [(grg, 'hard'), (grg, 'soft'), (grg, 'total')]
-        for week in sorted(weeks):
-            old_df = group[~group['is_new'] & (group['week'] < week)]
-            new_df = group[group['is_new'] & (group['week'] < week)]
-            used_old = sum(old_df['lbs1']) + sum(old_df['lbs2'])
-            used_new = sum
+    def _get_roll_type(row):
+        if row['Lot'] not in row['Roll ID']:
+            return 'FIN'
+        if len(row['Roll ID']) == 10:
+            return 'LOT'
+        if len(row['Roll ID']) == 13:
+            return 'PANEL'
+        return 'ROLL'
+
+    def _get_doff(row):
+        if row['Roll Type'] in ('FIN', 'LOT'):
+            return np.nan
+        return int(row['Roll ID'][10:12])
+    
+    def _get_panel(row):
+        if row['Roll Type'] in ('FIN', 'LOT'):
+            return np.nan
+        return row['Roll ID'][12]
+    
+    def _get_insp_roll(row):
+        if row['Roll Type'] == 'ROLL':
+            return int(row['Roll ID'][-2:])
+        return np.nan
+    
+    audit['Roll Type'] = audit[['Roll ID', 'Lot']].agg(_get_roll_type, axis=1)
+    audit['Doff'] = audit[['Roll Type', 'Roll ID']].agg(_get_doff, axis=1)
+    audit['Panel'] = audit[['Roll Type', 'Roll ID']].agg(_get_panel, axis=1)
+    audit['Insp Roll'] = audit[['Roll Type', 'Roll ID']].agg(_get_insp_roll, axis=1)
+
+    def _get_add_qty(row):
+        if row['Trans Desc'] in ('PHYSICAL ADJUSTMENT', 'ADJUST UP', 'REPORT PRODUCTION'):
+            return row['Qty']
+        if row['Trans Desc'] in ('ADJUST DOWN', 'REPORT CONSUMPTION'):
+            return row['Qty'] * -1
+        return np.nan
+    
+    audit['AddQty'] = audit[['Qty', 'Trans Desc']].agg(_get_add_qty, axis=1)
+
+    idx = []
+    roll_data = {
+        'kind': [], 'mo': [], 'market': [], 'item': [], 'yds': [], 'processed_yds': [],
+        'code': [], 'timestamp': []
+    }
+
+    for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
+        kind, roll = key
+        if kind == 'LOT': continue
+            
+        first = list(grp.index)[0]
+
+        if kind == 'FIN':
+            init_opts = grp[grp['Trans Desc'].str.contains('TRANSFER|PRODUCTION')]
+            if len(init_opts) == 0: continue
+
+        idx.append(roll)
+        max_yds = max(grp['Qty'])
+        amts = {}
+        
+        init_rows_added = grp[(grp['Qty'] == max_yds) & ~pd.isna(grp['AddQty'])]
+        init_rows = grp[grp['Qty'] == max_yds]
+        first = list(init_rows.index)[0]
+        init_code = audit.loc[first, 'Quality Code']
+        adjust_code = None
+
+        if len(init_rows_added) == 0:
+            if kind == 'FIN':
+                amts[init_code] = max_yds
+            else:
+                amts[init_code] = { 'add': max_yds, 'rem': 0 }
+
+        for i in grp.index:
+            if pd.isna(audit.loc[i, 'AddQty']): continue
+            add_qty = audit.loc[i, 'AddQty']
+            code = audit.loc[i, 'Quality Code']
+            trans = audit.loc[i, 'Trans Desc']
+            
+            if code not in amts:
+                if kind == 'FIN':
+                    amts[code] = 0
+                else:
+                    amts[code] = { 'add': 0, 'rem': 0 }
+
+            if kind == 'FIN':
+                amts[code] += add_qty
+            else:
+                if add_qty < 0:
+                    amts[code]['rem'] += add_qty*-1
+                else:
+                    amts[code]['add'] += add_qty
+                    
+            if code != init_code and audit.loc[i, 'AddQty'] > 0 and adjust_code is not None:
+                adjust_code = code
+
+        roll_data['kind'].append(kind)
+        pairs = [('mo', 'Lot'), ('market', 'Market Segme'), ('item', 'Fin Item 1')]
+        for col1, col2 in pairs:
+            roll_data[col1].append(audit.loc[first, col2])
+
+        code = init_code if adjust_code is None else adjust_code
+        if kind == 'FIN':
+            qty = amts[code]
+            processed = 0
+        else:
+            qty = amts[code]['add']
+            processed = amts[code]['rem']
+        roll_data['yds'].append(qty)
+        roll_data['processed_yds'].append(processed)
+        roll_data['code'].append(code)
+        roll_data['timestamp'].append(max(grp['Timestamp']))
+
+    by_roll = pd.DataFrame(data=roll_data, index=idx)
+
+    for i in by_roll.index:
+        minval = by_roll.loc[i, 'processed_yds'] - 2
+        maxval = minval + 4
+        if minval <= by_roll.loc[i, 'yds'] * 2 <= maxval:
+            by_roll.loc[i, 'processed_yds'] = by_roll.loc[i, 'yds']
+        elif by_roll.loc[i, 'yds'] < minval:
+            by_roll.loc[i, 'yds'] = by_roll.loc[i, 'processed_yds']
+    
+    by_roll.to_excel(writer, sheet_name='audit_raw', index_label='id')
     
 class _ReportName(str, Enum):
     pa_floor_status = 'pa_floor_status'
@@ -191,6 +299,7 @@ class _ReportName(str, Enum):
     pa_priority_mos = 'pa_priority_mos'
     all_pa_1427 = 'all_pa_1427'
     greige_demand = 'greige_demand'
+    pa_audit_sum = 'pa_audit_sum'
 
 _REPORT_HELP = 'Name of the report to generate'
 _ReportNameAnno = Annotated[_ReportName,
@@ -207,18 +316,20 @@ _StartAnno = Annotated[dt.datetime,
                        typer.Option(help=_START_HELP)]
 def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                     outdir: _ReportOutAnno, start: _StartAnno = dt.datetime.now()):
+    today = dt.date.today().strftime('%Y%m%d')
+    fname = f'{name.name}_{today}.xlsx'
+    i = 1
+    while os.path.exists(os.path.join(outdir, fname)):
+        i += 1
+        fname = f'{name.name}_{today}_{i}.xlsx'
     outpath = os.path.join(outdir, fname)
-    writer = pd.ExcelWriter(outpath, date_format='MM/DD')
+    writer = pd.ExcelWriter(outpath, date_format='MM/DD',
+                            datetime_format='%Y-%m-%d %H:%M')
 
-    if name != _ReportName.greige_demand:
-        load_info_map(infopath)
+    load_info_map(infopath)
+
+    if name not in (_ReportName.greige_demand, _ReportName.pa_audit_sum):
         mo_df = _load_pa_floor_mos()
-        today = dt.date.today().strftime('%Y%m%d')
-        fname = f'{name.name}_{today}.xlsx'
-        i = 1
-        while os.path.exists(os.path.join(outdir, fname)):
-            i += 1
-            fname = f'{name.name}_{today}_{i}.xlsx'
         match name:
             case _ReportName.pa_floor_status:
                 _pa_process_report(mo_df, writer)
@@ -230,4 +341,6 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                 _pa_process_report(mo_df, writer)
                 _pa_rework_report(mo_df, writer)
                 _pa_priority_mos_report(start, mo_df, writer)
-        writer.close()
+    elif name == _ReportName.pa_audit_sum:
+        _audit_summary(start, writer)
+    writer.close()

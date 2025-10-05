@@ -69,7 +69,7 @@ def _load_pa_floor_mos():
     return mo_df
 
 def _load_dye_orders():
-    schedpath, schedargs = INFO_MAP['adaptive_orders']
+    schedpath, schedargs = INFO_MAP['adaptive2_orders']
     dyepath, dyeargs = INFO_MAP['pa_714']
     dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
     adaptive: pd.DataFrame = pd.read_excel(schedpath, **schedargs)
@@ -130,14 +130,6 @@ def _pa_process_report(mo_df: pd.DataFrame, writer):
     mo_df['ItemCode'] = mo_df['Item'].apply(get_code).astype('string')
 
     first = lambda srs: list(srs)[0]
-    def first_market(srs: pd.Series):
-        no_na = srs.dropna()
-        if len(no_na) == 0:
-            return 'NON-AUTO'
-        x = list(no_na)[0]
-        if x == 'AUTO INT':
-            return 'AUTO'
-        return 'NON-AUTO'
     
     by_lot = mo_df.groupby(['Process', 'Lot', 'Quality']).agg(
         Code=pd.NamedAgg(column='ItemCode', aggfunc=first),
@@ -146,7 +138,7 @@ def _pa_process_report(mo_df: pd.DataFrame, writer):
         Color=pd.NamedAgg(column='Color', aggfunc=first),
         Customer=pd.NamedAgg(column='Customer', aggfunc=first),
         Owner=pd.NamedAgg(column='Owner', aggfunc=first),
-        Market=pd.NamedAgg(column='MARKET_SEGMENT', aggfunc=first_market),
+        Market=pd.NamedAgg(column='MARKET_SEGMENT', aggfunc=first),
         Width=pd.NamedAgg(column='Nominal\nWidth', aggfunc=first),
         Quantity=pd.NamedAgg(column='Quantity', aggfunc='sum'))
     by_lot = by_lot.reset_index()
