@@ -3,8 +3,7 @@
 from collections import namedtuple
 from enum import Enum, auto
 
-class Empty:
-    pass
+Empty = namedtuple('Empty', ['token'])
 
 class AtomType(Enum):
     INT = auto()
@@ -23,26 +22,27 @@ class ExpType(Enum):
     Rng = auto()
     List = auto()
 
-AccessExp = namedtuple('AccessExp', ['owner', 'member', 'kind'],
+AccessExp = namedtuple('AccessExp', ['owner', 'r_dot', 'member', 'kind'],
                        defaults=[ExpType.Access])
 CallExp = namedtuple('CallExp', ['func', 'args', 'kind'],
                      defaults=[ExpType.Call])
-UnpackExp = namedtuple('UnpackExp', ['child', 'kind'],
+UnpackExp = namedtuple('UnpackExp', ['r_star', 'child', 'kind'],
                        defaults=[ExpType.Unpack])
 
-class Binop(Enum):
+class BinopType(Enum):
     MULT = auto()
     DIV = auto()
     MOD = auto()
     ADD = auto()
     SUB = auto()
 
+Binop = namedtuple('Binop', ['kind', 'token'])
 BinopExp = namedtuple('BinopExp', ['op', 'left', 'right', 'kind'],
                       defaults=[ExpType.Binop])
 
-PatternExp = namedtuple('PatternExp', ['var', 'exp', 'kind'],
+PatternExp = namedtuple('PatternExp', ['var', 'r_arrow', 'exp', 'kind'],
                         defaults=[ExpType.Pattern])
-RngExp = namedtuple('RngExp', ['start', 'stop', 'kind'],
+RngExp = namedtuple('RngExp', ['start', 'r_to', 'stop', 'kind'],
                     defaults=[ExpType.Rng])
 ListExp = namedtuple('ListExp', ['exps', 'kind'],
                      defaults=[ExpType.List])
@@ -51,13 +51,10 @@ class Exp:
     pass
 
 class StmtType(Enum):
-    Use = auto()
     Assign = auto()
     Block = auto()
 
-UseStmt = namedtuple('UseStmt', ['names', 'source', 'kind'],
-                     defaults=[StmtType.Use])
-AssignStmt = namedtuple('AssignStmt', ['name', 'value', 'kind'],
+AssignStmt = namedtuple('AssignStmt', ['name', 'r_eq', 'value', 'kind'],
                         defaults=[StmtType.Assign])
 BlockStmt = namedtuple('BlockStmt', ['dtype', 'name', 'stmts', 'kind'],
                        defaults=[StmtType.Block])

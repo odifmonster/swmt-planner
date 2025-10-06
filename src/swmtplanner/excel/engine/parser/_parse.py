@@ -13,7 +13,7 @@ def _match_tok(tstream: Tokenized, tgt: TokType | frozenset[TokType],
         is_tgt = lambda t: t.kind == tgt
 
     if converter is None:
-        converter = lambda _: Empty()
+        converter = lambda t: Empty(t)
 
     if tstream.ended:
         return None, 0
@@ -80,10 +80,13 @@ def _match_atom(tstream: Tokenized, kind = None):
     return _match_tok(tstream, tgt, converter=_get_atom)
 
 def _match_group(tstream: Tokenized):
-    return _match_all(tstream,
-                      [_get_tok_matcher(TokType.LPAREN),
-                       _match_exp,
-                       _get_tok_matcher(TokType.RPAREN)])
+    items, total = _match_all(
+        tstream, [_get_tok_matcher(TokType.LPAREN),
+                  _match_exp,
+                  _get_tok_matcher(TokType.RPAREN)])
+    if items is None:
+        return None, 0
+    return items[1], total
 
 def _match_access(tstream: Tokenized):
     owner, total = _match_atom(tstream, kind=TokType.NAME)
@@ -99,7 +102,7 @@ def _match_access(tstream: Tokenized):
             break
 
         total += consumed
-        owner = AccessExp(owner, items[1])
+        owner = AccessExp(owner, items[0], items[1])
     
     return owner, total
 
@@ -155,7 +158,7 @@ def _match_unpack(tstream: Tokenized):
             tstream.backup(total)
             return None, 0
         total += consumed
-        return UnpackExp(child), total
+        return UnpackExp(star, child), total
     res, total = _match_one(tstream, [_match_call, _match_access, _match_group,
                                       _match_atom, _match_list])
     return res, total
@@ -166,14 +169,14 @@ def _match_prod(tstream: Tokenized):
         return None, 0
     
     op_map = {
-        TokType.STAR: Binop.MULT, TokType.SLASH: Binop.DIV,
-        TokType.PCT: Binop.MOD
+        TokType.STAR: BinopType.MULT, TokType.SLASH: BinopType.DIV,
+        TokType.PCT: BinopType.MOD
     }
 
     while True:
         items, consumed = _match_all(
-            tstream, [_get_tok_matcher(TokType.STAR,
-                                       converter=lambda t: op_map[t.kind]),
+            tstream, [_get_tok_matcher(frozenset(op_map.keys()),
+                                       converter=lambda t: Binop(op_map[t.kind], t)),
                       _match_unpack])
         
         if items is None:
@@ -190,13 +193,13 @@ def _match_sum(tstream: Tokenized):
         return None, 0
     
     op_map = {
-        TokType.PLUS: Binop.ADD, TokType.MINUS: Binop.SUB
+        TokType.PLUS: BinopType.ADD, TokType.MINUS: BinopType.SUB
     }
 
     while True:
         items, consumed = _match_all(
-            tstream, [_get_tok_matcher(TokType.STAR,
-                                       converter=lambda t: op_map[t.kind]),
+            tstream, [_get_tok_matcher(frozenset(op_map.keys()),
+                                       converter=lambda t: Binop(op_map[t.kind], t)),
                       _match_prod])
         
         if items is None:
@@ -213,7 +216,7 @@ def _match_pattern(tstream: Tokenized):
                   _get_tok_matcher(TokType.ARROW),
                   _match_sum])
     if items is not None:
-        return PatternExp(items[0], items[2]), total
+        return PatternExp(items[0], items[1], items[2]), total
     return None, 0
 
 def _match_rng(tstream: Tokenized):
@@ -221,7 +224,7 @@ def _match_rng(tstream: Tokenized):
         tstream, [_match_sum, _get_tok_matcher(TokType.TO),
                   _match_sum])
     if items is not None:
-        return RngExp(items[0], items[2]), total
+        return RngExp(items[0], items[1], items[2]), total
     return None, 0
 
 def _match_list(tstream: Tokenized):
@@ -237,45 +240,16 @@ def _match_list(tstream: Tokenized):
 def _match_exp(tstream: Tokenized):
     return _match_one(tstream, [_match_rng, _match_pattern, _match_sum])
 
-def _match_names(tstream: Tokenized):
-    name, total = _match_atom(tstream, kind=TokType.NAME)
-    if name is None:
-        return None, 0
-    
-    names = [name]
-    while True:
-        items, consumed = _match_all(
-            tstream, [_get_tok_matcher(TokType.COMMA),
-                      lambda s: _match_atom(s, kind=TokType.NAME)])
-        
-        if items is None:
-            break
-
-        total += consumed
-        names.append(items[1])
-    
-    return names, total
-
-def _match_use(tstream: Tokenized):
-    items, total = _match_all(
-        tstream, [_get_tok_matcher(TokType.USE),
-                  _match_names,
-                  _get_tok_matcher(TokType.FROM),
-                  lambda s: _match_atom(s, kind=TokType.NAME)])
-    if items is not None:
-        return UseStmt(items[1], items[3]), total
-    return None, 0
-
 def _match_assign(tstream: Tokenized):
     items, total = _match_all(
         tstream, [lambda s: _match_atom(s, kind=TokType.NAME),
                   _get_tok_matcher(TokType.EQ), _match_exp])
     if items is not None:
-        return AssignStmt(items[0], items[2]), total
+        return AssignStmt(items[0], items[1], items[2]), total
     return None, 0
 
 def _match_simple_stmt(tstream: Tokenized):
-    stmt, total = _match_one(tstream, [_match_use, _match_assign])
+    stmt, total = _match_assign(tstream)
     if stmt is None:
         return None, 0
     

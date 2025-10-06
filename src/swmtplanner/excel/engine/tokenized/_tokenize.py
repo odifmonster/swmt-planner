@@ -126,7 +126,7 @@ def _tokenize_pass1(f: file.File):
         '+': TokType.PLUS
     }
     keywords = {
-        'use': TokType.USE, 'from': TokType.FROM, 'to': TokType.TO
+        'to': TokType.TO
     }
 
     while True:

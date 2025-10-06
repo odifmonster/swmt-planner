@@ -3,5 +3,7 @@ __pycache__/
 temp*.txt
 ast.txt
 tokenized.txt
+tokens.txt
+result.txt
 .ipynb_checkpoints/
 *.ipynb

@@ -29,8 +29,6 @@ class TokType(Enum):
     FLOAT = auto()
     STRING = auto()
     NAME = auto()
-    USE = auto()
-    FROM = auto()
     TO = auto()
     END = auto()
 

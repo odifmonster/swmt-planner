@@ -3,12 +3,11 @@ from enum import Enum
 from swmtplanner.excel.engine.tokenized import Token
 
 __all__ = ['Empty', 'AtomType', 'Atom', 'ExpType', 'AccessExp', 'CallExp',
-           'UnpackExp', 'Binop', 'BinopExp', 'PatternExp', 'RngExp',
-           'ListExp', 'Exp', 'StmtType', 'UseStmt', 'AssignStmt', 'BlockStmt',
-           'Stmt']
+           'UnpackExp', 'BinopType', 'Binop', 'BinopExp', 'PatternExp', 'RngExp',
+           'ListExp', 'Exp', 'StmtType', 'AssignStmt', 'BlockStmt', 'Stmt']
 
-class Empty:
-    ...
+class Empty(NamedTuple):
+    token: Token
 
 class AtomType(Enum):
     INT = ...
@@ -32,6 +31,7 @@ class ExpType(Enum):
 
 class AccessExp(NamedTuple):
     owner: Exp
+    r_dot: Empty
     member: Atom
     kind: Literal[ExpType.Access] = ExpType.Access
 
@@ -41,15 +41,20 @@ class CallExp(NamedTuple):
     kind: Literal[ExpType.Call] = ExpType.Call
 
 class UnpackExp(NamedTuple):
+    r_star: Empty
     child: Exp
     kind: Literal[ExpType.Unpack] = ExpType.Unpack
 
-class Binop(Enum):
+class BinopType(Enum):
     MULT = ...
     DIV = ...
     MOD = ...
     ADD = ...
     SUB = ...
+
+class Binop(NamedTuple):
+    kind: BinopType
+    token: Token
 
 class BinopExp(NamedTuple):
     op: Binop
@@ -59,11 +64,13 @@ class BinopExp(NamedTuple):
 
 class PatternExp(NamedTuple):
     var: Atom
+    r_arrow: Empty
     exp: Exp
     kind: Literal[ExpType.Pattern] = ExpType.Pattern
 
 class RngExp(NamedTuple):
     start: Exp
+    r_to: Empty
     stop: Exp
     kind: Literal[ExpType.Rng] = ExpType.Rng
 
@@ -75,17 +82,12 @@ type Exp = Atom | AccessExp | CallExp | UnpackExp | BinopExp | PatternExp \
     | RngExp | ListExp
 
 class StmtType(Enum):
-    Use = ...
     Assign = ...
     Block = ...
 
-class UseStmt(NamedTuple):
-    names: list[Atom]
-    source: Atom
-    kind: Literal[StmtType.Use] = StmtType.Use
-
 class AssignStmt(NamedTuple):
     name: Atom
+    r_eq: Empty
     value: Exp
     kind: Literal[StmtType.Assign] = StmtType.Assign
 
@@ -95,4 +97,4 @@ class BlockStmt(NamedTuple):
     stmts: list[Stmt]
     kind: Literal[StmtType.Block] = StmtType.Block
 
-type Stmt = UseStmt | AssignStmt | BlockStmt
+type Stmt = AssignStmt | BlockStmt
