@@ -149,6 +149,66 @@ def update_file(infopath: _InfoPathAnno, outpath: _OutPathAnno,
         case _:
             print('No file to update.')
 
+def _greige_reqs(writer):
+    sched_path, sched_args = INFO_MAP['dye_plan']
+    inv_path, inv_args = INFO_MAP['dye_plan_inv']
+    grg_path, grg_args = INFO_MAP['greige_styles']
+
+    sched_df = pd.read_excel(sched_path, **sched_args)
+    sched_df = df_cols_as_str(sched_df, 'jet', 'job', 'lot', 'greige', 'roll1', 'roll2', 'item', 'color')
+
+    grg_df = pd.read_excel(grg_path, **grg_args)
+    grg_df = df_cols_as_str(grg_df, 'GreigeAlt', 'GreigeAlt2')
+    grg_df.set_index('GreigeAlt')
+
+    inv_df = pd.read_excel(inv_path, **inv_args)
+    inv_df = df_cols_as_str(inv_df, 'roll_id', 'greige')
+
+    sched_df['week'] = sched_df['start'].apply(lambda d: d.isocalendar().week)
+    sched_df['is_new1'] = sched_df['roll1'].str.contains('NEW|PLAN')
+    sched_df['is_new2'] = sched_df['roll2'].str.contains('NEW|PLAN')
+
+    def map_to_alt_grg(g):
+        return grg_df.loc[g, 'GreigeAlt2']
+    sched_df['greige2'] = sched_df['greige'].apply(map_to_alt_grg).astype('string')
+
+    inv_df['greige2'] = inv_df['greige'].apply(map_to_alt_grg).astype('string')
+    is_new = inv_df['roll_id'].str.contains('NEW|PLAN')
+    is_small = (inv_df['lbs'] <= 100) & (inv_df['used'] == 0)
+    to_drop = inv_df[is_new | is_small].index
+    inv_df = inv_df.drop(index=to_drop)
+
+    grouped_inv = inv_df.groupby('greige2').agg(lbs=pd.NamedAgg(column='lbs', aggfunc='sum'))
+
+    weeks = sorted(sched_df['week'].unique())
+    grg_data = { str(w): [] for w in weeks }
+    grg_idx = []
+
+    for alt_grg, group in sched_df.groupby('greige2'):
+        extra_prod = 0
+        sfty_tgt = sum(grg_df[grg_df['GreigeAlt2'] == alt_grg]['SafetyTgt'])
+        grg_idx += [(alt_grg, 'on_hand'), (alt_grg, 'hard'), (alt_grg, 'safety'), (alt_grg, 'total')]
+        
+        for week in weeks:
+            old_df1 = group[~group['is_new1']]
+            old_df2 = group[~group['is_new2']]
+            old_used = sum(old_df1['lbs1']) + sum(old_df2['lbs2'])
+            
+            new_df1 = group[group['is_new1'] & (group['week'] == week)]
+            new_df2 = group[group['is_new2'] & (group['week'] == week)]
+            new_used = sum(new_df1['lbs1']) + sum(new_df2['lbs2'])
+            
+            rem_inv = grouped_inv.loc[alt_grg, 'lbs'] + extra_prod - old_used
+            
+            cur_safety = max(0, sfty_tgt - rem_inv)
+            grg_data[str(week)] += [rem_inv - extra_prod, new_used, cur_safety, new_used + cur_safety]
+            extra_prod += cur_safety
+    
+    idx = pd.MultiIndex.from_tuples(grg_idx, names=['item', 'kind'])
+    grg_reqs = pd.DataFrame(data=grg_data, index=idx)
+
+    grg_reqs.to_excel(writer, sheet_name='greige_reqs', float_format='%.2f')
+
 def _audit_summary(date: dt.datetime, writer):
     fpath, _ = INFO_MAP['pa_2010']
     fpath += f'_{date.strftime('%Y%m%d')}.csv'
@@ -343,4 +403,7 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                 _pa_priority_mos_report(start, mo_df, writer)
     elif name == _ReportName.pa_audit_sum:
         _audit_summary(start, writer)
+    elif name == _ReportName.greige_demand:
+        _greige_reqs(writer)
+    
     writer.close()
