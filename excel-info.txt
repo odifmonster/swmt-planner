@@ -60,8 +60,8 @@ pa_inventory:
     start_row=4
 
 pa_floor_mos:
-    folder=$FOLDER
-    workbook=$WORKBOOK
+    folder=$REPORTS
+    workbook="1427_20251006_3PM.xlsx"
     sheet=1427
     col_names="Item\nType", Warehouse, Customer, Owner, Roll, Lot, Item, ...
         Quality, Grade, "Nominal\nWidth", Quantity, DEFECT1, DEF1_REASON, DEFECT2, ...
