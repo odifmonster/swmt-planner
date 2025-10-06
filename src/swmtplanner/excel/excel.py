@@ -159,7 +159,7 @@ def _greige_reqs(writer):
 
     grg_df = pd.read_excel(grg_path, **grg_args)
     grg_df = df_cols_as_str(grg_df, 'GreigeAlt', 'GreigeAlt2')
-    grg_df.set_index('GreigeAlt')
+    grg_df = grg_df.set_index('GreigeAlt')
 
     inv_df = pd.read_excel(inv_path, **inv_args)
     inv_df = df_cols_as_str(inv_df, 'roll_id', 'greige')
@@ -201,7 +201,7 @@ def _greige_reqs(writer):
             rem_inv = grouped_inv.loc[alt_grg, 'lbs'] + extra_prod - old_used
             
             cur_safety = max(0, sfty_tgt - rem_inv)
-            grg_data[str(week)] += [rem_inv - extra_prod, new_used, cur_safety, new_used + cur_safety]
+            grg_data[str(week)] += [grouped_inv.loc[alt_grg, 'lbs'], new_used, cur_safety, new_used + cur_safety]
             extra_prod += cur_safety
     
     idx = pd.MultiIndex.from_tuples(grg_idx, names=['item', 'kind'])
