@@ -190,6 +190,10 @@ def _interp_block(x: trees.BlockStmt, glbl: _Context, cur: _Context):
 def _interp_args(x: trees.BlockStmt, glbl: _Context, **kwargs):
     glbl[x.name.value] = { '@dtype': 'Args' }
     args_block = glbl[x.name.value]
+
+    today = dt.datetime.today()
+    monday = today + dt.timedelta(days=0-today.weekday())
+    monday = dt.datetime(monday.year, monday.month, monday.day)
     
     for stmt in x.stmts:
         if stmt.kind != trees.StmtType.Assign:
@@ -201,8 +205,14 @@ def _interp_args(x: trees.BlockStmt, glbl: _Context, **kwargs):
         msg = f'Line {pos.line}: '
 
         if stmt.name.value not in kwargs:
-            msg += f'No value provided for argument {repr(stmt.name.value)}'
-            raise RuntimeError(msg)
+            if stmt.value.value in ('Date1', 'Date2'):
+                if 'week' in stmt.name.value:
+                    kwargs[stmt.name.value] = monday
+                else:
+                    kwargs[stmt.name.value] = today
+            else:
+                msg += f'No value provided for argument {repr(stmt.name.value)}'
+                raise RuntimeError(msg)
         if not isinstance(stmt.value, trees.Atom) or stmt.value.kind != trees.AtomType.NAME:
             msg += 'Invalid argument value'
             raise RuntimeError(msg)

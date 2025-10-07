@@ -1,0 +1,122 @@
+# EDIT DATA SOURCE INFO HERE
+
+# Any text following a pound sign is ignored
+# End a line in ... if you want the next line to be included as part of the previous one
+
+# Provide a list of required arguments and types here
+
+[Args] INPUT_ARGS:
+    req_weekof=Date1 # Date1 takes the form YYYYMMDD
+    req_day=Date2 # Date2 takes the form m-d
+    report_day=Date1
+    output_day=Date1
+
+SOURCE1 = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+SOURCE2 = Concat(SOURCE1, "/Reports") # Concatenate strings together
+
+MASTER = Concat("PA plant orders against Lam demand ", INPUT_ARGS.req_weekof, ".xlsx")
+LAM_PLAN = "LamDemandPlanning.xlsx"
+OUTPUT = Concat("output_", INPUT_ARGS.output_day, ".xlsx")
+
+jet_nums = [*(1 to 4), *(7 to 10)] # Use 'to' to define a range of integers (inclusive both ends)
+jets = Map(jet_nums, i -> Concat("JET ", i))
+
+req_wks = 0 to 5
+req_cols = ["FAB req'd past due", *Map(req_wks, wk -> Concat("Fab req'd WK", wk))]
+
+rls_wks = 0 to 8
+rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
+
+# Blocks representing file reading info must be marked as 'Excel' or 'CSV'
+
+[ProductInfo] product_info:
+    [Excel] dye_formulae:
+        folder=SOURCE1
+        workbook=LAM_PLAN
+        sheet="Xref"
+        col_names=["COLOR NAME", "COLOR NUMBER", "SHADE RATING"]
+        str_cols=["COLOR NAME"]
+    [Excel] fab_items:
+        # folder, workbook, and sheet are required for 'Excel' blocks
+        folder=SOURCE1
+        workbook=LAM_PLAN
+        sheet="Xref"
+        col_names=["GREIGE ITEM", "STYLE", "WD", "Yield", "PLY 1 PART #", "STATUS", ...
+            "COLOR NUMBER", "PA FIN ITEM", *jets, "SHADE RATING"] # Use a * to "unpack" lists
+        str_cols=["GREIGE ITEM", "STYLE", "STATUS", "PA FIN ITEM", *jets]
+    [Excel] greige_styles:
+        folder=SOURCE1
+        workbook=LAM_PLAN
+        sheet="Griege Sizes"
+        str_cols=["Greige", "GreigeAlt", "GreigeAlt2"]
+
+[Excel] greige_translation:
+    folder=SOURCE1
+    workbook=LAM_PLAN
+    sheet="Greige Style Translation"
+    col_ranges="A:B"
+    subst_names=["inventory", "plan"]
+    start_row=2
+    str_cols=["inventory", "plan"]
+
+[Excel] jet_info:
+    folder=SOURCE1
+    workbook="master.xlsx"
+    sheet="jets"
+    str_cols=["jet", "alt_jet"]
+
+[Excel] pa_floor_inv:
+    folder=SOURCE1
+    workbook=MASTER
+    sheet="1427"
+    str_cols=["Warehouse", "Customer", "Roll", "Lot", "Item", "Quality", "Grade", ...
+        "Nominal\nWidth", "Quantity", "ASSIGNED_ORDER"]
+
+[CSV] pa_audit:
+    folder=SOURCE2
+    file=Concat("2010_", INPUT_ARGS.report_day, ".csv")
+    str_cols=["Roll ID", "Lot"]
+    
+[DyeOrders] dye_orders:
+    [Excel] adaptive:
+        folder=SOURCE1
+        workbook=MASTER
+        sheet="Adaptive2"
+        str_cols=["Job ID"]
+    [Excel] pa_714:
+        folder=SOURCE1
+        workbook=MASTER
+        sheet="714"
+    fab_items=product_info.fab_items
+
+[PADyePlan] pa_dye_plan:
+    [Excel] future_orders:
+        folder=SOURCE1
+        workbook=OUTPUT
+        sheet="roll_allocation"
+    [Excel] avail_greige:
+        folder=SOURCE1
+        workbook=OUTPUT
+        sheet="inventory"
+    safety_tgts=product_info.greige_styles
+
+[PAReqs] pa_reqs:
+    [LamData] lam_data:
+        [JSON] move_times:
+            folder="/Users/lamanwyner/git-repos/swmt-projs/swmt-planner/"
+            file="lam_pulls.json"
+        [Excel] lam_items:
+            folder=SOURCE1
+            workbook=MASTER
+            sheet="Lam Release"
+            col_names=["Plant", "Cust #", "ProgramName", "StockItem", "Ply1 Item", "PA Item", ...
+                "Process", "Ship Day", "Schedule Day"]
+        [Excel] lam_release:
+            folder=SOURCE1
+            workbook=MASTER
+            sheet="Lam Release"
+            col_names=["Plant", "Ply1 Item", "Conversion to Yards", "LAM add'l WL factor", ...
+                "Total Inv", "Customer up-front increase", "Lam On-Hand", "Ply1 On-Hand", *rls_cols]
+    pa_xref=product_info.fab_items
+    pa_wip=pa_floor_inv
+    pa_wip_do=dye_orders
