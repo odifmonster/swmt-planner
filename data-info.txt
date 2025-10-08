@@ -109,13 +109,13 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
             folder=SOURCE1
             workbook=MASTER
             sheet="Lam Release"
-            col_names=["Plant", "Cust #", "ProgramName", "StockItem", "Ply1 Item", "PA Item", ...
+            col_names=["Plant", "Cust #", "ProgramName", "Stock Item", "Ply1 Item", ...
                 "Process", "Ship Day", "Schedule Day"]
         [Excel] lam_release:
             folder=SOURCE1
             workbook=MASTER
             sheet="Lam Release"
-            col_names=["Plant", "Ply1 Item", "Conversion to Yards", "LAM add'l WL factor", ...
+            col_names=["Stock Item", "Plant", "Ply1 Item", "Conversion to Yards", "LAM add'l WL factor", ...
                 "Total Inv", "Customer up-front increase", "Lam On-Hand", "Ply1 On-Hand", *rls_cols]
     pa_xref=product_info.fab_items
     pa_wip=pa_floor_inv

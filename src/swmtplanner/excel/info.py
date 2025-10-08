@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import os, re, pandas as pd, json
+import os, re, pandas as pd, json, datetime as dt, math
 
 from . import engine
 
@@ -22,6 +22,11 @@ def _check_required_keys(name: str, block: dict):
         missing = required.difference(block.keys())
         msg = f'{block['@dtype']} block {repr(name)} missing values for ' + ', '.join([repr(x) for x in missing])
         raise RuntimeError(msg)
+
+def df_cols_as_str(df: pd.DataFrame, cols: list[str]):
+    for col in cols:
+        df[col] = df[col].astype('string')
+    return df
 
 def _load_excel(name: str, block: dict):
     fpath = os.path.join(block['folder'].data, block['workbook'].data)
@@ -239,6 +244,187 @@ def _load_dye_plan(name: str, block: dict):
         'safety_tgts': grg_df
     }
 
+type _MoveTimes = dict[str, list[dict[str, int | dict[str]]]]
+
+def _parse_ship_day(day_str: str):
+    day_str = day_str.lower()
+    if 'every' in day_str or 'all' in day_str or 'any' in day_str:
+        return { 'monday', 'tuesday', 'wednesday', 'thursday', 'friday' }
+
+    main_pat = '[^a-z]*{}[^a-z]*'
+    day_pats = {
+        'monday': 'm(on(days?)?)?', 'tuesday': 't(u(e(s(days?)?)?)?)?',
+        'wednesday': 'wed(nesdays?)?', 'thursday': 'th(ur(s(days?)?)?)?',
+        'friday': 'f(ri(days?)?)?'
+    }
+
+    for day in day_pats:
+        if re.match(main_pat.format(day_pats[day]), day_str) is not None:
+            return day
+
+    return None
+
+def _parse_ship_days(days_str: str):
+    if type(days_str) is not str:
+        return set()
+    
+    comps = re.split(',|/|or|and', days_str)
+    day_set = set()
+    for comp in comps:
+        day = _parse_ship_day(comp)
+        if type(day) is set:
+            return day
+        elif day is None:
+            print(f'could not parse {repr(comp)}')
+        else:
+            day_set.add(day)
+    return day_set
+
+def _map_ship_day(item, ship_days_data):
+    if item in ship_days_data:
+        return ship_days_data[item]
+    return math.inf
+
+def _build_move_times(move_times: _MoveTimes, lam_items: pd.DataFrame):
+    lam_items = lam_items.rename(columns={'Cust #': 'Customer', 'ProgramName': 'Program'})
+    pull_data = {
+        'Plant': [], 'Customer': [], 'Program': [], 'Stock Item': [],
+        'Ply1 Item': [], 'Ship Day': [], 'Schedule Day': [], 'Hard Pull': [],
+        'Soft Pull': []
+    }
+
+    days_map = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3, 'friday': 4
+    }
+
+    for lam, grp in lam_items.groupby('Stock Item'):
+        ndays = 0
+        first = list(grp.index)[0]
+        skip_flag = False
+
+        for delay_name in move_times:
+            for item in move_times[delay_name]:
+                attrs = item['attributes']
+                if any(map(lambda a: pd.isna(lam_items.loc[first, a]), attrs.keys())):
+                    skip_flag = True
+                    break
+
+                is_match = lambda a: lam_items.loc[first, a] == attrs[a]
+                if all(map(is_match, attrs.keys())):
+                    ndays += item['pull_days']
+                    break
+            
+            if skip_flag:
+                break
+        
+        if skip_flag: continue
+
+        ship_days = grp['Ship Day'].unique()
+        day_set = set()
+        for ship_str in ship_days:
+            if not pd.isna(ship_str):
+                day_set |= _parse_ship_days(ship_str)
+        
+        days = list(map(lambda s: days_map[s], day_set))
+        if not days:
+            ship_day = 2
+        else:
+            ship_day = min(days)
+
+        sched_day = max(grp['Schedule Day'])
+        if pd.isna(sched_day):
+            sched_day = 3
+        
+        pull_data['Stock Item'].append(lam)
+        for col in ('Plant', 'Customer', 'Program', 'Ply1 Item'):
+            pull_data[col].append(lam_items.loc[first, col])
+        pull_data['Ship Day'].append(ship_day)
+        pull_data['Schedule Day'].append(sched_day-1)
+        pull_data['Hard Pull'].append(ndays)
+        pull_data['Soft Pull'].append(ndays+3)
+    
+    return pd.DataFrame(data=pull_data).set_index('Stock Item')
+
+def _subtract_business_days(start: dt.datetime, ndays: int):
+    res = start
+    while ndays > 0:
+        wkday = res.weekday()
+        if ndays > wkday:
+            ndays -= wkday
+            res -= dt.timedelta(days=wkday+2)
+        else:
+            res -= dt.timedelta(days=ndays)
+            ndays = 0
+    return res
+
+def _load_lam_data(name: str, block: dict, weekof: dt.datetime):
+    move_times = _load_block('move_times', block['move_times'])
+    lam_items = _load_block('lam_items', block['lam_items'])
+    lam_items = df_cols_as_str(lam_items, ['Stock Item', 'Ply1 Item'])
+
+    pull_df = _build_move_times(move_times, lam_items)
+    raw_release = _load_block('lam_release', block['lam_release'])
+    raw_release = df_cols_as_str(raw_release, ['Stock Item', 'Ply1 Item'])
+
+    rls_cols = ['lam', 'ply1', 'plant', 'hard_date', 'soft_date', 'qty']
+    rls_data = { col: [] for col in rls_cols }
+
+    cur_week = weekof
+    for key, grp in raw_release.groupby(['Stock Item', 'Plant']):
+        lam, plant = key
+        first = list(grp.index)[0]
+
+        if lam not in pull_df.index:
+            continue
+
+        ship = int(pull_df.loc[lam, 'Ship Day'])
+        sched = int(pull_df.loc[lam, 'Schedule Day'])
+        hard_pull = int(pull_df.loc[lam, 'Hard Pull'])
+        soft_pull = int(pull_df.loc[lam, 'Soft Pull'])
+
+        fin_on_hand = max(grp['Total Inv'])
+        increase = max(grp['Customer up-front increase'])
+        cum_qty = 0 - fin_on_hand - increase
+        for wks in range(-1, 9):
+            req_col = f'RLS+{wks}'
+            if wks < 0:
+                req_col = 'Past Due'
+
+            raw_cur_qty = sum(grp[req_col])
+            cum_qty += raw_cur_qty
+            if raw_cur_qty <= 0 or cum_qty <= 0: continue
+
+            rls_data['lam'].append(lam)
+            rls_data['ply1'].append(raw_release.loc[first, 'Ply1 Item'])
+            rls_data['plant'].append(plant)
+
+            ship_date = weekof + dt.timedelta(weeks=wks) + dt.timedelta(days=ship)
+            hard_date = _subtract_business_days(ship_date, hard_pull)
+            soft_date = _subtract_business_days(ship_date, soft_pull)
+            soft_wkday = soft_date.weekday()
+            if soft_wkday < sched:
+                soft_wkday += 7
+            soft_date -= dt.timedelta(days=soft_wkday-sched)
+            rls_data['hard_date'].append(hard_date)
+            rls_data['soft_date'].append(soft_date)
+            rls_data['qty'].append(min(raw_cur_qty, cum_qty))
+    
+    lam_reqs = pd.DataFrame(data=rls_data)
+
+    return {
+        'lam_reqs': lam_reqs, 'raw_release': raw_release
+    }
+
+def _load_pa_reqs(name: str, block: dict, weekof: dt.datetime):
+    lam_data = _load_block('lam_data', block['lam_data'])
+    pa_xref = _load_block('pa_xref', block['pa_xref'])
+    pa_wip = _load_block('pa_wip', block['pa_wip'])
+    pa_wip_do = _load_block('pa_wip_do', block['pa_wip_do'])
+
+    cur_week_num = weekof.isocalendar()[1]
+
+    lam_reqs: pd.DataFrame = lam_data['lam_reqs']
+
 def _load_block(name: str, block: dict):
     _check_required_keys(name, block)
 
@@ -255,6 +441,14 @@ def _load_block(name: str, block: dict):
             return _load_dye_orders(name, block)
         case 'PADyePlan':
             return _load_dye_plan(name, block)
+        case 'PAReqs':
+            return _load_block('lam_data', block['lam_data'])
+        case 'LamData':
+            weekof_str = globals()['_INFO']['INPUT_ARGS']['req_weekof'].data
+            year, month, day = int(weekof_str[:4]), int(weekof_str[4:6]), int(weekof_str[-2:])
+            weekof = dt.datetime(year, month, day)
+            print(weekof)
+            return _load_lam_data(name, block, weekof)
         case _:
             raise RuntimeError('Not working yet')
 
