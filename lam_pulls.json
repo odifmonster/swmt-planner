@@ -104,6 +104,21 @@
     ],
     "process": [
         {
+            "attributes": { "PAFin": "FF MOLTOSSX-NA-40780-73" },
+            "hard_pull": 1,
+            "soft_pull": 1
+        },
+        {
+            "attributes": { "PAFin": "FF MOLTOSSX-NA-40569-73" },
+            "hard_pull": 1,
+            "soft_pull": 1
+        },
+        {
+            "attributes": { "PAFin": "FF MOLTOSSX-NA-41320-73" },
+            "hard_pull": 1,
+            "soft_pull": 1
+        },
+        {
             "attributes": { "Process": "Flame" },
             "hard_pull": 1,
             "soft_pull": 1

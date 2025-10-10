@@ -210,12 +210,18 @@ def _greige_reqs(writer):
     grg_reqs.to_excel(writer, sheet_name='greige_reqs', float_format='%.2f')
 
 def _audit_summary(date: dt.datetime, writer):
-    fpath, _ = INFO_MAP['pa_2010']
-    fpath += f'_{date.strftime('%Y%m%d')}.csv'
+    fpath1, _ = INFO_MAP['pa_2010']
+    fpath1 += f'_{date.strftime('%Y%m%d')}.csv'
     
-    audit = pd.read_csv(fpath, dtype={'Lot': 'string'})
+    audit = pd.read_csv(fpath1, dtype={'Lot': 'string'})
     drop_rows = audit[~audit['Valid Lot'] | (audit['Lot'].str[-1] != '0')].index
     audit = audit.drop(drop_rows, axis=0)
+
+    fpath2, pdargs2 = INFO_MAP['pa_seconds']
+    start, ext = fpath2.split('.')
+    fpath2 = f'{start}_{date.strftime('%Y%m%d')}.{ext}'
+    seconds: pd.DataFrame = pd.read_excel(fpath2, **pdargs2, dtype={'ROLL': 'string', 'REASON': 'string'})
+    seconds = seconds.set_index('ROLL')
 
     def _split_raw_dt_val(raw):
         raw = int(raw)
@@ -342,6 +348,8 @@ def _audit_summary(date: dt.datetime, writer):
         roll_data['timestamp'].append(max(grp['Timestamp']))
 
     by_roll = pd.DataFrame(data=roll_data, index=idx)
+    by_roll = by_roll.merge(seconds, left_index=True, right_index=True, how='left')
+    by_roll = by_roll.rename(columns={'REASON': 'defect_code', 'DEFECT': 'defect_desc'})
 
     for i in by_roll.index:
         minval = by_roll.loc[i, 'processed_yds'] - 2

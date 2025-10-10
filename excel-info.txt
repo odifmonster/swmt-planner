@@ -108,7 +108,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 10-9"
+    sheet="Fab shortage 10-10"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
@@ -132,3 +132,9 @@ pa_2010:
     folder=$REPORTS
     workbook="2010"
     sheet=Placeholder
+
+pa_seconds:
+    folder=$REPORTS
+    workbook="1503.xlsx"
+    sheet="Seconds Report"
+    col_names="ROLL", "DEFECT", "REASON"
