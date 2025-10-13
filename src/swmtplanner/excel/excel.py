@@ -9,7 +9,7 @@ from .info import INFO_MAP, load_info_map
 from ._updates import _grg_trans_file, _grg_style_file, _dyes_file, _pa_items_file, \
     df_cols_as_str
 from ._fab_reports import _load_pa_floor_mos, _pa_process_report, \
-    _pa_priority_mos_report, _pa_rework_report
+    _pa_priority_mos_report, _pa_rework_report, _load_dye_orders
 
 _INFO_OUT_HELP = 'Path to the new file to generate'
 _InfoOutAnno = Annotated[Path, typer.Option(help=_INFO_OUT_HELP,
@@ -365,6 +365,7 @@ class _ReportName(str, Enum):
     pa_floor_status = 'pa_floor_status'
     pa_reworks = 'pa_reworks'
     pa_priority_mos = 'pa_priority_mos'
+    pa_dye_orders = 'pa_dye_orders'
     all_pa_1427 = 'all_pa_1427'
     greige_demand = 'greige_demand'
     pa_audit_sum = 'pa_audit_sum'
@@ -396,7 +397,7 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
 
     load_info_map(infopath)
 
-    if name not in (_ReportName.greige_demand, _ReportName.pa_audit_sum):
+    if name not in (_ReportName.greige_demand, _ReportName.pa_audit_sum, _ReportName.pa_dye_orders):
         mo_df = _load_pa_floor_mos()
         match name:
             case _ReportName.pa_floor_status:
@@ -409,9 +410,14 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                 _pa_process_report(mo_df, writer)
                 _pa_rework_report(mo_df, writer)
                 _pa_priority_mos_report(start, mo_df, writer)
-    elif name == _ReportName.pa_audit_sum:
-        _audit_summary(start, writer)
-    elif name == _ReportName.greige_demand:
-        _greige_reqs(writer)
+    else:
+        match name:
+            case _ReportName.pa_audit_sum:
+                _audit_summary(start, writer)
+            case _ReportName.greige_demand:
+                _greige_reqs(writer)
+            case _ReportName.pa_dye_orders:
+                df = _load_dye_orders()
+                df.to_excel(writer, sheet_name='Orders in Dye', index=False)
     
     writer.close()
