@@ -9,7 +9,7 @@ from .info import INFO_MAP, load_info_map
 from ._updates import _grg_trans_file, _grg_style_file, _dyes_file, _pa_items_file, \
     df_cols_as_str
 from ._fab_reports import _load_pa_floor_mos, _pa_process_report, \
-    _pa_priority_mos_report, _pa_rework_report, _load_dye_orders
+    _pa_priority_mos_report, _pa_rework_report, _load_dye_orders1, _load_dye_orders2
 
 _INFO_OUT_HELP = 'Path to the new file to generate'
 _InfoOutAnno = Annotated[Path, typer.Option(help=_INFO_OUT_HELP,
@@ -417,7 +417,7 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
             case _ReportName.greige_demand:
                 _greige_reqs(writer)
             case _ReportName.pa_dye_orders:
-                df = _load_dye_orders()
+                df = _load_dye_orders1()
                 df.to_excel(writer, sheet_name='Orders in Dye', index=False)
     
     writer.close()

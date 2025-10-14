@@ -68,22 +68,9 @@ def _load_pa_floor_mos():
 
     return mo_df
 
-def _load_dye_orders():
+def _load_dye_orders1():
     schedpath, schedargs = INFO_MAP['adaptive2_orders']
-    dyepath, dyeargs = INFO_MAP['pa_714']
-    dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
     adaptive: pd.DataFrame = pd.read_excel(schedpath, **schedargs)
-
-    bad_rows = dye_df[dye_df['Sales Rep'] == 'Sales Rep']
-    dye_df = dye_df.drop(bad_rows.index)
-    for col in ('Line Width', 'Dye Order', 'DO Qty'):
-        dye_df[col] = dye_df[col].astype('float64')
-    
-    def convert_dye_order(x):
-        if pd.isna(x):
-            return ''
-        return f'{int(x):010}'
-    dye_df['mo'] = dye_df['Dye Order'].apply(convert_dye_order).astype('string')
 
     dye_data = {
         'job': [], 'dyelot': [], 'machine': [], 'start': [], 'end': []
@@ -101,7 +88,27 @@ def _load_dye_orders():
                 dye_data['machine'].append(adaptive.loc[i, 'Machine'])
                 dye_data['start'].append(adaptive.loc[i, 'StartTime'])
                 dye_data['end'].append(adaptive.loc[i, 'EndTime'])
-    sched_df = pd.DataFrame(data=dye_data).merge(dye_df, left_on='dyelot', right_on='mo')
+    
+    dye_df = pd.DataFrame(data=dye_data)
+    return dye_df
+
+def _load_dye_orders2():
+    dyepath, dyeargs = INFO_MAP['pa_714']
+    dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
+    adaptive: pd.DataFrame = _load_dye_orders1()
+
+    bad_rows = dye_df[dye_df['Sales Rep'] == 'Sales Rep']
+    dye_df = dye_df.drop(bad_rows.index)
+    for col in ('Line Width', 'Dye Order', 'DO Qty'):
+        dye_df[col] = dye_df[col].astype('float64')
+    
+    def convert_dye_order(x):
+        if pd.isna(x):
+            return ''
+        return f'{int(x):010}'
+    dye_df['mo'] = dye_df['Dye Order'].apply(convert_dye_order).astype('string')
+
+    sched_df = adaptive.merge(dye_df, left_on='dyelot', right_on='mo')
     sched_df = sched_df.sort_values(by='start')
 
     return sched_df
@@ -198,7 +205,20 @@ def _parse_ship_days(days_str: str):
 def _map_ship_day(item, ship_days_data):
     if item in ship_days_data:
         return ship_days_data[item]
-    return math.inf    
+    return math.inf
+
+def _sub_bsns_days(start: dt.datetime, ndays: int):
+    while ndays > 0:
+        wkday = start.weekday()
+        if ndays > wkday:
+            subdays1 = wkday
+            subdays2 = subdays1 + 2
+        else:
+            subdays1, subdays2 = wkday, wkday
+        
+        start -= dt.timedelta(days=subdays2)
+        ndays -= subdays1
+    return start
 
 def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     shippath, shipargs = INFO_MAP['lam_ship_dates']
@@ -259,9 +279,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 wkday = 2
 
             lam_due_date = monday + dt.timedelta(weeks=wk_delta, days=wkday)
-            due_date = lam_due_date - dt.timedelta(days=5)
-            if due_date.weekday() > 4:
-                due_date -= dt.timedelta(days=due_date.weekday() - 4)
+            due_date = _sub_bsns_days(lam_due_date, 5)
 
             cum_req += req_raw
             cur_req_yds = max(0, min(req_raw, cum_req))
@@ -278,7 +296,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     orders_df = pd.DataFrame(data=req_data)
     orders_df = df_cols_as_str(orders_df, 'item')
 
-    dye_df = _load_dye_orders()
+    dye_df = _load_dye_orders2()
 
     first = lambda srs: list(srs)[0]
     mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')
@@ -319,10 +337,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             mo_idxs += list(wd2_df.index)
             mo_idxs += list(wd3_df.index)
         
-        sub_df = dye_df[dye_df['Item'] == item_no_wd]
-        wd2_df = sub_df[sub_df['Line Width'] == item_wd*2]
-        wd3_df = sub_df[sub_df['Line Width'] == item_wd*3]
-        dye_idxs = list(wd2_df.index) + list(wd3_df.index)
+        sub_df = dye_df[dye_df['Fin Item'] == pa_item]
+        dye_idxs = list(sub_df.index)
 
         i, j, k = 0, 0, 0
         total_prod, total_req = 0, 0
@@ -353,12 +369,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
                 cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Warehouse'])
             else:
-                true_qty = dye_df.loc[d_idx, 'DO Qty']
-                if dye_df.loc[d_idx, 'Line Width'] == item_wd*2:
-                    true_qty *= 2 * 0.85
-                elif dye_df.loc[d_idx, 'Line Width'] == item_wd*3:
-                    true_qty *= 3 * 0.85
-                
+                true_qty = dye_df.loc[d_idx, 'Fin Yds'] * 0.85
                 rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
                 cur_pair = (dye_df.loc[d_idx, 'mo'], 'DYEHOUSE')
 
