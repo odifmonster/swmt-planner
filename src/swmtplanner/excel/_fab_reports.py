@@ -93,25 +93,14 @@ def _load_dye_orders1():
     return dye_df
 
 def _load_dye_orders2():
-    dyepath, dyeargs = INFO_MAP['pa_714']
+    dyepath, dyeargs = INFO_MAP['adaptive1_orders']
     dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
-    adaptive: pd.DataFrame = _load_dye_orders1()
 
-    bad_rows = dye_df[dye_df['Sales Rep'] == 'Sales Rep']
-    dye_df = dye_df.drop(bad_rows.index)
-    for col in ('Line Width', 'Dye Order', 'DO Qty'):
-        dye_df[col] = dye_df[col].astype('float64')
-    
-    def convert_dye_order(x):
-        if pd.isna(x):
-            return ''
-        return f'{int(x):010}'
-    dye_df['mo'] = dye_df['Dye Order'].apply(convert_dye_order).astype('string')
+    to_drop = dye_df[dye_df['item'].isna()].index
+    dye_df = dye_df.drop(to_drop)
+    dye_df = dye_df.sort_values('start')
 
-    sched_df = adaptive.merge(dye_df, left_on='dyelot', right_on='mo')
-    sched_df = sched_df.sort_values(by='start')
-
-    return sched_df
+    return dye_df
 
 def _map_warehouse(wh):
     match wh:
@@ -337,7 +326,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             mo_idxs += list(wd2_df.index)
             mo_idxs += list(wd3_df.index)
         
-        sub_df = dye_df[dye_df['Fin Item'] == pa_item]
+        sub_df = dye_df[dye_df['item'] == pa_item]
         dye_idxs = list(sub_df.index)
 
         i, j, k = 0, 0, 0
@@ -369,9 +358,9 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
                 cur_pair = (mo_df.loc[m_idx, 'Lot'], mo_df.loc[m_idx, 'Warehouse'])
             else:
-                true_qty = dye_df.loc[d_idx, 'Fin Yds'] * 0.85
+                true_qty = dye_df.loc[d_idx, 'qty'] * 0.85
                 rem_qty = total_req + orders_df.loc[o_idx, 'yds'] - total_prod
-                cur_pair = (dye_df.loc[d_idx, 'mo'], 'DYEHOUSE')
+                cur_pair = (dye_df.loc[d_idx, 'dyelot'], 'DYEHOUSE')
 
             if rem_qty >= 100 and cur_pair not in added_mos:
                 added_mos.add(cur_pair)
@@ -383,7 +372,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 if m_idx >= 0:
                     mo_data['raw_yds'].append(mo_df.loc[m_idx, 'Quantity'])
                 else:
-                    mo_data['raw_yds'].append(dye_df.loc[d_idx, 'DO Qty'])
+                    mo_data['raw_yds'].append(dye_df.loc[d_idx, 'qty'] / dye_df.loc[d_idx, 'panels'])
                 mo_data['fin_yds_expected'].append(true_qty)
                 mo_data['ordered_yds'].append(orders_df.loc[o_idx, 'yds'])
                 mo_data['pnum'].append(orders_df.loc[o_idx, 'pnum'])

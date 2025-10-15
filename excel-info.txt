@@ -71,13 +71,12 @@ pa_floor_mos:
 adaptive1_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet=Adaptive
-    col_names=Machine, StartTime, EndTime, FinItem, DyelotID1, DyelotID2, JobID, ...
-        Width, Qty
+    sheet="Orders in Dye"
+    col_names=job, dyelot, machine, start, end, item, panels, qty
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 3.xlsx"
+    workbook="Dyelots 4.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 
@@ -108,7 +107,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 10-14"
+    sheet="Fab shortage 10-15"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
