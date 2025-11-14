@@ -174,7 +174,7 @@ def _greige_reqs(writer):
 
     inv_df['greige2'] = inv_df['greige'].apply(map_to_alt_grg).astype('string')
     is_new = inv_df['roll_id'].str.contains('NEW|PLAN')
-    is_small = (inv_df['lbs'] <= 100) & (inv_df['used'] == 0)
+    is_small = (inv_df['lbs'] < 300) & (inv_df['used'] == 0)
     to_drop = inv_df[is_new | is_small].index
     inv_df = inv_df.drop(index=to_drop)
 
@@ -198,10 +198,14 @@ def _greige_reqs(writer):
             new_df2 = group[group['is_new2'] & (group['week'] == week)]
             new_used = sum(new_df1['lbs1']) + sum(new_df2['lbs2'])
             
-            rem_inv = grouped_inv.loc[alt_grg, 'lbs'] + extra_prod - old_used
+            if alt_grg not in grouped_inv.index:
+                cur_inv = 0
+            else:
+                cur_inv = grouped_inv.loc[alt_grg, 'lbs']
+            rem_inv = cur_inv + extra_prod - old_used
             
             cur_safety = max(0, sfty_tgt - rem_inv)
-            grg_data[str(week)] += [grouped_inv.loc[alt_grg, 'lbs'], new_used, cur_safety, new_used + cur_safety]
+            grg_data[str(week)] += [cur_inv, new_used, cur_safety, new_used + cur_safety]
             extra_prod += cur_safety
     
     idx = pd.MultiIndex.from_tuples(grg_idx, names=['item', 'kind'])
@@ -214,7 +218,7 @@ def _audit_summary(date: dt.datetime, writer):
     fpath1 += f'_{date.strftime('%Y%m%d')}.csv'
     
     audit = pd.read_csv(fpath1, dtype={'Lot': 'string'})
-    drop_rows = audit[~audit['Valid Lot'] | (audit['Lot'].str[-1] != '0')].index
+    drop_rows = audit[~audit['Valid Lot'] | (audit['Lot'].str[-1] != '0') | (audit['Item Type'] != 'FF')].index
     audit = audit.drop(drop_rows, axis=0)
 
     fpath2, pdargs2 = INFO_MAP['pa_seconds']
@@ -242,6 +246,8 @@ def _audit_summary(date: dt.datetime, writer):
             return 'FIN'
         if len(row['Roll ID']) == 10:
             return 'LOT'
+        if len(row['Roll ID']) == 12:
+            return 'DOFF'
         if len(row['Roll ID']) == 13:
             return 'PANEL'
         return 'ROLL'
@@ -252,7 +258,7 @@ def _audit_summary(date: dt.datetime, writer):
         return int(row['Roll ID'][10:12])
     
     def _get_panel(row):
-        if row['Roll Type'] in ('FIN', 'LOT'):
+        if row['Roll Type'] in ('FIN', 'LOT', 'DOFF'):
             return np.nan
         return row['Roll ID'][12]
     
@@ -288,7 +294,7 @@ def _audit_summary(date: dt.datetime, writer):
         first = list(grp.index)[0]
 
         if kind == 'FIN':
-            init_opts = grp[grp['Trans Desc'].str.contains('TRANSFER|PRODUCTION')]
+            init_opts = grp[grp['Trans Desc'] == 'REPORT PRODUCTION']
             if len(init_opts) == 0: continue
 
         idx.append(roll)
@@ -327,7 +333,7 @@ def _audit_summary(date: dt.datetime, writer):
                 else:
                     amts[code]['add'] += add_qty
                     
-            if code != init_code and audit.loc[i, 'AddQty'] > 0 and adjust_code is not None:
+            if code != init_code and audit.loc[i, 'AddQty'] > 0 and adjust_code is None:
                 adjust_code = code
 
         roll_data['kind'].append(kind)

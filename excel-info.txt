@@ -10,8 +10,8 @@
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
-WORKBOOK = "PA plant orders against Lam demand 20251013.xlsx"
-OUTPUT = "output_20251013.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20251110.xlsx"
+OUTPUT = "output_20251110.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
@@ -21,7 +21,7 @@ OUTPUT = "output_20251013.xlsx"
 dye_formulae:
     # This is always required, must be an absolute path to a file
     folder=$FOLDER
-    workbook=LamDemandPlanning.xlsx
+    workbook="PA Master Xref.xlsx"
     sheet=Xref # This is always required
     col_names="COLOR NAME", "COLOR NUMBER", "SHADE RATING"
 
@@ -29,19 +29,19 @@ dye_formulae:
 # which greige style they use, etc.)
 pa_fin_items:
     folder=$FOLDER
-    workbook=LamDemandPlanning.xlsx
+    workbook="PA Master Xref.xlsx"
     sheet=Xref
     col_names="GREIGE ITEM", STYLE, WD, Yield, STATUS, "COLOR NAME", "COLOR NUMBER", ...
         "PA FIN ITEM", $jets, "SHADE RATING"
 
 greige_styles: # information about target lbs per greige style roll
     folder=$FOLDER
-    workbook=LamDemandPlanning.xlsx
-    sheet="Griege Sizes"
+    workbook="PA Master Xref.xlsx"
+    sheet="Greige Styles"
 
 greige_translation:
     folder=$FOLDER
-    workbook=LamDemandPlanning.xlsx
+    workbook="PA Master Xref.xlsx"
     sheet="Greige Style Translation"
     subst_names=inventory, plan # only use this if the workbook has no column names
     col_ranges="A:B" # required if providing column names
@@ -72,11 +72,11 @@ adaptive1_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
     sheet="Orders in Dye"
-    col_names=job, dyelot, machine, start, end, item, panels, qty
+    col_names=job, dyelot, machine, start, end, item, panels, qty, Customer
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 4.xlsx"
+    workbook="Dyelots 31.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 
@@ -107,7 +107,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 10-15"
+    sheet="Fab shortage 11-13"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 

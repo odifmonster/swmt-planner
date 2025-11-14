@@ -94,9 +94,9 @@ def _load_dye_orders1():
 
 def _load_dye_orders2():
     dyepath, dyeargs = INFO_MAP['adaptive1_orders']
-    dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs)
+    dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs, dtype={'dyelot': 'string'})
 
-    to_drop = dye_df[dye_df['item'].isna()].index
+    to_drop = dye_df[dye_df['item'].isna() | (dye_df['Customer'] != 17191)].index
     dye_df = dye_df.drop(to_drop)
     dye_df = dye_df.sort_values('start')
 
@@ -197,17 +197,14 @@ def _map_ship_day(item, ship_days_data):
     return math.inf
 
 def _sub_bsns_days(start: dt.datetime, ndays: int):
-    while ndays > 0:
+    while True:
         wkday = start.weekday()
         if ndays > wkday:
-            subdays1 = wkday
-            subdays2 = subdays1 + 2
+            start -= dt.timedelta(days=wkday+2)
+            ndays -= wkday
         else:
-            subdays1, subdays2 = wkday, wkday
-        
-        start -= dt.timedelta(days=subdays2)
-        ndays -= subdays1
-    return start
+            start -= dt.timedelta(days=ndays)
+            return start
 
 def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     shippath, shipargs = INFO_MAP['lam_ship_dates']
@@ -217,6 +214,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     reqpath, reqargs = INFO_MAP['pa_reqs']
     reqs_df: pd.DataFrame = pd.read_excel(reqpath, **reqargs)
     reqs_df = df_cols_as_str(reqs_df, 'PA Item', 'Ply1 Item')
+    to_drop = reqs_df[reqs_df['PA Item'].isna()].index
+    reqs_df = reqs_df.drop(to_drop)
 
     ship_df = ship_df[ship_df['Ply1 Item'] != '0']
 
@@ -255,6 +254,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
         plant = reqs_df.loc[i, 'Plant']
         lam_id = reqs_df.loc[i, 'Ply1 Item']
         fab_id = reqs_df.loc[i, 'PA Item']
+        if fab_id[:2] != 'FF': continue
+
         cum_req = 0
 
         for wk_delta, col_end in pairs:
@@ -288,7 +289,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     dye_df = _load_dye_orders2()
 
     first = lambda srs: list(srs)[0]
-    mo_df = mo_df[(mo_df['Customer'] == '0171910WIP') & (mo_df['Quality'] == 'A')
+    mo_df = mo_df[mo_df['Customer'].str.match('0171910.*') & (mo_df['Quality'] == 'A')
                   & ((mo_df['Grade'] != 'REJ') | pd.isna(mo_df['Grade']))]
     mo_grp_df = mo_df.groupby(['Lot', 'Nominal\nWidth']).agg(
         Warehouse=pd.NamedAgg('Warehouse', first),
