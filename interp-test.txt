@@ -1,6 +1,0 @@
-x = 2
-y = "hello, world!"
-z = (x + 5) * (x - 1)
-
-var1 = z % 3
-var2 = z % 1.2
