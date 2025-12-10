@@ -164,7 +164,7 @@ def _greige_reqs(writer):
     inv_df = pd.read_excel(inv_path, **inv_args)
     inv_df = df_cols_as_str(inv_df, 'roll_id', 'greige')
 
-    sched_df['week'] = sched_df['start'].apply(lambda d: d.isocalendar().week)
+    sched_df['week'] = sched_df['start'].apply(lambda d: (d.isocalendar().year, d.isocalendar().week))
     sched_df['is_new1'] = sched_df['roll1'].str.contains('NEW|PLAN')
     sched_df['is_new2'] = sched_df['roll2'].str.contains('NEW|PLAN')
 
@@ -181,7 +181,7 @@ def _greige_reqs(writer):
     grouped_inv = inv_df.groupby('greige2').agg(lbs=pd.NamedAgg(column='lbs', aggfunc='sum'))
 
     weeks = sorted(sched_df['week'].unique())
-    grg_data = { str(w): [] for w in weeks }
+    grg_data = { str(w[1]): [] for w in weeks }
     grg_idx = []
 
     for alt_grg, group in sched_df.groupby('greige2'):
@@ -205,7 +205,7 @@ def _greige_reqs(writer):
             rem_inv = cur_inv + extra_prod - old_used
             
             cur_safety = max(0, sfty_tgt - rem_inv)
-            grg_data[str(week)] += [cur_inv, new_used, cur_safety, new_used + cur_safety]
+            grg_data[str(week[1])] += [cur_inv, new_used, cur_safety, new_used + cur_safety]
             extra_prod += cur_safety
     
     idx = pd.MultiIndex.from_tuples(grg_idx, names=['item', 'kind'])
@@ -242,7 +242,7 @@ def _audit_summary(date: dt.datetime, writer):
     audit['Timestamp'] = audit[['Trans Date', 'Trans Time']].agg(_get_timestamp, axis=1)
 
     def _get_roll_type(row):
-        if row['Lot'] not in row['Roll ID']:
+        if row['Lot'] not in row['Roll ID'] or row['Lot'] == '0':
             return 'FIN'
         if len(row['Roll ID']) == 10:
             return 'LOT'

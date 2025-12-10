@@ -10,8 +10,8 @@
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
-WORKBOOK = "PA plant orders against Lam demand 20251110.xlsx"
-OUTPUT = "output_20251110.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20251208 lam plant date.xlsx"
+OUTPUT = "output_20251209.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
@@ -72,11 +72,11 @@ adaptive1_orders:
     folder=$FOLDER
     workbook=$WORKBOOK
     sheet="Orders in Dye"
-    col_names=job, dyelot, machine, start, end, item, panels, qty, Customer
+    col_names=job, dyelot, machine, start, end, item1, item2, panels, qty, "double?", Customer
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 31.xlsx"
+    workbook="Dyelots 15.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 
@@ -107,7 +107,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 11-13"
+    sheet="Fab shortage 12-01"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
@@ -122,6 +122,11 @@ dye_plan:
     folder=$FOLDER
     workbook=$OUTPUT
     sheet=roll_allocation
+
+pa_raw_demand:
+    folder=$FOLDER
+    workbook=$OUTPUT
+    sheet=demand
 
 dye_plan_inv:
     folder=$FOLDER

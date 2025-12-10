@@ -102,7 +102,7 @@ def _pa_items_file(outpath):
         yld = group.loc[idx , 'Yield']
 
         allowed_jets = []
-        for i in filter(lambda i: i not in (4, 5), range(10)):
+        for i in filter(lambda i: i != 4, range(10)):
             if not pd.isna(group.loc[idx, f'JET {i+1}']):
                 allowed_jets.append(f'Jet-{i+1:02}')
 

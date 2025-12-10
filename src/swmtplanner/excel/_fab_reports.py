@@ -96,7 +96,7 @@ def _load_dye_orders2():
     dyepath, dyeargs = INFO_MAP['adaptive1_orders']
     dye_df: pd.DataFrame = pd.read_excel(dyepath, **dyeargs, dtype={'dyelot': 'string'})
 
-    to_drop = dye_df[dye_df['item'].isna() | (dye_df['Customer'] != 17191)].index
+    to_drop = dye_df[dye_df['item1'].isna() | (dye_df['Customer'] != 17191) | (dye_df['double?'] == 'Yes')].index
     dye_df = dye_df.drop(to_drop)
     dye_df = dye_df.sort_values('start')
 
@@ -327,7 +327,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
             mo_idxs += list(wd2_df.index)
             mo_idxs += list(wd3_df.index)
         
-        sub_df = dye_df[dye_df['item'] == pa_item]
+        sub_df = dye_df[(dye_df['item1'] == pa_item) | (dye_df['item2'] == pa_item)]
         dye_idxs = list(sub_df.index)
 
         i, j, k = 0, 0, 0
