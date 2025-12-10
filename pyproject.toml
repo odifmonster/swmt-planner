@@ -23,6 +23,3 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3"
 ]
-
-[project.scripts]
-excel-data = "swmtplanner.excel.cli:app"
