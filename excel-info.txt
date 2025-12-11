@@ -12,6 +12,7 @@ FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
 WORKBOOK = "PA plant orders against Lam demand 20251208 lam plant date.xlsx"
 OUTPUT = "output_20251209.xlsx"
+MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
@@ -21,7 +22,7 @@ OUTPUT = "output_20251209.xlsx"
 dye_formulae:
     # This is always required, must be an absolute path to a file
     folder=$FOLDER
-    workbook="PA Master Xref.xlsx"
+    workbook=$MASTER
     sheet=Xref # This is always required
     col_names="COLOR NAME", "COLOR NUMBER", "SHADE RATING"
 
@@ -29,19 +30,19 @@ dye_formulae:
 # which greige style they use, etc.)
 pa_fin_items:
     folder=$FOLDER
-    workbook="PA Master Xref.xlsx"
+    workbook=$MASTER
     sheet=Xref
     col_names="GREIGE ITEM", STYLE, WD, Yield, STATUS, "COLOR NAME", "COLOR NUMBER", ...
         "PA FIN ITEM", $jets, "SHADE RATING"
 
 greige_styles: # information about target lbs per greige style roll
     folder=$FOLDER
-    workbook="PA Master Xref.xlsx"
+    workbook=$MASTER
     sheet="Greige Styles"
 
 greige_translation:
     folder=$FOLDER
-    workbook="PA Master Xref.xlsx"
+    workbook=$MASTER
     sheet="Greige Style Translation"
     subst_names=inventory, plan # only use this if the workbook has no column names
     col_ranges="A:B" # required if providing column names
