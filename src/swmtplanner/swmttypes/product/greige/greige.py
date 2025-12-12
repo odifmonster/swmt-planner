@@ -28,4 +28,4 @@ class Greige(SwmtBase, HasID[str],
         return 'Greige'
     
     def can_run_on_mchn(self, mchn_id):
-        return mchn_id in self.machines
+        return mchn_id in self._machines

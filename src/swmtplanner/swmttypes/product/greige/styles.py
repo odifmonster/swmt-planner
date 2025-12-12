@@ -21,3 +21,5 @@ def load_styles(fpath: str):
                                                     top_set=top_set, top_pct=float(top_pct),
                                                     btm_set=btm_set, btm_pct=float(btm_pct),
                                                     machines=mchns.split(','))
+    
+    globals()['STYLES']['NONE'] = Greige('NONE', 1)

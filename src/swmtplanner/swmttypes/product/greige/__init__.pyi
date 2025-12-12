@@ -1,9 +1,14 @@
 from swmtplanner.support import SwmtBase, HasID
 from swmtplanner.swmttypes.product import BeamSet
 
+__all__ = ['STYLES', 'STYLE_MAP', 'load_styles', 'load_translations',
+           'Greige']
+
 STYLES: dict[str, Greige] = ...
+STYLE_MAP: dict[str, str] = ...
 
 def load_styles(fpath: str) -> None: ...
+def load_translations(fpath: str) -> None: ...
 
 class Greige(SwmtBase, HasID[str],
              read_only=('id','family','roll_avg','rate','gauge','top_set',

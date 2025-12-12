@@ -2,5 +2,6 @@
 
 from .greige import Greige
 from .styles import STYLES, load_styles
+from .translate import STYLE_MAP, load_translations
 
-__all__ = ['STYLES', 'load_styles', 'Greige']
+__all__ = ['STYLES', 'STYLE_MAP', 'load_styles', 'load_translations', 'Greige']
