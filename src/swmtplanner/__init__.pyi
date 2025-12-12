@@ -1,3 +1,3 @@
-from . import support
+from . import support, swmttypes
 
-__all__ = ['support']
+__all__ = ['support', 'swmttypes']
