@@ -1,3 +1,3 @@
-from . import support, swmttypes
+from . import support, swmttypes, excel
 
-__all__ = ['support', 'swmttypes']
+__all__ = ['support', 'swmttypes', 'excel']
