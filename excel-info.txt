@@ -10,8 +10,8 @@
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
-WORKBOOK = "PA plant orders against Lam demand 20251208 lam plant date.xlsx"
-OUTPUT = "output_20251209.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20251222 lam plant date.xlsx"
+OUTPUT = "output_20251222.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
@@ -77,7 +77,7 @@ adaptive1_orders:
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 15.xlsx"
+    workbook="Dyelots 24.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 
@@ -108,7 +108,7 @@ lam_ship_dates:
 pa_reqs:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet="Fab shortage 12-01"
+    sheet="Fab shortage 12-15"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
