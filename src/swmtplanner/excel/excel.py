@@ -399,7 +399,7 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
         fname = f'{name.name}_{today}_{i}.xlsx'
     outpath = os.path.join(outdir, fname)
     writer = pd.ExcelWriter(outpath, date_format='MM/DD',
-                            datetime_format='%Y-%m-%d %H:%M')
+                            datetime_format='YYYY-MM-DD HH:MM')
 
     load_info_map(infopath)
 
