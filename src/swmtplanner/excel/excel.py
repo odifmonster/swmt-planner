@@ -214,18 +214,24 @@ def _greige_reqs(writer):
     grg_reqs.to_excel(writer, sheet_name='greige_reqs', float_format='%.2f')
 
 def _audit_summary(date: dt.datetime, writer):
-    fpath1, _ = INFO_MAP['pa_2010']
-    fpath1 += f'_{date.strftime('%Y%m%d')}.csv'
+    fpath1, _ = INFO_MAP['pa_audit']
+    fpath1 += f'_{date.strftime('%Y%m%d')}.tsv'
     
-    audit = pd.read_csv(fpath1, dtype={'Lot': 'string'})
-    drop_rows = audit[~audit['Valid Lot'] | (audit['Lot'].str[-1] != '0') | (audit['Item Type'] != 'FF')].index
+    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Defect Code': 'string'}, sep='\t')
+    drop_rows = audit[audit['Fin Item 1'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
-    fpath2, pdargs2 = INFO_MAP['pa_seconds']
-    start, ext = fpath2.split('.')
-    fpath2 = f'{start}_{date.strftime('%Y%m%d')}.{ext}'
-    seconds: pd.DataFrame = pd.read_excel(fpath2, **pdargs2, dtype={'ROLL': 'string', 'REASON': 'string'})
-    seconds = seconds.set_index('ROLL')
+    fpath2, _ = INFO_MAP['pa_greige_assigns']
+    fpath2 += f'_{date.strftime('%Y%m%d')}.tsv'
+
+    greige = pd.read_csv(fpath2, dtype='string', sep='\t')
+    drop_rows = greige[greige['Greige Roll'].isna()].index
+    greige = greige.drop(drop_rows, axis=0)
+
+    greige_by_lot = greige.groupby('Lot').agg(
+        greige_item=pd.NamedAgg('Greige Item', 'max'),
+        greige_rolls=pd.NamedAgg('Greige Roll', lambda x: ', '.join(list(x)))
+    )
 
     def _split_raw_dt_val(raw):
         raw = int(raw)
@@ -235,11 +241,11 @@ def _audit_summary(date: dt.datetime, writer):
         return val1, val2, val3
     
     def _get_timestamp(row):
-        y, m, d = _split_raw_dt_val(row['Trans Date'])
-        hour, minute, sec = _split_raw_dt_val(row['Trans Time'])
+        y, m, d = _split_raw_dt_val(row['Date'])
+        hour, minute, sec = _split_raw_dt_val(row['Time'])
         return dt.datetime(y, m, d, hour=hour, minute=minute, second=sec)
     
-    audit['Timestamp'] = audit[['Trans Date', 'Trans Time']].agg(_get_timestamp, axis=1)
+    audit['Timestamp'] = audit[['Date', 'Time']].agg(_get_timestamp, axis=1)
 
     def _get_roll_type(row):
         if row['Lot'] not in row['Roll ID'] or row['Lot'] == '0':
@@ -274,17 +280,18 @@ def _audit_summary(date: dt.datetime, writer):
 
     def _get_add_qty(row):
         if row['Trans Desc'] in ('PHYSICAL ADJUSTMENT', 'ADJUST UP', 'REPORT PRODUCTION'):
-            return row['Qty']
+            return row['Quantity']
         if row['Trans Desc'] in ('ADJUST DOWN', 'REPORT CONSUMPTION'):
-            return row['Qty'] * -1
+            return row['Quantity'] * -1
         return np.nan
     
-    audit['AddQty'] = audit[['Qty', 'Trans Desc']].agg(_get_add_qty, axis=1)
+    audit['AddQty'] = audit[['Quantity', 'Trans Desc']].agg(_get_add_qty, axis=1)
 
     idx = []
     roll_data = {
-        'kind': [], 'mo': [], 'market': [], 'item': [], 'yds': [], 'processed_yds': [],
-        'code': [], 'timestamp': []
+        'kind': [], 'mo': [], 'item': [], 'yds': [], 'processed_yds': [], 'code': [],
+        'timestamp': [], 'defect_code': [], 'defect_desc': [], 'greige_item': [],
+        'greige_rolls': []
     }
 
     for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
@@ -298,13 +305,13 @@ def _audit_summary(date: dt.datetime, writer):
             if len(init_opts) == 0: continue
 
         idx.append(roll)
-        max_yds = max(grp['Qty'])
+        max_yds = max(grp['Quantity'])
         amts = {}
         
-        init_rows_added = grp[(grp['Qty'] == max_yds) & ~pd.isna(grp['AddQty'])]
-        init_rows = grp[grp['Qty'] == max_yds]
+        init_rows_added = grp[(grp['Quantity'] == max_yds) & ~pd.isna(grp['AddQty'])]
+        init_rows = grp[grp['Quantity'] == max_yds]
         first = list(init_rows.index)[0]
-        init_code = audit.loc[first, 'Quality Code']
+        init_code = audit.loc[first, 'Quality']
         adjust_code = None
 
         if len(init_rows_added) == 0:
@@ -316,7 +323,7 @@ def _audit_summary(date: dt.datetime, writer):
         for i in grp.index:
             if pd.isna(audit.loc[i, 'AddQty']): continue
             add_qty = audit.loc[i, 'AddQty']
-            code = audit.loc[i, 'Quality Code']
+            code = audit.loc[i, 'Quality']
             trans = audit.loc[i, 'Trans Desc']
             
             if code not in amts:
@@ -337,9 +344,18 @@ def _audit_summary(date: dt.datetime, writer):
                 adjust_code = code
 
         roll_data['kind'].append(kind)
-        pairs = [('mo', 'Lot'), ('market', 'Market Segme'), ('item', 'Fin Item 1')]
+        pairs = [('mo', 'Lot'), ('item', 'Fin Item 1'), ('defect_code', 'Defect Code'),
+                 ('defect_desc', 'Defect Desc')]
         for col1, col2 in pairs:
             roll_data[col1].append(audit.loc[first, col2])
+
+        mo = audit.loc[first, 'Lot']
+        if mo not in greige_by_lot.index:
+            roll_data['greige_item'].append('')
+            roll_data['greige_rolls'].append('')
+        else:
+            roll_data['greige_item'].append(greige_by_lot.loc[mo, 'greige_item'])
+            roll_data['greige_rolls'].append(greige_by_lot.loc[mo, 'greige_rolls'])
 
         code = init_code if adjust_code is None else adjust_code
         if kind == 'FIN':
@@ -354,8 +370,6 @@ def _audit_summary(date: dt.datetime, writer):
         roll_data['timestamp'].append(max(grp['Timestamp']))
 
     by_roll = pd.DataFrame(data=roll_data, index=idx)
-    by_roll = by_roll.merge(seconds, left_index=True, right_index=True, how='left')
-    by_roll = by_roll.rename(columns={'REASON': 'defect_code', 'DEFECT': 'defect_desc'})
 
     for i in by_roll.index:
         minval = by_roll.loc[i, 'processed_yds'] - 2

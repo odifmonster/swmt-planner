@@ -10,8 +10,8 @@
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
-WORKBOOK = "PA plant orders against Lam demand 20251229 lam plant date.xlsx"
-OUTPUT = "output_20251229.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20260105 lam plant date.xlsx"
+OUTPUT = "output_20260105.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
@@ -56,14 +56,14 @@ jet_info:
 pa_inventory:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet=1427
+    sheet="1427"
     col_names=Roll, Item, Quality, Pounds, ASSIGNED_ORDER
     start_row=4
 
 pa_floor_mos:
     folder=$FOLDER
     workbook=$WORKBOOK
-    sheet=1427
+    sheet="1427"
     col_names="Item\nType", Warehouse, Customer, Owner, Roll, Lot, Item, ...
         Quality, Grade, "Nominal\nWidth", Quantity, DEFECT1, DEF1_REASON, DEFECT2, ...
         DEF2_REASON, DEFECT3, DEF3_REASON, MARKET_SEGMENT
@@ -77,7 +77,7 @@ adaptive1_orders:
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 5.xlsx"
+    workbook="Dyelots 29.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 
@@ -134,9 +134,14 @@ dye_plan_inv:
     workbook=$OUTPUT
     sheet=inventory
 
-pa_2010:
+pa_audit:
     folder=$REPORTS
-    workbook="2010"
+    workbook="audit"
+    sheet=Placeholder
+
+pa_greige_assigns:
+    folder=$REPORTS
+    workbook="greige_assigns"
     sheet=Placeholder
 
 pa_seconds:
