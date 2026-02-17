@@ -227,6 +227,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
     ship_days_data = {}
     for name, group in grouped:
         ship_days = group['Ship Day'].unique()
+        sched_day = min(group['Schedule Day'])
         
         day_set = set()
         for ship_str in ship_days:
@@ -234,7 +235,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
                 day_set |= _parse_ship_days(ship_str)
 
         days = [math.inf] + list(map(lambda x: days_map[x], day_set))
-        ship_days_data[name] = min(days)
+        ship_days_data[name] = sched_day
 
     reqs_df['Ship Day'] = reqs_df['Ply1 Item'].apply(lambda x: _map_ship_day(x, ship_days_data))
 
@@ -250,21 +251,21 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
         'yds': [], 'cum_yds': []
     }
 
-    for i in reqs_df.index:
-        plant = reqs_df.loc[i, 'Plant']
-        lam_id = reqs_df.loc[i, 'Ply1 Item']
-        fab_id = reqs_df.loc[i, 'PA Item']
+    for pa_item, grp in reqs_df.groupby('PA Item'):
+        plant = '/'.join([str(x) for x in list(grp['Plant'])])
+        lam_id = '/'.join([str(x) for x in list(grp['Ply1 Item'])])
+        fab_id = pa_item
         if fab_id[:2] != 'FF': continue
 
-        cum_req = 0
+        cum_req = -1 * sum(grp['In transit'])
 
         for wk_delta, col_end in pairs:
-            req_raw = reqs_df.loc[i, f'FAB req\'d {col_end}']
+            req_raw = sum(grp[f'FAB req\'d {col_end}'])
             if col_end == 'past due':
                 pnum = -1
             else:
                 pnum = int(col_end[2:])
-            wkday = reqs_df.loc[i, 'Ship Day']
+            wkday = min(grp['Ship Day']) - 2
             if wkday == math.inf:
                 wkday = 2
 

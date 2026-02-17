@@ -217,7 +217,8 @@ def _audit_summary(date: dt.datetime, writer):
     fpath1, _ = INFO_MAP['pa_audit']
     fpath1 += f'_{date.strftime('%Y%m%d')}.tsv'
     
-    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Defect Code': 'string'}, sep='\t')
+    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Defect Code': 'string',
+                                       'Cust No.': 'string', 'Cust Name': 'string'}, sep='\t')
     drop_rows = audit[audit['Fin Item 1'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
@@ -231,6 +232,11 @@ def _audit_summary(date: dt.datetime, writer):
     greige_by_lot = greige.groupby('Lot').agg(
         greige_item=pd.NamedAgg('Greige Item', 'max'),
         greige_rolls=pd.NamedAgg('Greige Roll', lambda x: ', '.join(list(x)))
+    )
+
+    cust_by_lot = audit.groupby('Lot').agg(
+        cust_no=pd.NamedAgg('Cust No.', 'max'),
+        cust_name=pd.NamedAgg('Cust Name', 'max')
     )
 
     def _split_raw_dt_val(raw):
@@ -289,9 +295,9 @@ def _audit_summary(date: dt.datetime, writer):
 
     idx = []
     roll_data = {
-        'kind': [], 'mo': [], 'item': [], 'yds': [], 'processed_yds': [], 'code': [],
-        'timestamp': [], 'defect_code': [], 'defect_desc': [], 'greige_item': [],
-        'greige_rolls': []
+        'kind': [], 'mo': [], 'item': [], 'mkt_sgmt': [], 'customer': [], 'yds': [],
+        'processed_yds': [], 'code': [], 'timestamp': [], 'defect_code': [], 'defect_desc': [],
+        'greige_item': [], 'greige_rolls': []
     }
 
     for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
@@ -312,7 +318,6 @@ def _audit_summary(date: dt.datetime, writer):
         init_rows = grp[grp['Quantity'] == max_yds]
         first = list(init_rows.index)[0]
         init_code = audit.loc[first, 'Quality']
-        adjust_code = None
 
         if len(init_rows_added) == 0:
             if kind == 'FIN':
@@ -339,13 +344,10 @@ def _audit_summary(date: dt.datetime, writer):
                     amts[code]['rem'] += add_qty*-1
                 else:
                     amts[code]['add'] += add_qty
-                    
-            if code != init_code and audit.loc[i, 'AddQty'] > 0 and adjust_code is None:
-                adjust_code = code
 
         roll_data['kind'].append(kind)
-        pairs = [('mo', 'Lot'), ('item', 'Fin Item 1'), ('defect_code', 'Defect Code'),
-                 ('defect_desc', 'Defect Desc')]
+        pairs = [('mo', 'Lot'), ('item', 'Fin Item 1'), ('mkt_sgmt', 'Mkt Segment'),
+                 ('defect_code', 'Defect Code'), ('defect_desc', 'Defect Desc')]
         for col1, col2 in pairs:
             roll_data[col1].append(audit.loc[first, col2])
 
@@ -356,14 +358,24 @@ def _audit_summary(date: dt.datetime, writer):
         else:
             roll_data['greige_item'].append(greige_by_lot.loc[mo, 'greige_item'])
             roll_data['greige_rolls'].append(greige_by_lot.loc[mo, 'greige_rolls'])
+        
+        if mo not in cust_by_lot.index:
+            roll_data['customer'].append('')
+        else:
+            roll_data['customer'].append(cust_by_lot.loc[mo, 'cust_name'])
 
-        code = init_code if adjust_code is None else adjust_code
+        if kind != 'FIN':
+            code = init_code
+        else:
+            code = max(amts.items(), key=lambda x: x[1])[0]
+
         if kind == 'FIN':
             qty = amts[code]
             processed = 0
         else:
             qty = amts[code]['add']
             processed = amts[code]['rem']
+
         roll_data['yds'].append(qty)
         roll_data['processed_yds'].append(processed)
         roll_data['code'].append(code)
@@ -405,7 +417,7 @@ _StartAnno = Annotated[dt.datetime,
                        typer.Option(help=_START_HELP)]
 def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                     outdir: _ReportOutAnno, start: _StartAnno = dt.datetime.now()):
-    today = dt.date.today().strftime('%Y%m%d')
+    today = start.strftime('%Y%m%d')
     fname = f'{name.name}_{today}.xlsx'
     i = 1
     while os.path.exists(os.path.join(outdir, fname)):
@@ -413,7 +425,7 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
         fname = f'{name.name}_{today}_{i}.xlsx'
     outpath = os.path.join(outdir, fname)
     writer = pd.ExcelWriter(outpath, date_format='MM/DD',
-                            datetime_format='YYYY-MM-DD HH:MM')
+                            datetime_format='MM/DD/YYYY HH:MM')
 
     load_info_map(infopath)
 
