@@ -8,7 +8,7 @@ from enum import Enum
 from .info import INFO_MAP, load_info_map
 from ._updates import _grg_trans_file, _grg_style_file, _dyes_file, _pa_items_file, \
     df_cols_as_str
-from ._fab_reports import _load_pa_floor_mos, _pa_process_report, \
+from ._fab_reports import _load_pa_floor_mos, _pa_dmnd_report, _pa_process_report, \
     _pa_priority_mos_report, _pa_rework_report, _load_dye_orders1, _load_dye_orders2
 
 _INFO_OUT_HELP = 'Path to the new file to generate'
@@ -219,7 +219,7 @@ def _audit_summary(date: dt.datetime, writer):
     
     audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Defect Code': 'string',
                                        'Cust No.': 'string', 'Cust Name': 'string'}, sep='\t')
-    drop_rows = audit[audit['Fin Item 1'].isna()].index
+    drop_rows = audit[audit['Fin Item 1'].isna() | audit['Lot'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
     fpath2, _ = INFO_MAP['pa_greige_assigns']
@@ -394,6 +394,7 @@ def _audit_summary(date: dt.datetime, writer):
     by_roll.to_excel(writer, sheet_name='audit_raw', index_label='id')
     
 class _ReportName(str, Enum):
+    pa_dmnd = 'pa_dmnd'
     pa_floor_status = 'pa_floor_status'
     pa_reworks = 'pa_reworks'
     pa_priority_mos = 'pa_priority_mos'
@@ -429,7 +430,8 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
 
     load_info_map(infopath)
 
-    if name not in (_ReportName.greige_demand, _ReportName.pa_audit_sum, _ReportName.pa_dye_orders):
+    if name not in (_ReportName.greige_demand, _ReportName.pa_audit_sum, _ReportName.pa_dye_orders,
+                    _ReportName.pa_dmnd):
         mo_df = _load_pa_floor_mos()
         match name:
             case _ReportName.pa_floor_status:
@@ -444,6 +446,8 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
                 _pa_priority_mos_report(start, mo_df, writer)
     else:
         match name:
+            case _ReportName.pa_dmnd:
+                _pa_dmnd_report(writer)
             case _ReportName.pa_audit_sum:
                 _audit_summary(start, writer)
             case _ReportName.greige_demand:

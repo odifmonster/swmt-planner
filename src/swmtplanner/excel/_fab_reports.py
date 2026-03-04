@@ -120,6 +120,150 @@ def _map_warehouse(wh):
             return 'CAN SHIP'
     return 'NONE'
 
+def _pa_dmnd_report(writer):
+    dmnd_path, dmnd_args = INFO_MAP['lam_release']
+    rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+    to_drop = rls_df[rls_df['PA Item'].isna() | rls_df['Active?'].isna()]
+    rls_df = rls_df.drop(to_drop.index)
+
+    rls_items = []
+    rls_data = {
+        'lam_item': [], 'plant': [], 'ply1_item': [], 'pa_item': [], 'pull': [],
+        'lam_on_hand': [], 'lam_cc': [], 'ph_raw': [], 'ply1_on_hand': [],
+        'sch_past_due': []
+    }
+    for i in range(3):
+        rls_data[f'sch{i}'] = []
+    rls_data['rls_past_due'] = []
+    for i in range(9):
+        rls_data[f'rls{i}'] = []
+    rls_data['sched_day'] = []
+
+    for item, grp in rls_df.groupby('Stock Item'):
+        rls_items.append(item)
+        pairs = [('lam_item', 'Lam Item'), ('plant', 'Plant'), ('ply1_item', 'Ply1 Item'),
+            ('pa_item', 'PA Item'), ('pull', 'Add\'l pull (weeks)'),
+            ('lam_on_hand', 'Lam On-Hand'), ('lam_cc', 'Lam Cust Contain GP12'),
+            ('ph_raw', 'PH Raw'), ('ply1_on_hand', 'Ply1 On-Hand')]
+
+        wl_fact = max(grp['LAM add\'l WL factor'])
+        conv_fact = max(grp['Conversion to Yards'])
+
+        for dest, src in pairs:
+            rls_data[dest].append(max(grp[src]))
+
+        rls_data['sch_past_due'].append(max(grp['SCH PD']) * wl_fact)
+        for i in range(3):
+            rls_data[f'sch{i}'].append(max(grp[f'SCH+{i}']) * wl_fact)
+
+        rls_total = max(grp['Past Due']) - max(grp['Total Inv'])
+        rls_data['rls_past_due'].append(max(0, rls_total) * conv_fact * wl_fact)
+        for i in range(9):
+            cur_rls = max(grp[f'RLS+{i}'])
+            rls_total += cur_rls
+            rls_data[f'rls{i}'].append(max(0, min(cur_rls, rls_total)) * conv_fact * wl_fact)
+
+        rls_data['sched_day'].append(min(grp['Schedule Day']))
+
+    stock_df = pd.DataFrame(data=rls_data, index=rls_items)
+    lam_items = []
+    lam_data = {
+        'plant': [], 'ply1_item': [], 'pa_item': [], 'ph_raw': [], 'ply1_on_hand': [], 'past_due': []
+    }
+    for i in range(7):
+        lam_data[f'wk{i}'] = []
+    lam_data['sched_day'] = []
+
+    for lam, grp in stock_df.groupby('lam_item'):
+        lam_items.append(lam)
+        max_cols = ['plant', 'ply1_item', 'pa_item', 'ph_raw', 'ply1_on_hand']
+        pull = int(max(grp['pull']))
+
+        for col in max_cols:
+            lam_data[col].append(max(grp[col]))
+
+        sch_total = max(grp['sch_past_due'])
+        rls_total = sum(grp['rls_past_due']) - max(grp['lam_on_hand']) - max(grp['lam_cc'])
+        for i in range(pull):
+            sch_total += max(grp[f'sch{i}'])
+            rls_total += sum(grp[f'rls{i}'])
+
+        lam_data['past_due'].append(sch_total)
+        for i in range(pull, 3):
+            cur_sch = max(grp[f'sch{i}'])
+            lam_data[f'wk{i-pull}'].append(cur_sch)
+            sch_total += cur_sch
+            rls_total += sum(grp[f'rls{i}'])
+
+        rls_total -= sch_total
+        for i in range(3, 7+pull):
+            cur_rls = sum(grp[f'rls{i}'])
+            rls_total += cur_rls
+            if i == 3:
+                cur_rls = rls_total
+            lam_data[f'wk{i-pull}'].append(max(0, min(rls_total, cur_rls)))
+
+        lam_data['sched_day'].append(min(grp['sched_day']))
+
+    lam_df = pd.DataFrame(data=lam_data, index=lam_items)
+    ply1_data1 = {
+        'ply1_item': [], 'plant': [], 'pa_item': [], 'past_due': []
+    }
+    for i in range(7):
+        ply1_data1[f'wk{i}'] = []
+    ply1_data1['sched_day'] = []
+
+    for key, grp in lam_df.groupby(['ply1_item', 'plant']):
+        ply1, plant = key
+        ply1_data1['ply1_item'].append(ply1)
+        ply1_data1['plant'].append(plant)
+        ply1_data1['pa_item'].append(max(grp['pa_item']))
+
+        total_dmd = sum(grp['past_due']) - max(grp['ply1_on_hand']) - max(grp['ph_raw'])
+        ply1_data1['past_due'].append(max(0, total_dmd))
+        for i in range(7):
+            cur_dmd = sum(grp[f'wk{i}'])
+            total_dmd += cur_dmd
+            ply1_data1[f'wk{i}'].append(max(0, min(total_dmd, cur_dmd)))
+
+        ply1_data1['sched_day'].append(min(grp['sched_day']))
+
+    ply1_df1 = pd.DataFrame(data=ply1_data1)
+    join_plts = lambda a: "/".join([str(int(x)) for x in list(a)])
+
+    ply1_df2 = ply1_df1.groupby('ply1_item').agg(
+        plant = pd.NamedAgg('plant', join_plts),
+        pa_item = pd.NamedAgg('pa_item', 'max'),
+        sched_day = pd.NamedAgg('sched_day', 'min'),
+        past_due = pd.NamedAgg('past_due', 'sum'),
+        wk0 = pd.NamedAgg('wk0', 'sum'),
+        wk1 = pd.NamedAgg('wk1', 'sum'),
+        wk2 = pd.NamedAgg('wk2', 'sum'),
+        wk3 = pd.NamedAgg('wk3', 'sum'),
+        wk4 = pd.NamedAgg('wk4', 'sum'),
+        wk5 = pd.NamedAgg('wk5', 'sum'),
+        wk6 = pd.NamedAgg('wk6', 'sum')
+    )
+
+    mapper = {}
+    caps = ['ply1_item', 'plant']
+    fab_req = [f'wk{i}' for i in range(7)]
+
+    for col in caps:
+        words = col.split('_')
+        words = [w[0].upper() + w[1:] for w in col.split('_')]
+        mapper[col] = ' '.join(words)
+
+    mapper['pa_item'] = 'PA Item'
+    mapper['sched_day'] = 'Ship Day'
+    mapper['past_due'] = 'FAB req\'d past due'
+
+    for col in fab_req:
+        mapper[col] = 'FAB req\'d ' + col.upper()
+
+    ply1_df2 = ply1_df2.rename(columns=mapper)
+    ply1_df2.to_excel(writer, sheet_name='Fab shortage', index_label='Ply1 Item')
+
 def _pa_process_report(mo_df: pd.DataFrame, writer):
     get_code = lambda item: '' if item[2] != ' ' else item[:2]
     

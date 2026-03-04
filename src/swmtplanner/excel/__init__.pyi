@@ -22,7 +22,7 @@ type _InfoName = Literal[
     'dye_formulae', 'pa_fin_items', 'greige_styles', 'greige_translation',
     'jet_info', 'pa_inventory', 'adaptive1_orders', 'adaptive2_orders', 'si_release',
     'wf_release', 'pa_reqs', 'lam_ship_dates', 'pa_floor_mos', 'pa_714', 'dye_plan',
-    'dye_plan_inv', 'pa_2010']
+    'dye_plan_inv', 'pa_2010', 'lam_release']
 
 class _PandasArgs(TypedDict, total=False):
     sheet_name: Required[str]
