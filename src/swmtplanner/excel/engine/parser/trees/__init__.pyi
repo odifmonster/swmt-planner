@@ -75,7 +75,7 @@ class RngExp(NamedTuple):
     kind: Literal[ExpType.Rng] = ExpType.Rng
 
 class ListExp(NamedTuple):
-    exps: Exp
+    exps: list[Exp]
     kind: Literal[ExpType.List] = ExpType.List
 
 type Exp = Atom | AccessExp | CallExp | UnpackExp | BinopExp | PatternExp \

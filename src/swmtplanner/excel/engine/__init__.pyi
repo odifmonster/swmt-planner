@@ -1,3 +1,3 @@
-from . import file, tokenized, parser
+from . import file, tokenized, parser, interpreter
 
-__all__ = ['file', 'tokenized', 'parser']
+__all__ = ['file', 'tokenized', 'parser', 'interpreter']

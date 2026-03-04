@@ -1,0 +1,99 @@
+FOLDER1 = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
+FOLDER2 = Concat(FOLDER1, "/Reports")
+FOLDER3 = "/Users/lamanwyner/git-repos/swmt-projs/product-files"
+DATE1 = "20251215"
+DATE2 = "12-01"
+DATE3 = "20251215"
+
+XREF = "PA Master Xref.xlsx"
+DEMAND = Concat("PA plant orders against Lam demand ", DATE1, " lam plant date.xlsx")
+
+jet_nums = [*(1 to 4), *(7 to 10)] # Use 'to' to define a range of integers (inclusive both ends)
+jets = Map(jet_nums, i -> Concat("JET ", i))
+
+req_wks = 0 to 5
+req_cols = ["FAB req'd past due", *Map(req_wks, wk -> Concat("Fab req'd WK", wk))]
+
+rls_wks = 0 to 8
+rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
+
+[Buildable] greige_translation:
+    format="greige_translate_table"
+    [Excel] source:
+        folder=FOLDER1
+        workbook=XREF
+        sheet="Greige Style Translation"
+        col_ranges="A:B"
+        subst_names=["inventory", "plan"]
+        start_row=2
+        str_cols=["inventory", "plan"]
+    [DatFile] dest:
+        folder=FOLDER3
+        file="greige-translation.dat"
+        columns=["inventory", "plan"]
+
+[Buildable] greige_styles:
+    format="greige_style_table"
+    [Excel] source:
+        folder=FOLDER1
+        workbook=XREF
+        sheet="Greige Styles"
+    [DatFile] dest:
+        folder=FOLDER3
+        file="greige-styles.dat"
+        columns=["id", "target", "alt1", "alt2", "safety", "family", "rate", ...
+            "gauge", "top_set", "top_pct", "btm_set", "btm_pct", "machines"]
+
+[Buildable] dye_formulae:
+    format="colors"
+    [Excel] source:
+        folder=FOLDER1
+        workbook=XREF
+        sheet="Xref"
+        col_names=["COLOR NAME", "COLOR NUMBER", "SHADE RATING"]
+    [DatFile] dest:
+        folder=FOLDER3
+        file="dye-formulae.dat"
+        columns=["id", "name", "shade"]
+
+[Buildable] ply1_items:
+    format="finished_fabric"
+    [Excel] source:
+        folder=FOLDER1
+        workbook=XREF
+        sheet="Xref"
+        col_names=["GREIGE ITEM", "STYLE", "WD", "Yield", "PLY 1 PART #", "STATUS", ...
+                "COLOR NUMBER", "PA FIN ITEM", *jets, "TANKS", "SHADE RATING"] # Use a * to "unpack" lists
+        str_cols=["GREIGE ITEM", "STYLE", "STATUS", "PLY 1 PART #", "PA FIN ITEM", ...
+                *jets, "TANKS"]
+    [DatFile] dest:
+        folder=FOLDER3
+        file="ply1-items.dat"
+        columns=["ply1", "pa_fin", "master", "color", "width", "greige", "yld", "jets"]
+
+[Excel] adaptive:
+    folder=FOLDER2
+    workbook="Dyelots 22.xlsx"
+    sheet="Sheet1"
+    col_names=["Machine", "StartTime", "EndTime", "JobID"]
+    str_cols=["Machine", "JobID"]
+
+[Excel] pa_floor_inv:
+    folder=FOLDER1
+    workbook=DEMAND
+    sheet="1427"
+    col_names=["Item\nType", "Warehouse", "Customer", "Owner", "Roll", "Lot", "Item", ...
+        "Quality", "Grade", "Nominal\nWidth", "Quantity", "DEFECT1", "DEF1_REASON", ...
+        "DEFECT2", "DEF2_REASON", "DEFECT3", "DEF3_REASON", "MARKET_SEGMENT"]
+    str_cols=["Item\nType", "Warehouse", "Customer", "Owner", "Roll", "Lot", "Item", ...
+        "Quality", "Grade", "DEFECT1", "DEF1_REASON", "DEFECT2", "DEF2_REASON", ...
+        "DEFECT3", "DEF3_REASON", "MARKET_SEGMENT"]
+    start_row=4
+
+[Excel] pa_greige_inv:
+    folder=FOLDER1
+    workbook=DEMAND
+    sheet="1427"
+    col_names=["Roll", "Item", "Quality", "Pounds", "ASSIGNED_ORDER"]
+    str_cols=["Roll", "Item", "Quality", "ASSIGNED_ORDER"]
+    start_row=4
