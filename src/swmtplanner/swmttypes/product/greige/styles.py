@@ -12,14 +12,19 @@ def load_styles(fpath: str):
             line = line.strip()
             if not line: continue
 
-            style, family, roll_avg, rate, gauge, top_set, top_pct, btm_set, btm_pct, mchns = line.split('\t')
+            style, family, roll_avg, gauge, top_set, top_pct, btm_set, btm_pct, mchns = line.split('\t')
             if family == 'None':
                 globals()['STYLES'][style] = Greige(style, roll_avg)
             else:
+                pairs = mchns.split(';')
+                mchn_mat = []
+                for pair in pairs:
+                    mchn, rate = pair.split(',')
+                    mchn_mat.append((mchn, float(rate)))
                 globals()['STYLES'][style] = Greige(style, roll_avg, family=family,
-                                                    rate=float(rate), gauge=int(gauge),
+                                                    gauge=int(gauge),
                                                     top_set=top_set, top_pct=float(top_pct),
                                                     btm_set=btm_set, btm_pct=float(btm_pct),
-                                                    machines=mchns.split(','))
+                                                    machines=mchn_mat)
     
     globals()['STYLES']['NONE'] = Greige('NONE', 1)
