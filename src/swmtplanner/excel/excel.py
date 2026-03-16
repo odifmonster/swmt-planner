@@ -217,8 +217,9 @@ def _audit_summary(date: dt.datetime, writer):
     fpath1, _ = INFO_MAP['pa_audit']
     fpath1 += f'_{date.strftime('%Y%m%d')}.tsv'
     
-    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Defect Code': 'string',
-                                       'Cust No.': 'string', 'Cust Name': 'string'}, sep='\t')
+    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Grade Code': 'string', 'Grade Desc': 'string',
+                                       'Defect Code': 'string', 'Cust No.': 'string', 'Cust Name': 'string'},
+                        sep='\t')
     drop_rows = audit[audit['Fin Item 1'].isna() | audit['Lot'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
@@ -279,10 +280,19 @@ def _audit_summary(date: dt.datetime, writer):
             return int(row['Roll ID'][-2:])
         return np.nan
     
+    def _convert_grade(desc: str):
+        if pd.isna(desc):
+            return ''
+        last = desc.split()[-1]
+        rem_last = desc[:-1*len(last)]
+        strip_last = rem_last.rstrip()
+        return strip_last
+    
     audit['Roll Type'] = audit[['Roll ID', 'Lot']].agg(_get_roll_type, axis=1)
     audit['Doff'] = audit[['Roll Type', 'Roll ID']].agg(_get_doff, axis=1)
     audit['Panel'] = audit[['Roll Type', 'Roll ID']].agg(_get_panel, axis=1)
     audit['Insp Roll'] = audit[['Roll Type', 'Roll ID']].agg(_get_insp_roll, axis=1)
+    audit['Grade Desc'] = audit['Grade Desc'].apply(_convert_grade)
 
     def _get_add_qty(row):
         if row['Trans Desc'] in ('PHYSICAL ADJUSTMENT', 'ADJUST UP', 'REPORT PRODUCTION'):
@@ -296,8 +306,8 @@ def _audit_summary(date: dt.datetime, writer):
     idx = []
     roll_data = {
         'kind': [], 'mo': [], 'item': [], 'mkt_sgmt': [], 'customer': [], 'yds': [],
-        'processed_yds': [], 'code': [], 'timestamp': [], 'defect_code': [], 'defect_desc': [],
-        'greige_item': [], 'greige_rolls': []
+        'processed_yds': [], 'code': [], 'timestamp': [], 'grade_code': [], 'grade_desc': [],
+        'defect_code': [], 'defect_desc': [], 'greige_item': [], 'greige_rolls': []
     }
 
     for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
@@ -347,7 +357,8 @@ def _audit_summary(date: dt.datetime, writer):
 
         roll_data['kind'].append(kind)
         pairs = [('mo', 'Lot'), ('item', 'Fin Item 1'), ('mkt_sgmt', 'Mkt Segment'),
-                 ('defect_code', 'Defect Code'), ('defect_desc', 'Defect Desc')]
+                 ('grade_code', 'Grade Code'), ('grade_desc', 'Grade Desc'), ('defect_code', 'Defect Code'),
+                 ('defect_desc', 'Defect Desc')]
         for col1, col2 in pairs:
             roll_data[col1].append(audit.loc[first, col2])
 
