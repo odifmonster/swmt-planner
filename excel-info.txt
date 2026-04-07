@@ -10,8 +10,8 @@
 
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
-WORKBOOK = "PA plant orders against Lam demand 20260316 lam plant date.xlsx"
-OUTPUT = "output_20260316.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20260406 lam plant date.xlsx"
+OUTPUT = "output_20260407.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
@@ -77,7 +77,7 @@ adaptive1_orders:
 
 adaptive2_orders:
     folder=$REPORTS
-    workbook="Dyelots 42.xlsx"
+    workbook="Dyelots 54.xlsx"
     sheet=Sheet1
     col_names=Machine, StartTime, EndTime, JobID
 

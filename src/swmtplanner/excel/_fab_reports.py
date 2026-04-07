@@ -80,7 +80,11 @@ def _load_dye_orders1():
         if pd.isna(adaptive.loc[i, 'EndTime']): continue
         
         job_id = adaptive.loc[i, 'JobID']
-        lots = job_id.split('@')[0].split('/')
+        if ', ' in job_id:
+            lots = job_id.split('@')[0].split(', ')
+        else:
+            lots = job_id.split('@')[0].split('/')
+        
         for lot in lots:
             if re.match('[0-9]{9}0', lot):
                 dye_data['job'].append(job_id)
@@ -123,7 +127,7 @@ def _map_warehouse(wh):
 def _pa_dmnd_report(writer):
     dmnd_path, dmnd_args = INFO_MAP['lam_release']
     rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
-    to_drop = rls_df[rls_df['PA Item'].isna() | rls_df['Active?'].isna()]
+    to_drop = rls_df[rls_df['PA Item'].isna() | rls_df['Active?'].isna() | (rls_df['PA Item'] == 0)]
     rls_df = rls_df.drop(to_drop.index)
 
     rls_items = []
