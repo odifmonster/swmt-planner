@@ -9,7 +9,7 @@ class WorkCal:
     calculations with them.
     """
     def __init__(self, business_hrs: tuple[int, int], work_days: Sequence[int],
-                 holidays: Sequence[date], cal_shift: float = ...) -> None:
+                 start: datetime, holidays: Sequence[date], cal_shift: float = ...) -> None:
         """
         Initialize a new WorkCal object.
 
@@ -19,6 +19,8 @@ class WorkCal:
           work_days:
             A sequence of integers corresponding to the working days of the
             week where Monday=0.
+          start:
+            The date and time this working calendar starts.
           holidays:
             A sequence of dates corresponding to non-working holidays.
           cal_shift (default=0):
