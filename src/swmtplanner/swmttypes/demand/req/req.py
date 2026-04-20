@@ -13,3 +13,8 @@ class Req(SwmtBase, read_only=_RO_PROPS, priv=_P_PROPS):
     def __init__(self, item, rolls, week, prty, **kwargs):
         super().__init__(_item=item, _rolls=rolls, _lbs=rolls * item.tgt_wt,
                          _week=week, _prty=prty, _job=None, **kwargs)
+    
+    def assign(self, job):
+        if self.job is not None:
+            raise RuntimeError('This requirement already has a job assigned.')
+        self._job = job
