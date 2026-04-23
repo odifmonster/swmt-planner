@@ -4,5 +4,6 @@ from swmtplanner.swmttypes.demand import Req
 
 class Order(Req, read_only=('date',)):
 
-    def __init__(self, item, rolls, date):
-        super().__init__(item, rolls, date.isocalendar()[1], 1, _date=date)
+    def __init__(self, item, rolls, date, tracker):
+        year, week, _ = date.isocalendar()
+        super().__init__(item, rolls, year, week, 1, tracker, _date=date)

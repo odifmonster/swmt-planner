@@ -1,15 +1,20 @@
 #!/usr/bin/env python
 
+from collections import namedtuple
+
 from swmtplanner.support import SwmtBase, HasID
 from swmtplanner.swmttypes.product import BeamSet, Greige
+from swmtplanner.swmttypes.demand import Req
 from swmtplanner.swmttypes.schedule import Job
 
+Decision = namedtuple('Decision', ['mchn_id', 'kind', 'date'])
+
 class Machine(SwmtBase, HasID[str],
-              read_only=('id','cal','item','top_set','btm_set'),
+              read_only=('id','is_old','cal','item','top_set','btm_set'),
               priv=('jobs',)):
     
-    def __init__(self, name, cal, item, top_rem, btm_rem):
-        SwmtBase.__init__(self, _id=name, _cal=cal, _item=item,
+    def __init__(self, name, is_old, cal, item, top_rem, btm_rem):
+        SwmtBase.__init__(self, _id=name, _is_old=is_old, _cal=cal, _item=item,
                           _top_set=BeamSet(item.top_set, top_rem),
                           _btm_set=BeamSet(item.btm_set, btm_rem),
                           _jobs=[])
@@ -41,12 +46,17 @@ class Machine(SwmtBase, HasID[str],
             return ('btm_ro', self.cal.add_work_hrs(start, btm_hrs))
     
     def next_decisions(self):
-        return [('job_end', self.last_job_end), self.next_runout()]
+        kind, date = self.next_runout()
+        return [Decision(self.id, 'job_end', self.last_job_end),
+                Decision(self.id, kind, date)]
     
-    def get_runouts(self, start, rolls, item, apply_changes = False):
+    def get_runouts(self, start, req: Req, apply_changes = False):
         CHANGEOVER_HRS = 3.0
         TAPEOUT_HRS = 6.0
         INIT_LBS = {70: 1800, 75: 1800, 40: 2800, 45: 2800}
+
+        item = req.item
+        rolls = req.rolls
 
         def denier_from_name(name: str) -> int:
             return int(name[:2])
@@ -114,30 +124,23 @@ class Machine(SwmtBase, HasID[str],
 
         return runouts, current
     
-    def get_tapeouts(self, item: Greige):
+    def get_tapeouts(self, item: Greige, wait_for_runout = False):
         ret = []
+        is_chg = lambda lbs: 'chg' if lbs == 0 or wait_for_runout else 'to'
         if self.item.top_set != item.top_set:
-            suff = 'to' if self.top_set.lbs > 0 else 'chg'
+            suff = is_chg(self.top_set.lbs)
             ret.append(('top_'+suff, item.top_set, self.last_job_end))
         if self.item.btm_set != item.btm_set:
-            suff = 'to' if self.btm_set.lbs > 0 else 'chg'
+            suff = is_chg(self.btm_set.lbs)
             ret.append(('btm_'+suff, item.btm_set, self.last_job_end))
         return ret
 
-    def add_job(self, item: Greige, rolls: int):
-        """
-        Creates a new Job for the given item and number of rolls and appends it
-        to this machine's schedule.
-
-        item:
-            The Greige style to knit.
-        rolls:
-            The number of usable rolls to produce.
-
-        Returns the newly created Job.
-        """
+    def add_job(self, req: Req):
         CHANGEOVER_HRS = 3.0
         TAPEOUT_HRS = 6.0
+        
+        item = req.item
+        rolls = req.rolls
 
         # Collect the tape-outs/beam changes needed to start knitting item
         changes = self.get_tapeouts(item)
@@ -179,6 +182,7 @@ class Machine(SwmtBase, HasID[str],
 
         job = Job(
             item=item,
+            req=req,
             start=job_start,
             end=end_dt,
             lbs_used_top=lbs_used_top,
@@ -187,6 +191,9 @@ class Machine(SwmtBase, HasID[str],
             changes=changes,
             run_outs=[(side, dt) for side, dt in runouts],
         )
+        self.top_set.use(job.lbs_used_top, job.end)
+        self.btm_set.use(job.lbs_used_btm, job.end)
 
         self.jobs.append(job)
+        req.assign(job)
         return job

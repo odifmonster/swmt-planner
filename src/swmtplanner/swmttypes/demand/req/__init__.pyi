@@ -1,20 +1,31 @@
+from typing import Protocol
+from datetime import datetime
+
 from swmtplanner.swmttypes.product import Greige
 from swmtplanner.swmttypes.schedule import Job
 
 __all__ = ['Req']
 
+class _InvTracker(Protocol):
+    item: Greige
+    safety_lbs: float
+    safety_rolls: int
+    def net_position_by(self, date: datetime) -> float: ...
+
 class Req:
     def __init_subclass__(cls, read_only: tuple[str, ...] = ...,
                           priv: tuple[str, ...] = ...) -> None:
         ...
-    def __init__(self, item: Greige, rolls: int, week: int, prty: int,
-                 **kwargs) -> None: ...
+    def __init__(self, item: Greige, rolls: int, year: int, week: int, prty: int,
+                 tracker: _InvTracker, **kwargs) -> None: ...
     @property
     def item(self) -> Greige: ...
     @property
     def rolls(self) -> int: ...
     @property
     def lbs(self) -> float: ...
+    @property
+    def year(self) -> int: ...
     @property
     def week(self) -> int: ...
     @property
