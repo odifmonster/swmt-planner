@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from .req import Req
+from .req import Req, Production
 
-__all__ = ['Req']
+__all__ = ['Req', 'Production']

@@ -1,23 +1,30 @@
 #!/usr/bin/env python
 
 from collections import namedtuple
+from datetime import datetime
 
 from swmtplanner.support import SwmtBase, HasID
 from swmtplanner.swmttypes.product import BeamSet, Greige
 from swmtplanner.swmttypes.demand import Req
 from swmtplanner.swmttypes.schedule import Job
 
+_BEAM_LBS: dict[int, float] = {40: 2800, 45: 2800, 70: 1800, 75: 1800}
+
+def _denier_from_name(name: str) -> int:
+    return int(name[:2])
+
 Decision = namedtuple('Decision', ['mchn_id', 'kind', 'date'])
+Stop = namedtuple('Stop', ['mchn_id', 'reason', 'item', 'start', 'end'])
 
 class Machine(SwmtBase, HasID[str],
-              read_only=('id','is_old','cal','item','top_set','btm_set'),
-              priv=('jobs',)):
+              read_only=('id','is_old','cal','top_set','btm_set'),
+              priv=('last_item','jobs')):
     
     def __init__(self, name, is_old, cal, item, top_rem, btm_rem):
-        SwmtBase.__init__(self, _id=name, _is_old=is_old, _cal=cal, _item=item,
+        SwmtBase.__init__(self, _id=name, _is_old=is_old, _cal=cal, _last_item=item,
                           _top_set=BeamSet(item.top_set, top_rem),
                           _btm_set=BeamSet(item.btm_set, btm_rem),
-                          _jobs=[])
+                          _last_item=item, _jobs=[])
     
     @property
     def jobs(self):
@@ -28,172 +35,204 @@ class Machine(SwmtBase, HasID[str],
         if not self._jobs:
             return self.cal.start
         return self._jobs[-1].end
-        
-    def next_runout(self):
-        start = self.last_job_end
-        rate = self.item.get_rate_on(self.id)
+    
+    @property
+    def last_item(self):
+        if not self._jobs:
+            return self._last_item
+        return self._jobs[-1].item
+    
+    def next_runout(self) -> Decision:
+        rate = self.last_item.get_rate_on(self.id)  # lbs/hour total
+        top_rate = rate * self.last_item.top_pct     # lbs/hour on top bar
+        btm_rate = rate * self.last_item.btm_pct     # lbs/hour on btm bar
 
-        top_lbs = self.top_set.rem_lbs_by(start)
-        btm_lbs = self.btm_set.rem_lbs_by(start)
+        top_hrs = self.top_rem / top_rate
+        btm_hrs = self.btm_rem / btm_rate
 
-        # Scale remaining lbs by each beam's share of the total fabric weight
-        top_hrs = (top_lbs / self.item.top_pct) / rate
-        btm_hrs = (btm_lbs / self.item.btm_pct) / rate
+        top_end = self.cal.add_work_hrs(self.last_job_end, top_hrs)
+        btm_end = self.cal.add_work_hrs(self.last_job_end, btm_hrs)
 
-        if top_hrs <= btm_hrs:
-            return ('top_ro', self.cal.add_work_hrs(start, top_hrs))
+        if top_end <= btm_end:
+            return Decision(mchn_id=self.id, kind='TOP_RUNOUT', date=top_end)
         else:
-            return ('btm_ro', self.cal.add_work_hrs(start, btm_hrs))
+            return Decision(mchn_id=self.id, kind='BTM_RUNOUT', date=btm_end)
     
     def next_decisions(self):
-        kind, date = self.next_runout()
-        return [Decision(self.id, 'job_end', self.last_job_end),
-                Decision(self.id, kind, date)]
+        return [Decision(mchn_id=self.id, kind='JOB_END', date=self.last_job_end),
+                self.next_runout()]
     
-    def get_runouts(self, start, req: Req, apply_changes = False):
-        CHANGEOVER_HRS = 3.0
-        TAPEOUT_HRS = 6.0
-        INIT_LBS = {70: 1800, 75: 1800, 40: 2800, 45: 2800}
+    def get_stops(
+        self,
+        item: Greige,
+        wait_for_runout: bool = False
+    ) -> list[Stop]:
+        stops = []
+        current = self.last_job_end
 
-        item = req.item
-        rolls = req.rolls
+        next_ro = self.next_runout()
+        if wait_for_runout:
+            current = next_ro.date
+            top_needs_load = next_ro.kind == 'TOP_RUNOUT'
+            btm_needs_load = next_ro.kind == 'BTM_RUNOUT'
+        else:
+            top_needs_load = next_ro.kind == 'TOP_RUNOUT' and next_ro.date == self.last_job_end
+            btm_needs_load = next_ro.kind == 'BTM_RUNOUT' and next_ro.date == self.last_job_end
 
-        def denier_from_name(name: str) -> int:
-            return int(name[:2])
+        # Determine which bars need a tape out
+        top_needs_tape = item.top_set != self.top_set.name and not top_needs_load
+        btm_needs_tape = item.btm_set != self.btm_set.name and not btm_needs_load
 
-        def fresh_beam(spent: BeamSet) -> BeamSet:
-            return BeamSet(spent.name, INIT_LBS[denier_from_name(spent.name)])
+        # Tape outs (sequential)
+        if top_needs_tape:
+            end = self.cal.add_work_hrs(current, 4.0)
+            stops.append(Stop(mchn_id=self.id, reason='TOP_TAPE_OUT', item='N/A',
+                            start=current, end=end))
+            current = end
 
-        # Apply any tape-outs or beam changes required before knitting item
-        top_beam = self.top_set
-        btm_beam = self.btm_set
-        current = start
+        if btm_needs_tape:
+            end = self.cal.add_work_hrs(current, 4.0)
+            stops.append(Stop(mchn_id=self.id, reason='BTM_TAPE_OUT', item='N/A',
+                            start=current, end=end))
+            current = end
 
-        for change_type, new_beam_name, _ in self.get_tapeouts(item):
-            if change_type in ('top_to', 'top_chg'):
-                hrs = TAPEOUT_HRS if change_type == 'top_to' else CHANGEOVER_HRS
-                current = self.cal.add_work_hrs(current, hrs)
-                top_beam = BeamSet(new_beam_name, INIT_LBS[denier_from_name(new_beam_name)])
-                if apply_changes:
-                    self._top_set = top_beam
-            else:  # 'btm_to', 'btm_chg'
-                hrs = TAPEOUT_HRS if change_type == 'btm_to' else CHANGEOVER_HRS
-                current = self.cal.add_work_hrs(current, hrs)
-                btm_beam = BeamSet(new_beam_name, INIT_LBS[denier_from_name(new_beam_name)])
-                if apply_changes:
-                    self._btm_set = btm_beam
+        # Loads (sequential, only needed after tape out or runout)
+        if top_needs_tape or top_needs_load:
+            end = self.cal.add_work_hrs(current, 2.0)
+            stops.append(Stop(mchn_id=self.id, reason='LOAD_TOP_BAR', item=item.top_set,
+                            start=current, end=end))
+            current = end
+
+        if btm_needs_tape or btm_needs_load:
+            end = self.cal.add_work_hrs(current, 2.0)
+            stops.append(Stop(mchn_id=self.id, reason='LOAD_BTM_BAR', item=item.btm_set,
+                            start=current, end=end))
+            current = end
+
+        # Style/family change — always recorded, but concurrent with tape outs
+        # and loads so does not add additional time when those are present
+        if item.family != self.last_item.family:
+            duration = (1.0 if self.is_old else 0.25) if not (
+                top_needs_tape or btm_needs_tape or top_needs_load or btm_needs_load
+            ) else 0.0
+            end = self.cal.add_work_hrs(current, duration)
+            stops.append(Stop(mchn_id=self.id, reason='FAMILY_CHANGE', item=item.id,
+                            start=current, end=end))
+        elif item != self.last_item:
+            duration = 0.25 if not (
+                top_needs_tape or btm_needs_tape or top_needs_load or btm_needs_load
+            ) else 0.0
+            end = self.cal.add_work_hrs(current, duration)
+            stops.append(Stop(mchn_id=self.id, reason='STYLE_CHANGE', item=item.id,
+                            start=current, end=end))
+
+        return stops
+
+    def get_all_events(
+        self,
+        item: Greige,
+        rolls: int,
+        wait_for_runout: bool = False
+    ) -> tuple[list[Decision], list[Stop], datetime, datetime]:
+        rate = item.get_rate_on(self.id)
+        top_rate = rate * item.top_pct
+        btm_rate = rate * item.btm_pct
+        roll_rate = rate / item.tgt_wt
 
         runouts = []
-        rate = item.get_rate_on(self.id)
-        tgt_wt = item.tgt_wt
-        top_rem = top_beam.rem_lbs_by(current)
-        btm_rem = btm_beam.rem_lbs_by(current)
+        stops = self.get_stops(item, wait_for_runout)
 
-        while rolls > 0:
-            top_hrs = (top_rem / item.top_pct) / rate
-            btm_hrs = (btm_rem / item.btm_pct) / rate
-            next_hrs = min(top_hrs, btm_hrs)
+        # Start is the end of the last stop, or last_job_end if no stops
+        start = stops[-1].end if stops else self.last_job_end
 
-            lbs_until_runout = next_hrs * rate
-            full_rolls_until_runout = int(lbs_until_runout / tgt_wt)
+        # Initialize remaining lbs, accounting for partial consumption
+        # of the surviving bar if we waited for a runout
+        top_rem = self.top_set.rem_lbs_by(start)
+        btm_rem = self.btm_set.rem_lbs_by(start)
 
-            if full_rolls_until_runout >= rolls:
-                completion_dt = self.cal.add_work_hrs(current, (rolls * tgt_wt) / rate)
-                return runouts, completion_dt
+        if wait_for_runout:
+            next_ro = self.next_runout()
+            if next_ro.kind == 'TOP_RUNOUT':
+                top_rem = _BEAM_LBS[self.top_set.denier]
+                if item.btm_set == self.btm_set.name:
+                    btm_rem -= self.cal.get_work_hrs_between(self.last_job_end, next_ro.date) * btm_rate
+                else:
+                    btm_rem = _BEAM_LBS[self.btm_set.denier]
+            else:
+                btm_rem = _BEAM_LBS[self.btm_set.denier]
+                if item.top_set == self.top_set.name:
+                    top_rem -= self.cal.get_work_hrs_between(self.last_job_end, next_ro.date) * top_rate
+                else:
+                    top_rem = _BEAM_LBS[self.top_set.denier]
 
-            rolls -= full_rolls_until_runout
+        current = start
+        rolls_remaining = rolls
+
+        while rolls_remaining > 0:
+            hrs_needed = rolls_remaining / roll_rate
+
+            top_hrs = top_rem / top_rate
+            btm_hrs = btm_rem / btm_rate
+
+            if top_hrs >= hrs_needed and btm_hrs >= hrs_needed:
+                current = self.cal.add_work_hrs(current, hrs_needed)
+                break
 
             if top_hrs <= btm_hrs:
-                runout_dt = self.cal.add_work_hrs(current, next_hrs)
-                runouts.append(('top_ro', runout_dt))
-                current = self.cal.add_work_hrs(runout_dt, CHANGEOVER_HRS)
-                top_beam = fresh_beam(top_beam)
-                if apply_changes:
-                    self._top_set = top_beam
-                top_rem = INIT_LBS[denier_from_name(top_beam.name)] * item.top_pct
-                btm_rem -= lbs_until_runout * item.btm_pct
+                ro_hrs = top_hrs
+                ro_kind = 'TOP_RUNOUT'
+                load_reason = 'LOAD_TOP_BAR'
             else:
-                runout_dt = self.cal.add_work_hrs(current, next_hrs)
-                runouts.append(('btm_ro', runout_dt))
-                current = self.cal.add_work_hrs(runout_dt, CHANGEOVER_HRS)
-                btm_beam = fresh_beam(btm_beam)
-                if apply_changes:
-                    self._btm_set = btm_beam
-                btm_rem = INIT_LBS[denier_from_name(btm_beam.name)] * item.btm_pct
-                top_rem -= lbs_until_runout * item.top_pct
+                ro_hrs = btm_hrs
+                ro_kind = 'BTM_RUNOUT'
+                load_reason = 'LOAD_BTM_BAR'
 
-        return runouts, current
+            rolls_before_ro = int(ro_hrs * roll_rate)
+            rolls_remaining -= rolls_before_ro
+
+            ro_date = self.cal.add_work_hrs(current, ro_hrs)
+            runouts.append(Decision(mchn_id=self.id, kind=ro_kind, date=ro_date))
+
+            # Add the beam loading stop
+            load_end = self.cal.add_work_hrs(ro_date, 2.0)
+            new_beam = item.top_set if load_reason == 'LOAD_TOP_BAR' else item.btm_set
+            stops.append(Stop(mchn_id=self.id, reason=load_reason, item=new_beam,
+                            start=ro_date, end=load_end))
+
+            current = load_end
+            if ro_kind == 'TOP_RUNOUT':
+                top_rem = _BEAM_LBS[self.top_set.denier]
+                btm_rem -= ro_hrs * btm_rate
+            else:
+                btm_rem = _BEAM_LBS[self.btm_set.denier]
+                top_rem -= ro_hrs * top_rate
+
+        return runouts, stops, start, current
     
-    def get_tapeouts(self, item: Greige, wait_for_runout = False):
-        ret = []
-        is_chg = lambda lbs: 'chg' if lbs == 0 or wait_for_runout else 'to'
-        if self.item.top_set != item.top_set:
-            suff = is_chg(self.top_set.lbs)
-            ret.append(('top_'+suff, item.top_set, self.last_job_end))
-        if self.item.btm_set != item.btm_set:
-            suff = is_chg(self.btm_set.lbs)
-            ret.append(('btm_'+suff, item.btm_set, self.last_job_end))
-        return ret
+    def schedule_job(self, stops: list[Stop], job: Job) -> None:
+        # Add pre-job stops to the schedule and update beamsets as needed
+        for stop in stops:
+            self._sched.append(stop)
+            if stop.reason == 'LOAD_TOP_BAR':
+                self._top_set = BeamSet(stop.item, _BEAM_LBS[_denier_from_name(stop.item)])
+            elif stop.reason == 'LOAD_BTM_BAR':
+                self._btm_set = BeamSet(stop.item, _BEAM_LBS[_denier_from_name(stop.item)])
 
-    def add_job(self, req: Req):
-        CHANGEOVER_HRS = 3.0
-        TAPEOUT_HRS = 6.0
-        
-        item = req.item
-        rolls = req.rolls
+        # Build a timeline of production intervals, broken up by mid-job stops
+        interval_start = job.start
+        for stop in sorted(job.stops, key=lambda s: s.start):
+            if interval_start < stop.start:
+                self.top_set.use(job.item, self.id, 'top', interval_start, stop.start)
+                self.btm_set.use(job.item, self.id, 'btm', interval_start, stop.start)
+            if stop.reason == 'LOAD_TOP_BAR':
+                self._top_set = BeamSet(stop.item, _BEAM_LBS[_denier_from_name(stop.item)])
+            elif stop.reason == 'LOAD_BTM_BAR':
+                self._btm_set = BeamSet(stop.item, _BEAM_LBS[_denier_from_name(stop.item)])
+            interval_start = stop.end
 
-        # Collect the tape-outs/beam changes needed to start knitting item
-        changes = self.get_tapeouts(item)
+        # Log beam usage for the final interval
+        if interval_start < job.end:
+            self.top_set.use(job.item, self.id, 'top', interval_start, job.end)
+            self.btm_set.use(job.item, self.id, 'btm', interval_start, job.end)
 
-        # Start from whenever the machine is next free, then offset by changeovers
-        current = self.last_job_end
-        for change_type, _, _ in changes:
-            hrs = TAPEOUT_HRS if change_type in ('top_to', 'btm_to') else CHANGEOVER_HRS
-            current = self.cal.add_work_hrs(current, hrs)
-
-        job_start = current
-
-        # Run the simulation with apply_changes=True
-        runouts, completion_dt = self.get_runouts(self.last_job_end, rolls, item, apply_changes=True)
-
-        # Calculate lbs consumed from each beam set over the job
-        rate = item.get_rate_on(self.id)
-        total_hrs = self.cal.get_work_hrs_between(job_start, completion_dt)
-
-        # Add back changeover downtime to get true production hours per beam segment
-        changeover_count = len(runouts)
-        production_hrs = total_hrs - (changeover_count * CHANGEOVER_HRS)
-
-        total_lbs = production_hrs * rate
-        lbs_used_top = total_lbs * item.top_pct
-        lbs_used_btm = total_lbs * item.btm_pct
-        lbs_prod = rolls * item.tgt_wt
-
-        # end is after the last changeover if the job ends on a runout,
-        # otherwise it is the completion datetime
-        if runouts:
-            last_runout_dt = runouts[-1][1]
-            end_dt = self.cal.add_work_hrs(last_runout_dt, CHANGEOVER_HRS)
-            # If completion falls after the last changeover the job finished normally
-            if completion_dt > end_dt:
-                end_dt = completion_dt
-        else:
-            end_dt = completion_dt
-
-        job = Job(
-            item=item,
-            req=req,
-            start=job_start,
-            end=end_dt,
-            lbs_used_top=lbs_used_top,
-            lbs_used_btm=lbs_used_btm,
-            lbs_prod=lbs_prod,
-            changes=changes,
-            run_outs=[(side, dt) for side, dt in runouts],
-        )
-        self.top_set.use(job.lbs_used_top, job.end)
-        self.btm_set.use(job.lbs_used_btm, job.end)
-
-        self.jobs.append(job)
-        req.assign(job)
-        return job
+        self._sched.append(job)

@@ -1,16 +1,20 @@
-from typing import Protocol
+from typing import Protocol, NamedTuple
 from datetime import datetime
 
 from swmtplanner.swmttypes.product import Greige
 from swmtplanner.swmttypes.schedule import Job
 
-__all__ = ['Req']
+__all__ = ['Req', 'Production']
 
 class _InvTracker(Protocol):
     item: Greige
     safety_lbs: float
     safety_rolls: int
     def net_position_by(self, date: datetime) -> float: ...
+
+class Production(NamedTuple):
+    job: Job
+    rolls: int
 
 class Req:
     def __init_subclass__(cls, read_only: tuple[str, ...] = ...,
@@ -30,6 +34,13 @@ class Req:
     def week(self) -> int: ...
     @property
     def prty(self) -> int: ...
-    @property
-    def job(self) -> Job | None: ...
-    def assign(self, job: Job) -> None: ...
+    def add_production(self, prod: Production) -> None: ...
+    def remaining_rolls(self, by: datetime | None = None) -> int:
+        """
+        Returns the number of rolls still needed to fulfill this requirement.
+
+        Args:
+            by: If provided, only counts production that finished by this
+                datetime. If None, counts all production regardless of timing.
+        """
+        ...
