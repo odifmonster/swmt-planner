@@ -9,9 +9,9 @@ def print_token(t: tstream.tokens.Token):
 
 def main(path: str):
     f = File(path)
-    toks = tstream.tokenize(f)
-    for t in toks:
-        print_token(t)
+    toks = tstream.TStream(f)
+    while not toks.has_ended:
+        print(toks.advance())
 
 if __name__ == '__main__':
     main(sys.argv[1])

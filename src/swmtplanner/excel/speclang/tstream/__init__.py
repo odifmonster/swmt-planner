@@ -2,5 +2,8 @@
 
 from . import tokens
 from ._tokenize import tokenize
+from .tstream import TStream
 
-__all__ = ['tokens', 'tokenize']
+Token = tokens.Token
+
+__all__ = ['tokens', 'tokenize', 'TStream', 'Token']
