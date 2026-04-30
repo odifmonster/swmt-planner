@@ -18,7 +18,7 @@ rls_wks = 0 to 8
 rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
 
 [Buildable] greige_translation:
-    format="greige_translate_table"
+    formatter="greige_translate_table"
     [Excel] source:
         folder=FOLDER1
         workbook=XREF
@@ -33,7 +33,7 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
         columns=["inventory", "plan"]
 
 [Buildable] greige_styles:
-    format="greige_style_table"
+    formatter="greige_style_table"
     [Excel] source:
         folder=FOLDER1
         workbook=XREF
@@ -45,7 +45,7 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
             "gauge", "top_set", "top_pct", "btm_set", "btm_pct", "machines"]
 
 [Buildable] dye_formulae:
-    format="colors"
+    formatter="colors"
     [Excel] source:
         folder=FOLDER1
         workbook=XREF
@@ -57,7 +57,7 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
         columns=["id", "name", "shade"]
 
 [Buildable] ply1_items:
-    format="finished_fabric"
+    formatter="finished_fabric"
     [Excel] source:
         folder=FOLDER1
         workbook=XREF

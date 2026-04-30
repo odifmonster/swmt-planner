@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from . import excel
+from . import excel, support, products
 
-__all__ = ['excel']
+__all__ = ['excel', 'support', 'products']
