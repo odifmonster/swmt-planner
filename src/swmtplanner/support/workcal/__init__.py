@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 
-from . import holidays
+from .holidays import *
 from .workcal import WorkCal
 
-HOLIDAYS = holidays.HOLIDAYS
-
-__all__ = ['holidays', 'HOLIDAYS', 'WorkCal']
+__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal']

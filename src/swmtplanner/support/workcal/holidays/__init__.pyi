@@ -1,8 +1,6 @@
 from typing import NamedTuple
 
-__all__ = ['FixedDate', 'FlexDate', 'HOLIDAYS']
-
-HOLIDAYS: dict[str, FixedDate | FlexDate] = ...
+__all__ = ['FixedDate', 'FlexDate', 'load_holidays']
 
 class FixedDate(NamedTuple):
     """Represents a holiday that occurs on the same date every year."""
@@ -14,3 +12,5 @@ class FlexDate(NamedTuple):
     month: int
     weekday: int
     n: int
+
+def load_holidays(path: str) -> list[FixedDate | FlexDate]: ...

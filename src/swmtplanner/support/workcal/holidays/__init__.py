@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from .holidays import FixedDate, FlexDate, HOLIDAYS
+from .holidays import FixedDate, FlexDate, load_holidays
 
-__all__ = ['FixedDate', 'FlexDate', 'HOLIDAYS']
+__all__ = ['FixedDate', 'FlexDate', 'load_holidays']

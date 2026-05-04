@@ -5,18 +5,19 @@ from abc import abstractmethod
 
 class HasID[T](Protocol):
 
-    def __eq__(self, value: 'HasID'):
+    def __eq__(self, value):
+        if not (hasattr(value, 'prefix') and hasattr(value, 'id')):
+            return super().__eq__(value)
         return self.prefix == value.prefix and self.id == value.id
     
     def __hash__(self):
         return hash(self.id)
 
     @property
-    @abstractmethod
-    def prefix(self) -> str:
-        raise NotImplementedError()
+    def prefix(self):
+        return self.__class__.__name__
     
     @property
     @abstractmethod
-    def id(self) -> T:
+    def id(self):
         raise NotImplementedError()
