@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import typer, pandas as pd, numpy as np, datetime as dt, os
+import typer, pandas as pd, numpy as np, datetime as dt, os, re
 from pathlib import Path
 from typing import Annotated
 from enum import Enum
@@ -218,9 +218,10 @@ def _audit_summary(date: dt.datetime, writer):
     fpath1 += f'_{date.strftime('%Y%m%d')}.tsv'
     
     audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Grade Code': 'string', 'Grade Desc': 'string',
-                                       'Defect Code': 'string', 'Cust No.': 'string', 'Cust Name': 'string'},
+                                       'Defect Code': 'string', 'Cust No.': 'string', 'Cust Name': 'string',
+                                       'WIP Roll': 'string'},
                         sep='\t')
-    drop_rows = audit[audit['Fin Item 1'].isna() | audit['Lot'].isna()].index
+    drop_rows = audit[audit['Stock Item'].isna() | audit['Lot'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
     fpath2, _ = INFO_MAP['pa_greige_assigns']
@@ -240,6 +241,56 @@ def _audit_summary(date: dt.datetime, writer):
         cust_name=pd.NamedAgg('Cust Name', 'max')
     )
 
+    sop_to_widths = audit[~audit['SOP'].isna()].groupby('SOP').agg(
+        slit=pd.NamedAgg('Slit Instruction', 'max')
+    )
+
+    def _get_sop_widths(slit):
+        num1 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
+        if not num1:
+            return -1, -1, -1
+        slit = slit[num1.end(0):]
+        num1 = num1.group(0)
+        txt1 = re.match(r'[^0-9]*', slit)
+        if txt1.group(0) == slit:
+            return num1, '', num1
+        slit = slit[txt1.end(0):]
+        num2 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
+        if not num2:
+            raise RuntimeError('what happened')
+        slit = slit[num2.end(0):]
+        num2 = num2.group(0)
+        txt2 = re.match(r'[^0-9]*', slit)
+        num3 = '0'
+        if txt2.group(0) != slit:
+            slit = slit[txt2.end(0):]
+            num3 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
+            if not num3:
+                raise RuntimeError('what happened')
+            num3 = num3.group(0)
+        
+        x = float(num1)
+        y = float(num2)
+        z = float(num3)
+        if x * y > 250:
+            fin1 = num1
+            fin2 = num2
+            wip_width = x + y + z
+        else:
+            fin1 = num1
+            fin2 = ''
+            wip_width = x * y + z
+        if int(wip_width) == wip_width:
+            wip_width = str(int(wip_width))
+        else:
+            wip_width = str(wip_width)
+        return fin1, fin2, wip_width
+    
+    sop_to_widths['Fin Width 1'], sop_to_widths['Fin Width 2'], sop_to_widths['WIP Width'] = \
+        zip(*sop_to_widths['slit'].map(_get_sop_widths))
+    sop_to_widths = sop_to_widths.astype('string')
+    print(sop_to_widths.info())
+
     def _split_raw_dt_val(raw):
         raw = int(raw)
         val3 = raw % 100
@@ -252,7 +303,31 @@ def _audit_summary(date: dt.datetime, writer):
         hour, minute, sec = _split_raw_dt_val(row['Time'])
         return dt.datetime(y, m, d, hour=hour, minute=minute, second=sec)
     
+    def _get_fin1(row):
+        sop = row['SOP']
+        if pd.isna(sop):
+            return row['Stock Item']
+        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'Fin Width 1']
+    
+    def _get_fin2(row):
+        sop = row['SOP']
+        if pd.isna(sop):
+            return row['Stock Item']
+        width = sop_to_widths.loc[sop, 'Fin Width 2']
+        if pd.isna(width):
+            return ''
+        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'Fin Width 2']
+    
+    def _get_wip_item(row):
+        sop = row['SOP']
+        if pd.isna(sop):
+            return row['Stock Item']
+        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'WIP Width']
+    
     audit['Timestamp'] = audit[['Date', 'Time']].agg(_get_timestamp, axis=1)
+    audit['Fin Item 1'] = audit.agg(_get_fin1, axis=1)
+    audit['Fin Item 2'] = audit.agg(_get_fin2, axis=1)
+    audit['WIP Item'] = audit.agg(_get_wip_item, axis=1)
 
     def _get_roll_type(row):
         if row['Lot'] not in row['Roll ID'] or row['Lot'] == '0':
@@ -289,6 +364,32 @@ def _audit_summary(date: dt.datetime, writer):
         return strip_last
     
     audit['Roll Type'] = audit[['Roll ID', 'Lot']].agg(_get_roll_type, axis=1)
+
+    fin_df = audit[audit['Roll Type'] == 'FIN']
+    fin_wip_df = fin_df[~(fin_df['WIP Roll'].isna() | (fin_df['WIP Roll'] == 'N'))]
+    fin_to_wip = {}
+    for i in fin_wip_df.index:
+        fin = fin_wip_df.loc[i, 'Roll ID']
+        wip = fin_wip_df.loc[i, 'WIP Roll']
+        if fin not in fin_to_wip:
+            fin_to_wip[fin] = wip
+    
+    n = len(fin_df)
+    count = 0
+    print('Updated finished roll grades and defects...')
+    for i in fin_df.index:
+        print(f'roll {count+1} out of {n}', end='\r')
+        roll = fin_df.loc[i, 'Roll ID']
+        if roll in fin_to_wip:
+            wip_rows = audit[audit['Roll ID'] == fin_to_wip[roll]]
+            if len(wip_rows) > 0:
+                last_idx = max(wip_rows.index)
+                audit.at[i, 'Grade Code'] = audit.loc[last_idx, 'Grade Code']
+                audit.at[i, 'Grade Desc'] = audit.loc[last_idx, 'Grade Desc']
+                audit.at[i, 'Defect Code'] = audit.loc[last_idx, 'Defect Code']
+                audit.at[i, 'Defect Desc'] = audit.loc[last_idx, 'Defect Desc']
+        count += 1
+
     audit['Doff'] = audit[['Roll Type', 'Roll ID']].agg(_get_doff, axis=1)
     audit['Panel'] = audit[['Roll Type', 'Roll ID']].agg(_get_panel, axis=1)
     audit['Insp Roll'] = audit[['Roll Type', 'Roll ID']].agg(_get_insp_roll, axis=1)

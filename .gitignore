@@ -6,3 +6,4 @@ tokenized.txt
 tokens.txt
 .ipynb_checkpoints/
 *.ipynb
+.claude/
