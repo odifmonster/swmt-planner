@@ -289,7 +289,6 @@ def _audit_summary(date: dt.datetime, writer):
     sop_to_widths['Fin Width 1'], sop_to_widths['Fin Width 2'], sop_to_widths['WIP Width'] = \
         zip(*sop_to_widths['slit'].map(_get_sop_widths))
     sop_to_widths = sop_to_widths.astype('string')
-    print(sop_to_widths.info())
 
     def _split_raw_dt_val(raw):
         raw = int(raw)
@@ -376,7 +375,7 @@ def _audit_summary(date: dt.datetime, writer):
     
     n = len(fin_df)
     count = 0
-    print('Updated finished roll grades and defects...')
+    print('Updating finished roll grades and defects...')
     for i in fin_df.index:
         print(f'roll {count+1} out of {n}', end='\r')
         roll = fin_df.loc[i, 'Roll ID']
@@ -389,6 +388,7 @@ def _audit_summary(date: dt.datetime, writer):
                 audit.at[i, 'Defect Code'] = audit.loc[last_idx, 'Defect Code']
                 audit.at[i, 'Defect Desc'] = audit.loc[last_idx, 'Defect Desc']
         count += 1
+    print()
 
     audit['Doff'] = audit[['Roll Type', 'Roll ID']].agg(_get_doff, axis=1)
     audit['Panel'] = audit[['Roll Type', 'Roll ID']].agg(_get_panel, axis=1)
@@ -411,8 +411,14 @@ def _audit_summary(date: dt.datetime, writer):
         'defect_code': [], 'defect_desc': [], 'greige_item': [], 'greige_rolls': []
     }
 
+    roll_lst = audit['Roll Type'] + '-' + audit['Roll ID']
+    n_rolls = len(roll_lst.unique())
+    count = 0
+    print('Compiling roll data...')
     for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
         kind, roll = key
+        print(f'roll {count+1} of {n_rolls}', end='\r')
+        count += 1
         if kind == 'LOT': continue
             
         first = list(grp.index)[0]
@@ -492,6 +498,7 @@ def _audit_summary(date: dt.datetime, writer):
         roll_data['processed_yds'].append(processed)
         roll_data['code'].append(code)
         roll_data['timestamp'].append(max(grp['Timestamp']))
+    print()
 
     by_roll = pd.DataFrame(data=roll_data, index=idx)
 
