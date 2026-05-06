@@ -9,11 +9,12 @@ BeamConfig = namedtuple('BeamConfig', ['top_beam', 'top_pct', 'btm_beam', 'btm_p
 class Greige(HasID[str]):
 
     def __init__(self, id: str, family: str, tgt_wt: float, top_beam: str, top_pct: float,
-                 btm_beam: str, btm_pct: float, machines: dict[str, float]):
+                 btm_beam: str, btm_pct: float, safety: float, machines: dict[str, float]):
         self._id = id
         self._family = family
         self._tgt_wt = tgt_wt
         self._configuration = BeamConfig(top_beam, top_pct, btm_beam, btm_pct)
+        self._safety = safety
         self._machines = dict(machines)
 
     @property
@@ -35,6 +36,10 @@ class Greige(HasID[str]):
     @property
     def configuration(self):
         return self._configuration
+    
+    @property
+    def safety(self):
+        return self._safety
 
     def can_run_on_mchn(self, mchn: str) -> bool:
         return mchn in self._machines

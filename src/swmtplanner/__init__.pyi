@@ -1,3 +1,3 @@
-from . import excel, support, products
+from . import excel, support, products, demand
 
-__all__ = ['excel', 'support', 'products']
+__all__ = ['excel', 'support', 'products', 'demand']

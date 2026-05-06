@@ -12,6 +12,9 @@ class HasID[T](Protocol):
     
     def __hash__(self):
         return hash(self.id)
+    
+    def __repr__(self):
+        return f'{self.prefix}(id={repr(self.id)})'
 
     @property
     def prefix(self):

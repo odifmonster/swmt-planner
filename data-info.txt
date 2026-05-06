@@ -41,8 +41,9 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
     [DatFile] dest:
         folder=FOLDER3
         file="greige-styles.dat"
-        columns=["id", "target", "alt1", "alt2", "safety", "family", "rate", ...
-            "gauge", "top_set", "top_pct", "btm_set", "btm_pct", "machines"]
+        columns=["id", "target", "alt1", "alt2", "safety", "family", ...
+            "gauge", "top_set", "top_pct", "btm_set", "btm_pct", "machines", ...
+            "machine_rates"]
 
 [Buildable] dye_formulae:
     formatter="colors"
