@@ -1,5 +1,5 @@
 from typing import NamedTuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from swmtplanner.support import Observer, HasID
 from swmtplanner.products import Greige
@@ -39,4 +39,9 @@ class Order(HasID[str], Observer[Job]):
     def remaining(self, by: datetime | None = None) -> DemandQty:
         """Get the remaining unfulfilled demand. Optionally provide a date boundary to
         only include jobs ending before or on that date."""
+        ...
+    def late_table(self) -> list[tuple[timedelta, float]]:
+        """Calculate how many pounds will be produced late (if any), and how late they
+        will be. This only counts pounds that are scheduled to be produced at some
+        point, so unfulfilled demand will not appear here."""
         ...

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from bisect import bisect_right
 
 from ...support import Observer, HasID
@@ -83,8 +83,23 @@ class Order(HasID[str], Observer[Job]):
     def remaining(self, by: datetime | None = None):
         if by is None:
             return self._lbs_remaining
-        
+
         if by not in self._demand_cache:
             self._demand_cache[by] = self._calc_rem_by(by)
-        
+
         return self._demand_cache[by]
+
+    def late_table(self) -> list[tuple[timedelta, float]]:
+        result: list[tuple[timedelta, float]] = []
+        cum = 0.0
+        for job in self._jobs:
+            if cum >= self._total_lbs:
+                break
+            cum_after = cum + job.lbs
+            lo = max(cum, self._prev_lbs)
+            hi = min(cum_after, self._total_lbs)
+            contribution = hi - lo
+            if contribution > 0 and job.end > self._due_date:
+                result.append((job.end - self._due_date, contribution))
+            cum = cum_after
+        return result

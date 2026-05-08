@@ -174,6 +174,23 @@ class WorkCal:
                 return md + timedelta(hours=self._day_end)
         return dt
 
+    def get_work_hours_between(self, start: datetime, end: datetime) -> float:
+        if end <= start:
+            return 0.0
+        total = 0.0
+        d = start.date()
+        end_d = end.date()
+        while d <= end_d:
+            if self.is_work_day(d):
+                day_lo = datetime(d.year, d.month, d.day) + timedelta(hours=self._day_start)
+                day_hi = datetime(d.year, d.month, d.day) + timedelta(hours=self._day_end)
+                lo = max(start, day_lo)
+                hi = min(end, day_hi)
+                if lo < hi:
+                    total += (hi - lo).total_seconds() / 3600
+            d += timedelta(days=1)
+        return total
+
     def offset_work_hours(self, start: datetime, hours: float):
         start += self._cal_shift
         direction = 1 if hours >= 0 else -1

@@ -29,3 +29,7 @@ class WorkCal:
         """Offset from start by the provided amount of hours. Same snapping behavior
         as offset_work_days."""
         ...
+    def get_work_hours_between(self, start: datetime, end: datetime) -> float:
+        """Get the available work hours between the two datetimes, skipping
+        weekends and holidays."""
+        ...
