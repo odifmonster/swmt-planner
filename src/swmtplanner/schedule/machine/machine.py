@@ -3,10 +3,13 @@
 from datetime import date, datetime, timedelta
 from typing import Literal
 from bisect import bisect_right
+from collections import namedtuple
 
 from swmtplanner.support import HasID, WorkCal
 from swmtplanner.products import BeamSet, Greige
 from swmtplanner.schedule import Job
+
+Decision = namedtuple('Decision', ['mchn_id', 'dt'])
 
 class Machine(HasID[str]):
 
@@ -66,3 +69,6 @@ class Machine(HasID[str]):
         job = Job(item, start, end, lbs)
         self._jobs.append(job)
         return job
+    
+    def next_decisions(self):
+        return [Decision(mchn_id=self.id, dt=self.next_job_end)]

@@ -1,9 +1,15 @@
 from datetime import datetime
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from swmtplanner.support import HasID, WorkCal
 from swmtplanner.products import BeamSet, Greige
 from swmtplanner.schedule import Job
+
+__all__ = ['Decision', 'Machine']
+
+class Decision(NamedTuple):
+    mchn_id: str
+    dt: datetime
 
 class Machine(HasID[str]):
     def __init__(self, id: str, init_item: Greige, start_date: datetime, workcal: WorkCal) -> None: ...
@@ -27,4 +33,7 @@ class Machine(HasID[str]):
         ...
     def add_job(self, item: Greige, lbs: float) -> Job:
         """Add a job for a greige style and a number of lbs to the end of the schedule."""
+        ...
+    def next_decisions(self) -> list[Decision]:
+        """Get the next "decision points" for this machine."""
         ...

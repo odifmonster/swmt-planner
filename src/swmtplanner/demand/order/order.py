@@ -12,19 +12,19 @@ DemandQty = namedtuple('DemandQty', ['cumulative', 'regular', 'safety', 'excess'
 
 class Order(HasID[str], Observer[Job]):
     
-    def __init__(self, item: Greige, due_date: datetime, priority: int, cur_lbs: float,
-                 prev_lbs: float, prev_due: datetime, safety: float, excess: float):
+    def __init__(self, item: Greige, priority: int, dmnd_pairs: list[tuple[float, datetime]],
+                 safety: float, excess: float):
         self._id = f'P{priority}@{item.id}'
         self._item = item
-        self._due_date = due_date
-        self._total_lbs = cur_lbs + prev_lbs
-        self._prev_lbs = prev_lbs
-        self._prev_due = prev_due
+        self._due_date = dmnd_pairs[-1][1]
+        self._dmnd_pairs = sorted(dmnd_pairs, key=lambda x: x[1])
+        self._prev_lbs = sum(map(lambda x: x[0], self._dmnd_pairs[:-1]))
+        self._total_lbs = sum(map(lambda x: x[0], self._dmnd_pairs))
         self._safety = safety
 
         self._lbs_remaining = DemandQty(cumulative=self._total_lbs,
                                         safety=safety,
-                                        regular=cur_lbs,
+                                        regular=self._dmnd_pairs[-1][0],
                                         excess=excess)
         self._init_lbs_remaining = self._lbs_remaining
 
@@ -33,20 +33,31 @@ class Order(HasID[str], Observer[Job]):
 
     def _lbs_produced_by(self, d: datetime):
         return sum(j.lbs for j in filter(lambda j: j.end <= d, self._jobs))
+    
+    def _lbs_needed_by(self, d: datetime):
+        return sum(map(lambda x: x[0], filter(lambda x: x[1] <= d, self._dmnd_pairs)))
 
     def _get_safety_use(self, by: datetime):
-        cap = min(by, self._prev_due)
-        rem_on_hand = max(0, self._lbs_produced_by(cap) - self._prev_lbs)
+        cap = min(by, self._due_date)
+        
+        prev_lbs = self._lbs_needed_by(by)
+        rem_on_hand = max(0, self._lbs_produced_by(cap) - prev_lbs)
         return min(rem_on_hand, self._safety)
 
     def _calc_rem_by(self, by: datetime):
         on_hand = self._lbs_produced_by(by)
-        sfty_use = self._get_safety_use(by)
-        prev_added = max(0, self._prev_lbs - on_hand)
-        cum_lbs = max(0, self._total_lbs + sfty_use - on_hand)
-        reg_lbs = max(0, self._total_lbs + sfty_use - on_hand - prev_added)
-        excess = max(0, on_hand - self._total_lbs - sfty_use)
-        return DemandQty(cumulative=cum_lbs, regular=reg_lbs, safety=self._safety-sfty_use,
+        prev_cap = self._due_date - timedelta(weeks=1)
+        if len(self._dmnd_pairs) > 1:
+            prev_cap = self._dmnd_pairs[-2][1]
+
+        prev_sfty_use = self._get_safety_use(min(by, prev_cap))
+        cur_sfty_use = self._get_safety_use(by)
+        prev_lbs = self._lbs_needed_by(prev_cap)
+        prev_added = max(0, prev_lbs - on_hand)
+        cum_lbs = max(0, self._total_lbs + prev_sfty_use - on_hand)
+        reg_lbs = max(0, self._total_lbs + prev_sfty_use - on_hand - prev_added)
+        excess = max(0, on_hand - self._total_lbs - cur_sfty_use)
+        return DemandQty(cumulative=cum_lbs, regular=reg_lbs, safety=self._safety-cur_sfty_use,
                          excess=excess)
     
     def _recalculate(self):

@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
 from .job import Job
+from . import machine
 
-__all__ = ['Job']
+Machine = machine.Machine
+
+__all__ = ['Job', 'machine', 'Machine']

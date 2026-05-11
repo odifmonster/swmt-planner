@@ -2,12 +2,14 @@
 
 from datetime import datetime, timedelta, date
 from bisect import bisect_right
-from math import ceil
+from collections import namedtuple
 
 from ...support import HasID
 from ...products import Greige
 from ...schedule import Job
 from ..order import Order
+
+Safety = namedtuple('Safety', ['item', 'lbs'])
 
 class RlsItem(HasID[str]):
     
@@ -32,8 +34,8 @@ class RlsItem(HasID[str]):
                 safety = max(0, x2)
                 on_hand = min(0, x2) * -1
             
-            self._orders.append(Order(item, due_date, 0, wk0_lbs, 0, due_date - timedelta(weeks=1),
-                                      safety, on_hand))
+            prev_pairs: list[tuple[float, datetime]] = [(wk0_lbs, due_date)]
+            self._orders.append(Order(item, 0, prev_pairs, safety, on_hand))
             
             total_lbs = wk0_lbs
             prev_added = wk0_lbs
@@ -44,9 +46,9 @@ class RlsItem(HasID[str]):
                 due_date = datetime.fromordinal(start_day + i * 7)
                 cur_lbs = max(0, total_lbs + lbs - prev_added - on_hand)
                 excess = max(0, on_hand - total_lbs - lbs)
-                cur_order = Order(item, due_date, i, cur_lbs, prev_added,
-                                  datetime.fromordinal(start_day + (i - 1) * 7),
-                                  safety, excess)
+                prev_pairs.append((cur_lbs, due_date))
+
+                cur_order = Order(item, i, prev_pairs, safety, excess)
                 
                 total_lbs += lbs
                 prev_added += cur_lbs
@@ -67,14 +69,20 @@ class RlsItem(HasID[str]):
         return 'RlsItem'
     
     @property
+    def item(self):
+        return self._item
+    
+    @property
     def orders(self):
         return tuple(self._orders)
     
     @property
     def safety(self):
         if not self._safety is None:
-            return self._safety
-        return self._orders[-1].remaining().safety
+            lbs = self._safety
+        else:
+            lbs = self._orders[-1].remaining().safety
+        return Safety(item=self.item, lbs=lbs)
     
     def assign(self, job: Job):
         self._safety

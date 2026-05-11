@@ -15,8 +15,7 @@ class DemandQty(NamedTuple):
 
 class Order(HasID[str], Observer[Job]):
     """Class for tracking order fulfillment."""
-    def __init__(self, item: Greige, due_date: datetime, priority: int,
-                 cur_lbs: float, prev_lbs: float, prev_due: datetime,
+    def __init__(self, item: Greige, priority: int, dmnd_pairs: list[tuple[float, datetime]],
                  safety: float, excess: float) -> None:
         """
         Initialize a new Order object.
@@ -26,8 +25,7 @@ class Order(HasID[str], Observer[Job]):
             due_date: the due date for this order
             priority: how many weeks after the start week this order is due
             cur_lbs: the number of lbs ordered
-            prev_lbs: the cumulative lbs of all previous orders
-            prev_due: the due date of the last order before this one
+            dmnd_pairs: all requirements and due dates up until the current one
             safety: the remaining safety replenishment needed (after netting out inventory)
             excess: usually 0, unless current inventory levels exceed cumulative demand and safety stock targets
         """

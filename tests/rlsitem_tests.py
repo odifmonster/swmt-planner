@@ -180,9 +180,11 @@ def test_safety_property_nonempty_weekly_use():
     for label, on_hand, wu, item_sfty, _, expected_safety in SCENARIOS:
         g = make_greige(safety=item_sfty)
         r = RlsItem(g, on_hand=on_hand, weekly_use=wu, start_day=START_DAY)
-        actual = r.safety
-        assert actual == expected_safety, \
-            f'[{label}] rls.safety={actual!r}, expected {expected_safety!r}'
+        sfty = r.safety
+        assert sfty.item is g, \
+            f'[{label}] rls.safety.item is not the input Greige'
+        assert sfty.lbs == expected_safety, \
+            f'[{label}] rls.safety.lbs={sfty.lbs!r}, expected {expected_safety!r}'
 
 # ---- empty weekly_use -----------------------------------------------------
 # (label, on_hand, item_safety, expected_safety)
@@ -204,9 +206,11 @@ def test_empty_weekly_use_safety():
     for label, on_hand, item_sfty, expected in EMPTY_CASES:
         g = make_greige(safety=item_sfty)
         r = RlsItem(g, on_hand=on_hand, weekly_use=[], start_day=START_DAY)
-        actual = r.safety
-        assert actual == expected, \
-            f'[{label}] rls.safety={actual!r}, expected {expected!r}'
+        sfty = r.safety
+        assert sfty.item is g, \
+            f'[{label}] rls.safety.item is not the input Greige'
+        assert sfty.lbs == expected, \
+            f'[{label}] rls.safety.lbs={sfty.lbs!r}, expected {expected!r}'
 
 def main():
     test_id_matches_item_id()

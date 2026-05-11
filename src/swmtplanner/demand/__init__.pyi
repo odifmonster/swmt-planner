@@ -1,4 +1,4 @@
 from .order import Order
-from .rlsitem import RlsItem
+from .rlsitem import Safety, RlsItem
 
-__all__ = ['Order', 'RlsItem']
+__all__ = ['Order', 'Safety', 'RlsItem']

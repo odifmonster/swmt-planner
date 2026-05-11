@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from .rlsitem import RlsItem
+from .rlsitem import Safety, RlsItem
 
-__all__ = ['RlsItem']
+__all__ = ['Safety', 'RlsItem']

@@ -1,9 +1,16 @@
 from datetime import datetime
+from typing import NamedTuple
 
 from swmtplanner.support import HasID
 from swmtplanner.products import Greige
 from swmtplanner.schedule import Job
 from swmtplanner.demand import order
+
+__all__ = ['Safety', 'RlsItem']
+
+class Safety(NamedTuple):
+    item: Greige
+    lbs: float
 
 class RlsItem(HasID[str]):
     """Tracks all the demand on a single item, accounting for on-hand inventory
@@ -24,7 +31,7 @@ class RlsItem(HasID[str]):
     @property
     def orders(self) -> tuple[order.Order, ...]: ...
     @property
-    def safety(self) -> float:
+    def safety(self) -> Safety:
         """The remaining lbs needed to return inventory levels back to safety stock targets."""
         ...
     def assign(self, job: Job) -> None: ...
