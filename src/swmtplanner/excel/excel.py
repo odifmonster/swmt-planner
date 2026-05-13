@@ -32,7 +32,9 @@ def gen_info_template(outpath: _InfoOutAnno = 'excel-info.txt'):
     outfile.write('# \'$\' to mark it as a reference and not a regular name\n\n')
 
     outfile.write('FOLDER = <PATH TO MAIN FOLDER HERE>\n')
-    outfile.write('WORKBOOK = <PATH TO MAIN WORKBOOK HERE>\n\n')
+    outfile.write('WORKBOOK = <PATH TO MAIN WORKBOOK HERE>\n')
+    outfile.write('OUTPUT = <PATH TO CURRENT OUTPUT FILE HERE>\n')
+    outfile.write('MASTER = <PATH TO MASTER XREF FILE HERE>\n\n')
 
     outfile.write('# any values that should be interpreted as a list must')
     outfile.write(' be preceded by a *\n')
@@ -85,8 +87,13 @@ def gen_info_template(outpath: _InfoOutAnno = 'excel-info.txt'):
     outfile.write('        DEF2_REASON, DEFECT3, DEF3_REASON, MARKET_SEGMENT\n')
     outfile.write('    start_row=4\n\n')
 
-    outfile.write('adaptive_orders:\n    folder=$FOLDER\n')
-    outfile.write('    workbook=$WORKBOOK\n    sheet=Adaptive\n')
+    outfile.write('adaptive1_orders:\n    folder=$FOLDER\n')
+    outfile.write('    workbook=$WORKBOOK\n    sheet="Orders in Dye"\n')
+    outfile.write('    col_names=job, dyelot, machine, start, end, item1, item2, panels, ')
+    outfile.write('qty, "double?", Customer\n\n')
+
+    outfile.write('adaptive2_orders:\n    folder=$FOLDER\n')
+    outfile.write('    workbook="Dyelots.xlsx"\n    sheet=Sheet1\n')
     outfile.write('    col_names=Machine, StartTime, EndTime, FinItem, ')
     outfile.write('DyelotID1, DyelotID2, Width, Qty\n\n')
 
@@ -107,12 +114,44 @@ def gen_info_template(outpath: _InfoOutAnno = 'excel-info.txt'):
     outfile.write('    workbook=$WORKBOOK\n    sheet="Lam Release"\n')
     outfile.write('    col_names="Stock Item", "Ply1 Item", "Ship Day"\n\n')
 
+    outfile.write('lam_release:\n    folder=$FOLDER\n    workbook=$WORKBOOK\n')
+    outfile.write('    sheet="Lam Release"\n    col_names="Stock Item", "Lam Item", "Plant", "Ply1 Item", ')
+    outfile.write('"PA Item", "Active?", "Add\'l pull (weeks)", ...\n')
+    outfile.write('    "Lam On-Hand", "Lam Cust Contain GP12", "PH Raw", ')
+    outfile.write('"Ply1 On-Hand", "LAM add\'l WL factor", ...\n')
+    outfile.write('    "Conversion to Yards", "SCH PD", "SCH+0", "SCH+1", ')
+    outfile.write('"SCH+2", "Past Due", "Total Inv", ...\n')
+    outfile.write('    "RLS+0", "RLS+1", "RLS+2", "RLS+3", "RLS+4", "RLS+5", ')
+    outfile.write('"RLS+6", "RLS+7", "RLS+8", "Schedule Day"\n\n')
+
     outfile.write('pa_reqs:\n    folder=$FOLDER\n')
     outfile.write('    workbook=$WORKBOOK\n    sheet="Fab shortage 9-15"\n')
     outfile.write('    col_names="PA Item", "Ply1 Item", "FAB req\'d past due",')
     outfile.write(' $req_wks, "PA Fin", ...\n')
-    outfile.write('        "Inspection", "Frame", "Dye Orders"')
+    outfile.write('        "Inspection", "Frame", "Dye Orders"\n\n')
 
+    outfile.write('pa_714:\n    folder=$FOLDER\n    workbook=$WORKBOOK\n')
+    outfile.write('    sheet=714\n    col_names="Sales Rep", Item, "Order Type", ')
+    outfile.write('"Line Width", "Dye Order", "DO Qty", ...\n')
+    outfile.write('    "Fin Item", "Fin Yds"\n\n')
+    
+    outfile.write('dye_plan:\n    folder=$FOLDER\n    workbook=$OUTPUT\n')
+    outfile.write('    sheet=roll_allocation\n\n')
+
+    outfile.write('pa_raw_demand:\n    folder=$FOLDER\n    workbook=$OUTPUT\n')
+    outfile.write('    sheet=demand\n\n')
+    
+    outfile.write('dye_plan_inv:\n    folder=$FOLDER\n    workbook=$OUTPUT\n')
+    outfile.write('    sheet=inventory\n\n')
+    
+    outfile.write('pa_audit:\n    folder=$REPORTS\n    workbook="audit"\n    sheet=Placeholder\n\n')
+
+    outfile.write('pa_greige_assigns:\n    folder=$REPORTS\n')
+    outfile.write('    workbook="greige_assigns"\n    sheet=Placeholder\n\n')
+
+    outfile.write('pa_seconds:\n    folder=$REPORTS\n    workbook="1503.xlsx"\n')
+    outfile.write('    sheet="Seconds Report"\n    col_names="ROLL", "DEFECT", "REASON"')
+    
     outfile.truncate()
     outfile.close()
 
