@@ -10,6 +10,8 @@ src/swmtplanner.egg-info/requires.txt
 src/swmtplanner.egg-info/top_level.txt
 src/swmtplanner/excel/__init__.py
 src/swmtplanner/excel/__init__.pyi
+src/swmtplanner/excel/_fab_reports.py
+src/swmtplanner/excel/_updates.py
 src/swmtplanner/excel/cli.py
 src/swmtplanner/excel/excel.py
 src/swmtplanner/excel/info.py
@@ -32,8 +34,13 @@ src/swmtplanner/planners/__init__.py
 src/swmtplanner/planners/__init__.pyi
 src/swmtplanner/planners/parkave/__init__.py
 src/swmtplanner/planners/parkave/__init__.pyi
+src/swmtplanner/planners/parkave/plan.py
+src/swmtplanner/planners/parkave/demand/__init__.py
+src/swmtplanner/planners/parkave/demand/__init__.pyi
+src/swmtplanner/planners/parkave/demand/demand.py
 src/swmtplanner/planners/parkave/jet/__init__.py
 src/swmtplanner/planners/parkave/jet/__init__.pyi
+src/swmtplanner/planners/parkave/jet/jet.py
 src/swmtplanner/planners/parkave/jet/schedule/__init__.py
 src/swmtplanner/planners/parkave/jet/schedule/__init__.pyi
 src/swmtplanner/planners/parkave/jet/schedule/jetsched.py
