@@ -32,6 +32,7 @@ def gen_info_template(outpath: _InfoOutAnno = 'excel-info.txt'):
     outfile.write('# \'$\' to mark it as a reference and not a regular name\n\n')
 
     outfile.write('FOLDER = <PATH TO MAIN FOLDER HERE>\n')
+    outfile.write('REPORTS = <PATH TO REPORTS FOLDER HERE>\n')
     outfile.write('WORKBOOK = <PATH TO MAIN WORKBOOK HERE>\n')
     outfile.write('OUTPUT = <PATH TO CURRENT OUTPUT FILE HERE>\n')
     outfile.write('MASTER = <PATH TO MASTER XREF FILE HERE>\n\n')
