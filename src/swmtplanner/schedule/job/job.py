@@ -26,10 +26,6 @@ class Job(HasID[str]):
         return self._id
     
     @property
-    def prefix(self):
-        return 'Job'
-    
-    @property
     def item(self):
         return self._item
     

@@ -1,0 +1,47 @@
+[
+    {
+        "id": "AU1234",
+        "family": "A",
+        "tgt_wt": 700,
+        "top_beam": "40D WHT 1172X4 S/L",
+        "top_pct": 0.27,
+        "btm_beam": "70D WHT 1172X4",
+        "btm_pct": 0.73,
+        "safety": 2800,
+        "machines": [
+            { "id": "M1", "rate": 863 },
+            { "id": "M2", "rate": 863 },
+            { "id": "M3", "rate": 863 }
+        ]
+    },
+    {
+        "id": "AU0420",
+        "family": "A",
+        "tgt_wt": 700,
+        "top_beam": "40D WHT 1172X4 S/L",
+        "top_pct": 0.19,
+        "btm_beam": "70D WHT 1172X4",
+        "btm_pct": 0.81,
+        "safety": 1400,
+        "machines": [
+            { "id": "M1", "rate": 840 },
+            { "id": "M2", "rate": 840 },
+            { "id": "M3", "rate": 840 }
+        ]
+    },
+    {
+        "id": "AU1985",
+        "family": "A",
+        "tgt_wt": 700,
+        "top_beam": "40D WHT 1172X4 S/L",
+        "top_pct": 0.25,
+        "btm_beam": "70D WHT 1172X4",
+        "btm_pct": 0.75,
+        "safety": 1400,
+        "machines": [
+            { "id": "M1", "rate": 840 },
+            { "id": "M2", "rate": 840 },
+            { "id": "M3", "rate": 840 }
+        ]
+    }
+]

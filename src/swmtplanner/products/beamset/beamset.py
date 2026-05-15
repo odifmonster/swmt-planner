@@ -21,10 +21,6 @@ class BeamSet(HasID[str]):
         self._yarn_desc = ' '.join(parts[1:-1])
 
     @property
-    def prefix(self):
-        return 'BeamSet'
-
-    @property
     def id(self):
         return self._id
 

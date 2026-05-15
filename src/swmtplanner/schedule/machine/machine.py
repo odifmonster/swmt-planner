@@ -1,19 +1,23 @@
 #!/usr/bin/env python
 
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 from bisect import bisect_right
 from collections import namedtuple
 
-from swmtplanner.support import HasID, WorkCal
-from swmtplanner.products import BeamSet, Greige
+from swmtplanner.support import HasID
+from swmtplanner.products import BeamSet
 from swmtplanner.schedule import Job
+
+if TYPE_CHECKING:
+    from swmtplanner.support import WorkCal
+    from swmtplanner.products import Greige
 
 Decision = namedtuple('Decision', ['mchn_id', 'dt'])
 
 class Machine(HasID[str]):
 
-    def __init__(self, id: str, init_item: Greige, start_date: datetime, workcal: WorkCal) -> None:
+    def __init__(self, id: str, init_item: 'Greige', start_date: datetime, workcal: 'WorkCal') -> None:
         self._id = id
         self._jobs: list[Job] = [Job(init_item, start_date, start_date, 0)]
         self._workcal = workcal
@@ -23,15 +27,11 @@ class Machine(HasID[str]):
         return self._id
 
     @property
-    def prefix(self):
-        return 'Machine'
-
-    @property
     def schedule(self) -> tuple[Job, ...]:
         return tuple(self._jobs[1:])
 
     @property
-    def workcal(self) -> WorkCal:
+    def workcal(self) -> 'WorkCal':
         return self._workcal
 
     @property
@@ -58,12 +58,12 @@ class Machine(HasID[str]):
         start = max(self._jobs[-1].end, week_start)
         return self._workcal.get_work_hours_between(start, week_end)
 
-    def predict_job_end(self, item: Greige, lbs: float) -> datetime:
+    def predict_job_end(self, item: 'Greige', lbs: float) -> datetime:
         rate = item.get_rate_on_mchn(self._id)
         hours = lbs / rate
         return self._workcal.offset_work_hours(self._jobs[-1].end, hours)
 
-    def add_job(self, item: Greige, lbs: float) -> Job:
+    def add_job(self, item: 'Greige', lbs: float) -> 'Job':
         start = self._jobs[-1].end
         end = self.predict_job_end(item, lbs)
         job = Job(item, start, end, lbs)

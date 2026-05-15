@@ -18,10 +18,6 @@ class Greige(HasID[str]):
         self._machines = dict(machines)
 
     @property
-    def prefix(self):
-        return 'Greige'
-
-    @property
     def id(self):
         return self._id
 
