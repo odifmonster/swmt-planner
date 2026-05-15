@@ -260,7 +260,7 @@ def _audit_summary(date: dt.datetime, writer):
                                        'Defect Code': 'string', 'Cust No.': 'string', 'Cust Name': 'string',
                                        'WIP Roll': 'string'},
                         sep='\t')
-    drop_rows = audit[audit['Stock Item'].isna() | audit['Lot'].isna()].index
+    drop_rows = audit[audit['Stock Item'].isna() | audit['Lot'].isna() | audit['Roll ID'].isna()].index
     audit = audit.drop(drop_rows, axis=0)
 
     fpath2, _ = INFO_MAP['pa_greige_assigns']
