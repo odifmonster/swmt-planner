@@ -42,6 +42,12 @@ class RlsItem(HasID[str]):
 
         self._jobs: list['Job'] = []
 
+        # Prime the views so their orders/cost-trackers reflect on_hand against
+        # an empty job list. Without this the views are stale until the first
+        # register_job, and cost_if on a fresh RlsItem would observe a state
+        # change between its pre- and post-recompute snapshots.
+        self._recompute_views()
+
     @property
     def id(self) -> str:
         return self._id
