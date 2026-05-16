@@ -31,10 +31,18 @@ differ enough that combining them would obscure rather than clarify.
 - `lead_time` — the carry duration before which early lbs are not penalized.
 - `weekly_demand` — 4 `WeeklyDemand` records (one per week, fixed horizon).
 
-Jobs are added via `register_job(job)`. Jobs are append-only — never removed —
-but may be added in non-chronological order. The internal job list is kept
-sorted by `job.end`, with new jobs inserted in the correct position (e.g. via
-`bisect.insort`). `recompute` can iterate the list directly without sorting.
+Jobs are added via `register_jobs(jobs)`. The list form exists because the
+schedule layer's `plan_production` can emit multiple `Job`s from one
+decision — beam exhaustion mid-production splits a single logical run into
+back-to-back `Job`s separated by a `BeamLoad`, and `'next_runout'` mode
+prepends `Job`s of the current item ahead of the new one. The scheduler
+groups emitted `Job`s by `job.item` and registers each batch with its
+`RlsItem`.
+
+Jobs are append-only — never removed — but may be added in non-chronological
+order. The internal job list is kept sorted by `job.end`, with new jobs
+inserted in the correct position (e.g. via `bisect.insort`). `recompute` can
+iterate the list directly without sorting.
 
 ## Core objects
 
@@ -75,18 +83,24 @@ RlsItem (HasID)
   jobs: list[Job]                    # kept sorted by job.end on insert
   safety_view: SafetyAwareView
   raw_view: RawView
-  register_job(job)
-  cost_if(job) -> CostComponents     # pure, no mutation
+  register_jobs(jobs)
+  cost_if(jobs) -> CostComponents    # pure, no mutation
   excess_lbs, replenishment_need_lbs, ...
 
 CostComponents                       # plain named record returned by cost_if
   lateness, drainage, carrying, excess
 ```
 
-`register_job` inserts into `self.jobs` then re-runs both views' `recompute`.
-`cost_if(job)` runs both views with `jobs + [job]` against fresh order arrays
-without binding the results — gives a price-out without state change. This is
-the supported way to "test" a placement; we do not expose `unregister`.
+`register_jobs` inserts each job into `self.jobs` (in `job.end`-sorted
+order) then re-runs both views' `recompute` once after the batch.
+`cost_if(jobs)` runs both views with `self.jobs + jobs` against fresh order
+arrays without binding the results — gives a price-out without state change.
+This is the supported way to "test" a placement; we do not expose
+`unregister`.
+
+Both methods accept a list; a single-job decision is just `[job]`. An
+empty list is a no-op for `register_jobs` and yields current state's cost
+for `cost_if([])`.
 
 ## Allocation — Raw view
 
@@ -223,15 +237,15 @@ Derived from the two views and the job list:
 ## Test-placement contract
 
 ```
-rls_item.cost_if(hypothetical_job) -> CostComponents(lateness, drainage,
-                                                     carrying, excess)
+rls_item.cost_if(hypothetical_jobs) -> CostComponents(lateness, drainage,
+                                                      carrying, excess)
 ```
 
-Internally runs each view's `recompute` against `self.jobs + [hypothetical_job]`
+Internally runs each view's `recompute` against `self.jobs + hypothetical_jobs`
 on throwaway order arrays. Pure; does not touch `self.jobs` or
 `self.{raw,safety}_view.orders`. Cheap because recompute is O(jobs × weeks)
-with weeks fixed at 4. All four scalars are unweighted — the scheduler applies
-its weights to compare placements.
+with weeks fixed at 4. All four scalars are unweighted — the scheduler
+applies its weights to compare placements.
 
 ## Out of scope
 

@@ -60,17 +60,17 @@ def _make_weekly_demand(qtys: list[float]) -> list[WeeklyDemand]:
     ]
 
 
-def _make_view(qtys: list[float], greige_id: str = 'AU1234') -> RawView:
+def _make_view(qtys: list[float], greige_id: str = 'AU4782K') -> RawView:
     rls_item = _FakeRlsItem(item=_GREIGES[greige_id])
     return RawView(rls_item, _make_weekly_demand(qtys))
 
 
 def _make_safety_view(
     qtys: list[float],
-    greige_id: str = 'AU0420',
+    greige_id: str = 'AU2958G',
     lead_time: timedelta = _DEFAULT_LEAD_TIME,
 ) -> SafetyAwareView:
-    # AU0420 has safety=1400, a convenient size for hand-computed allocations.
+    # AU2958G has safety=1400, a convenient size for hand-computed allocations.
     rls_item = _FakeRlsItem(item=_GREIGES[greige_id], lead_time=lead_time)
     return SafetyAwareView(rls_item, _make_weekly_demand(qtys))
 
@@ -242,7 +242,7 @@ class RawViewRecomputeTests(unittest.TestCase):
 
 
 class SafetyAwareViewRecomputeTests(unittest.TestCase):
-    # All tests below default to greige AU0420, so safety_target == 1400.
+    # All tests below default to greige AU2958G, so safety_target == 1400.
 
     def test_no_jobs_no_on_hand_leaves_everything_zero(self):
         view = _make_safety_view([100, 200, 150, 300])

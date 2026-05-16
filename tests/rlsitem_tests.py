@@ -54,7 +54,7 @@ def _make_rls_item(
     qtys: list[float],
     *,
     on_hand_lbs: float = 0.0,
-    greige_id: str = 'AU0420',
+    greige_id: str = 'AU2958G',
     lead_time: timedelta = _DEFAULT_LEAD_TIME,
 ) -> RlsItem:
     return RlsItem(
@@ -69,7 +69,7 @@ def _make_rls_item(
 def _real_job(item: Greige, end_dt: datetime, lbs: float) -> Job:
     # Only `.end` and `.lbs` are touched by recompute; `start` is required
     # by Job's constructor but otherwise unused here.
-    return Job(item, end_dt, end_dt, lbs)
+    return Job(start=end_dt, end=end_dt, item=item, lbs=lbs)
 
 
 class RlsItemAllocationTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class RlsItemAllocationTests(unittest.TestCase):
         before_carrying = rls.safety_view.carrying
         before_excess = rls.safety_view.excess
 
-        rls.cost_if(hypothetical)
+        rls.cost_if([hypothetical])
 
         self.assertEqual(
             [o.allocated_lbs for o in rls.raw_view.orders], before_raw,
@@ -105,8 +105,8 @@ class RlsItemAllocationTests(unittest.TestCase):
     def test_raw_view_jobs_only_chronological(self):
         # Mirrors RawView's test_jobs_only_fills_orders_and_consumes_jobs_sequentially.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=0)
-        rls.register_job(_real_job(rls.item, _due(0), 300))
-        rls.register_job(_real_job(rls.item, _due(1), 200))
+        rls.register_jobs([_real_job(rls.item, _due(0), 300)])
+        rls.register_jobs([_real_job(rls.item, _due(1), 200)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.raw_view.orders],
             [100.0, 200.0, 150.0, 50.0],
@@ -116,8 +116,8 @@ class RlsItemAllocationTests(unittest.TestCase):
     def test_raw_view_on_hand_drain_chronological(self):
         # Mirrors RawView's test_on_hand_drains_before_jobs.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=50)
-        rls.register_job(_real_job(rls.item, _due(0), 300))
-        rls.register_job(_real_job(rls.item, _due(1), 200))
+        rls.register_jobs([_real_job(rls.item, _due(0), 300)])
+        rls.register_jobs([_real_job(rls.item, _due(1), 200)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.raw_view.orders],
             [100.0, 200.0, 150.0, 100.0],
@@ -128,7 +128,7 @@ class RlsItemAllocationTests(unittest.TestCase):
         # Mirrors SafetyAwareView's test_jobs_fill_weeks_0_and_1_before_safety.
         # Single job, so only the chronological case applies.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=0)
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=4), 800))
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=4), 800)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.safety_view.orders],
             [100.0, 200.0, 0.0, 0.0],
@@ -140,7 +140,7 @@ class RlsItemAllocationTests(unittest.TestCase):
         # Mirrors SafetyAwareView's
         # test_job_late_to_all_orders_fills_every_order_before_safety.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=0)
-        rls.register_job(_real_job(rls.item, _due(3) + timedelta(days=7), 1250))
+        rls.register_jobs([_real_job(rls.item, _due(3) + timedelta(days=7), 1250)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.safety_view.orders],
             [100.0, 200.0, 150.0, 300.0],
@@ -156,8 +156,8 @@ class RlsItemAllocationTests(unittest.TestCase):
         # register_job should place it after the earlier job so the final
         # allocation matches the chronological case.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=0)
-        rls.register_job(_real_job(rls.item, _due(1), 200))  # later first
-        rls.register_job(_real_job(rls.item, _due(0), 300))
+        rls.register_jobs([_real_job(rls.item, _due(1), 200)])  # later first
+        rls.register_jobs([_real_job(rls.item, _due(0), 300)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.raw_view.orders],
             [100.0, 200.0, 150.0, 50.0],
@@ -167,8 +167,8 @@ class RlsItemAllocationTests(unittest.TestCase):
     def test_raw_view_on_hand_drain_reverse_order(self):
         # Reverse-order counterpart to test_raw_view_on_hand_drain_chronological.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=50)
-        rls.register_job(_real_job(rls.item, _due(1), 200))
-        rls.register_job(_real_job(rls.item, _due(0), 300))
+        rls.register_jobs([_real_job(rls.item, _due(1), 200)])
+        rls.register_jobs([_real_job(rls.item, _due(0), 300)])
         self.assertEqual(
             [o.allocated_lbs for o in rls.raw_view.orders],
             [100.0, 200.0, 150.0, 100.0],
@@ -188,9 +188,9 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_all_zero_via_register_job(self):
         # Replays SafetyAwareView 2.2 (test_all_costs_zero_with_in_lead_time_job_fills).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=1500)
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=4),  200))
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=11), 150))
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=18), 300))
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=4),  200)])
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=11), 150)])
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=18), 300)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertEqual(rls.safety_view.drainage, 0.0)
         self.assertEqual(rls.safety_view.carrying, 0.0)
@@ -199,9 +199,9 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_constant_drainage_at_safety_target_via_register_job(self):
         # Replays SafetyAwareView 2.3.1.1 (test_constant_drainage_at_safety_target).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=100)
-        rls.register_job(_real_job(rls.item, _due(1), 200))
-        rls.register_job(_real_job(rls.item, _due(2), 150))
-        rls.register_job(_real_job(rls.item, _due(3), 300))
+        rls.register_jobs([_real_job(rls.item, _due(1), 200)])
+        rls.register_jobs([_real_job(rls.item, _due(2), 150)])
+        rls.register_jobs([_real_job(rls.item, _due(3), 300)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 1400.0 * 21)
         self.assertEqual(rls.safety_view.carrying, 0.0)
@@ -210,8 +210,8 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_stacked_drainage_even_split_via_register_job(self):
         # Replays SafetyAwareView 2.3.2.2 (test_stacked_drainage_between_jobs_even_split).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=1500)
-        rls.register_job(_real_job(rls.item, _due(2) + timedelta(days=1), 350))
-        rls.register_job(_real_job(rls.item, _due(2) + timedelta(days=5), 300))
+        rls.register_jobs([_real_job(rls.item, _due(2) + timedelta(days=1), 350)])
+        rls.register_jobs([_real_job(rls.item, _due(2) + timedelta(days=5), 300)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 1750.0)
         self.assertEqual(rls.safety_view.carrying, 0.0)
@@ -220,9 +220,9 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_stacked_drainage_interleaved_via_register_job(self):
         # Replays SafetyAwareView 2.3.2.3 (test_stacked_drainage_interleaved_with_jobs).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=1500)
-        rls.register_job(_real_job(rls.item, _due(1) + timedelta(days=1), 100))
-        rls.register_job(_real_job(rls.item, _due(2) + timedelta(days=1), 250))
-        rls.register_job(_real_job(rls.item, _due(2) + timedelta(days=5), 300))
+        rls.register_jobs([_real_job(rls.item, _due(1) + timedelta(days=1), 100)])
+        rls.register_jobs([_real_job(rls.item, _due(2) + timedelta(days=1), 250)])
+        rls.register_jobs([_real_job(rls.item, _due(2) + timedelta(days=5), 300)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 1050.0)
         self.assertEqual(rls.safety_view.carrying, 0.0)
@@ -231,8 +231,8 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_no_stacked_with_carrying_via_register_job(self):
         # Replays SafetyAwareView 2.4.1 (test_no_stacked_drainage_with_carrying_and_no_excess).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=600)
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=1), 1200))
-        rls.register_job(_real_job(rls.item, _due(2) + timedelta(days=1), 350))
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=1), 1200)])
+        rls.register_jobs([_real_job(rls.item, _due(2) + timedelta(days=1), 350)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 950.0)
         self.assertAlmostEqual(rls.safety_view.carrying, 600.0)
@@ -241,8 +241,8 @@ class RlsItemCostTrackerTests(unittest.TestCase):
     def test_stacked_with_carrying_via_register_job(self):
         # Replays SafetyAwareView 2.4.3 (test_stacked_drainage_with_carrying_and_no_excess).
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=100)
-        rls.register_job(_real_job(rls.item, _due(0), 200))
-        rls.register_job(_real_job(rls.item, _due(1) + timedelta(days=1), 1850))
+        rls.register_jobs([_real_job(rls.item, _due(0), 200)])
+        rls.register_jobs([_real_job(rls.item, _due(1) + timedelta(days=1), 1850)])
         self.assertEqual(rls.raw_view.lateness, 0.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 9800.0)
         self.assertAlmostEqual(rls.safety_view.carrying, 1800.0)
@@ -276,8 +276,8 @@ class RlsItemCostTrackerTests(unittest.TestCase):
         #   (Job B then restores pool to safety_target.)
         #   drainage = 11200, carrying = 300 × 6 = 1800.
         rls = _make_rls_item([100, 200, 150, 300], on_hand_lbs=0)
-        rls.register_job(_real_job(rls.item, _due(0) + timedelta(days=1), 100))
-        rls.register_job(_real_job(rls.item, _due(1) + timedelta(days=1), 2050))
+        rls.register_jobs([_real_job(rls.item, _due(0) + timedelta(days=1), 100)])
+        rls.register_jobs([_real_job(rls.item, _due(1) + timedelta(days=1), 2050)])
 
         self.assertEqual(
             [o.allocated_lbs for o in rls.safety_view.orders],
@@ -306,8 +306,7 @@ class RlsItemCostIfTests(unittest.TestCase):
 
     def _expected_components(self, all_jobs: list[Job]) -> CostComponents:
         rls = self._fresh_rls()
-        for j in all_jobs:
-            rls.register_job(j)
+        rls.register_jobs(all_jobs)
         return CostComponents(
             lateness=rls.raw_view.lateness,
             drainage=rls.safety_view.drainage,
@@ -321,10 +320,9 @@ class RlsItemCostIfTests(unittest.TestCase):
         # Baseline: register existing + hypothetical on a fresh RlsItem.
         expected = self._expected_components(existing + [hypothetical])
 
-        # Test: register only existing; call cost_if(hypothetical).
+        # Test: register only existing; call cost_if([hypothetical]).
         rls = self._fresh_rls()
-        for j in existing:
-            rls.register_job(j)
+        rls.register_jobs(existing)
 
         # Snapshot pre-cost_if state so we can verify cost_if is pure.
         before_raw = [o.allocated_lbs for o in rls.raw_view.orders]
@@ -335,7 +333,7 @@ class RlsItemCostIfTests(unittest.TestCase):
         before_carrying = rls.safety_view.carrying
         before_excess = rls.safety_view.excess
 
-        actual = rls.cost_if(hypothetical)
+        actual = rls.cost_if([hypothetical])
 
         # Returned components match the register-and-snapshot baseline.
         self.assertAlmostEqual(actual.lateness, expected.lateness)
@@ -358,13 +356,13 @@ class RlsItemCostIfTests(unittest.TestCase):
 
     def test_cost_if_with_no_existing_jobs(self):
         # 3.1: cost_if on a freshly built RlsItem with no register_job calls.
-        item = _GREIGES['AU0420']
+        item = _GREIGES['AU2958G']
         hypothetical = _real_job(item, _due(2), 500)
         self._assert_cost_if_matches_baseline(existing=[], hypothetical=hypothetical)
 
     def test_cost_if_before_all_existing_jobs(self):
         # 3.2: hypothetical lands before both existing jobs in the timeline.
-        item = _GREIGES['AU0420']
+        item = _GREIGES['AU2958G']
         existing = [
             _real_job(item, _due(1) + timedelta(days=2), 600),
             _real_job(item, _due(2) + timedelta(days=2), 400),
@@ -375,7 +373,7 @@ class RlsItemCostIfTests(unittest.TestCase):
     def test_cost_if_between_existing_jobs(self):
         # 3.3: hypothetical.end falls strictly between the two existing
         # jobs' end times.
-        item = _GREIGES['AU0420']
+        item = _GREIGES['AU2958G']
         existing = [
             _real_job(item, _due(1) + timedelta(days=2), 600),
             _real_job(item, _due(2) + timedelta(days=2), 400),
@@ -385,7 +383,7 @@ class RlsItemCostIfTests(unittest.TestCase):
 
     def test_cost_if_after_all_existing_jobs(self):
         # 3.4: hypothetical.end is past every existing job.
-        item = _GREIGES['AU0420']
+        item = _GREIGES['AU2958G']
         existing = [
             _real_job(item, _due(1) + timedelta(days=2), 600),
             _real_job(item, _due(2) + timedelta(days=2), 400),
@@ -397,13 +395,115 @@ class RlsItemCostIfTests(unittest.TestCase):
         # 3.5: hypothetical.end exactly matches existing[0].end. bisect_right
         # places it after existing[0], so the spliced order should be
         # [existing[0], hypothetical, existing[1]].
-        item = _GREIGES['AU0420']
+        item = _GREIGES['AU2958G']
         existing = [
             _real_job(item, _due(1) + timedelta(days=2), 600),
             _real_job(item, _due(2) + timedelta(days=2), 400),
         ]
         hypothetical = _real_job(item, _due(1) + timedelta(days=2), 200)
         self._assert_cost_if_matches_baseline(existing, hypothetical)
+
+
+class RlsItemBatchTests(unittest.TestCase):
+    # Verifies multi-job behavior for register_jobs and cost_if. Mirrors the
+    # case where plan_production emits multiple Jobs from one decision —
+    # either through mid-stream beam exhaustion (multiple Jobs sharing the
+    # same item) or through 'next_runout' mode's run-up.
+
+    _BASE_QTYS = [100, 200, 150, 300]
+    _BASE_ON_HAND = 100.0
+
+    def _fresh_rls(self) -> RlsItem:
+        return _make_rls_item(self._BASE_QTYS, on_hand_lbs=self._BASE_ON_HAND)
+
+    def _components(self, rls: RlsItem) -> CostComponents:
+        return CostComponents(
+            lateness=rls.raw_view.lateness,
+            drainage=rls.safety_view.drainage,
+            carrying=rls.safety_view.carrying,
+            excess=rls.safety_view.excess,
+        )
+
+    def test_register_jobs_batch_matches_per_call_state(self):
+        # Registering [j1, j2] in one call must yield the same state as
+        # registering j1 and j2 individually.
+        item = _GREIGES['AU2958G']
+        j1 = _real_job(item, _due(0) + timedelta(days=1), 100)
+        j2 = _real_job(item, _due(1) + timedelta(days=1), 2050)
+
+        rls_batch = self._fresh_rls()
+        rls_batch.register_jobs([j1, j2])
+
+        rls_per_call = self._fresh_rls()
+        rls_per_call.register_jobs([j1])
+        rls_per_call.register_jobs([j2])
+
+        self.assertEqual(self._components(rls_batch),
+                         self._components(rls_per_call))
+        self.assertEqual(
+            [o.allocated_lbs for o in rls_batch.raw_view.orders],
+            [o.allocated_lbs for o in rls_per_call.raw_view.orders],
+        )
+        self.assertEqual(
+            [o.allocated_lbs for o in rls_batch.safety_view.orders],
+            [o.allocated_lbs for o in rls_per_call.safety_view.orders],
+        )
+
+    def test_register_jobs_empty_list_is_a_no_op(self):
+        rls = self._fresh_rls()
+        before = self._components(rls)
+        before_alloc_raw = [o.allocated_lbs for o in rls.raw_view.orders]
+        before_alloc_safety = [o.allocated_lbs for o in rls.safety_view.orders]
+
+        rls.register_jobs([])
+
+        self.assertEqual(self._components(rls), before)
+        self.assertEqual([o.allocated_lbs for o in rls.raw_view.orders],
+                         before_alloc_raw)
+        self.assertEqual([o.allocated_lbs for o in rls.safety_view.orders],
+                         before_alloc_safety)
+
+    def test_cost_if_batch_matches_register_jobs_batch(self):
+        # cost_if([j1, j2]) returns the same components as registering both
+        # and reading the view trackers. Pure: state unchanged afterwards.
+        item = _GREIGES['AU2958G']
+        j1 = _real_job(item, _due(0) + timedelta(days=1), 100)
+        j2 = _real_job(item, _due(1) + timedelta(days=1), 2050)
+
+        baseline_rls = self._fresh_rls()
+        baseline_rls.register_jobs([j1, j2])
+        expected = self._components(baseline_rls)
+
+        rls = self._fresh_rls()
+        before = self._components(rls)
+        actual = rls.cost_if([j1, j2])
+
+        self.assertEqual(actual, expected)
+        # State unchanged after cost_if.
+        self.assertEqual(self._components(rls), before)
+
+    def test_cost_if_batch_is_order_independent(self):
+        # Batch order should not affect the result — register_jobs sorts by
+        # job.end internally.
+        item = _GREIGES['AU2958G']
+        j1 = _real_job(item, _due(0) + timedelta(days=1), 100)
+        j2 = _real_job(item, _due(1) + timedelta(days=1), 2050)
+
+        rls = self._fresh_rls()
+        self.assertEqual(rls.cost_if([j1, j2]), rls.cost_if([j2, j1]))
+
+    def test_cost_if_empty_list_returns_current_state_cost(self):
+        # cost_if([]) acts as a "what is current cost" query.
+        item = _GREIGES['AU2958G']
+        rls = self._fresh_rls()
+        rls.register_jobs([_real_job(item, _due(2) + timedelta(days=1), 350)])
+
+        before = self._components(rls)
+        empty_cost = rls.cost_if([])
+
+        self.assertEqual(empty_cost, before)
+        # State remains unchanged.
+        self.assertEqual(self._components(rls), before)
 
 
 if __name__ == '__main__':

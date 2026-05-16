@@ -1,0 +1,222 @@
+[
+    {
+        "id": "M1",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "M2",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "M3",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "N1",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "N2",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "N3",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "O1",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "O2",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "O3",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "O4",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "P1",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "P2",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "P3",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "P4",
+        "style_change_time": 0.1,
+        "family_change_time": 0.1
+    },
+    {
+        "id": "R4",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "I9",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K10",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "J7",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K7",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K9",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "B8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "Q6",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "J9",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K12",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K5",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "R3",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "R2",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "I8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "I4",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "J5",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "J8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "E8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "I3",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "G6",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "I5",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "R1",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "K11",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "E7",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "H5",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "Q7",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "Q8",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "F1",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    },
+    {
+        "id": "B4",
+        "style_change_time": 0.25,
+        "family_change_time": 1.0
+    }
+]

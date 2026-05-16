@@ -1,0 +1,67 @@
+[
+    {
+        "kind": "fixed",
+        "name": "New Year's Day",
+        "month": 1,
+        "day": 1
+    },
+    {
+        "kind": "flex",
+        "name": "MLK Day",
+        "month": 1,
+        "weekday": 0,
+        "n": 3
+    },
+    {
+        "kind": "flex",
+        "name": "Presidents Day",
+        "month": 2,
+        "weekday": 0,
+        "n": 3
+    },
+    {
+        "kind": "flex",
+        "name": "Memorial Day",
+        "month": 5,
+        "weekday": 0,
+        "n": -1
+    },
+    {
+        "kind": "fixed",
+        "name": "Juneteenth",
+        "month": 6,
+        "day": 19
+    },
+    {
+        "kind": "fixed",
+        "name": "Independence Day",
+        "month": 7,
+        "day": 4
+    },
+    {
+        "kind": "flex",
+        "name": "Columbus Day",
+        "month": 10,
+        "weekday": 0,
+        "n": 2
+    },
+    {
+        "kind": "fixed",
+        "name": "Veterans Day",
+        "month": 11,
+        "day": 11
+    },
+    {
+        "kind": "flex",
+        "name": "Thanksgiving",
+        "month": 11,
+        "weekday": 3,
+        "n": 4
+    },
+    {
+        "kind": "fixed",
+        "name": "Christmas",
+        "month": 12,
+        "day": 25
+    }
+]

@@ -1,23 +1,47 @@
-from .holidays import *
+from .holidays import FlexDate, FixedDate, load_holidays
 from datetime import date, datetime
 
 __all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal']
 
 class WorkCal:
+    """Convenience class for handling date math across business days/hours.
+    Provides methods for offsetting by a number of "work days" and "work hours"."""
     def __init__(self, work_days: list[int], day_start: int, day_end: int,
-                 holidays: list[FlexDate | FixedDate], cal_shift: int = 0): ...
+                 holidays: list[FlexDate | FixedDate], cal_shift: int = 0):
+        """Initialize a new work calendar.
+
+        Parameters:
+            work_days (list[int]): The working days of the week (monday=0).
+            day_start (int): The start of the work day in 24-hour time.
+            day_end (int): The end of the work day in 24-hour time.
+            holidays (list[FlexDate | FixedDate]): The days of the year to be skipped as holidays.
+            cal_shift (int, default 0): Set this parameter to offset day boundaries by a number of hours.
+        """
+        ...
     @property
-    def work_days(self) -> tuple[int, ...]: ...
+    def work_days(self) -> tuple[int, ...]:
+        """The working days of the week with monday=0."""
+        ...
     @property
-    def days_per_week(self) -> int: ...
+    def days_per_week(self) -> int:
+        """Number of working days in a week, equivalent to len(cal.work_days)."""
+        ...
     @property
-    def work_hours(self) -> tuple[int, int]: ...
+    def work_hours(self) -> tuple[int, int]:
+        """The start and end of the work day in 24-hour time."""
+        ...
     @property
-    def hours_per_day(self) -> int: ...
+    def hours_per_day(self) -> int:
+        """Availabe working hours in a day."""
+        ...
     @property
     def holidays(self) -> tuple[FlexDate | FixedDate]: ...
-    def is_holiday(self, d: date) -> bool: ...
-    def is_workday(self, d: date) -> bool: ...
+    def is_holiday(self, d: date) -> bool:
+        """Reports whether the given date is a holiday in this calendar."""
+        ...
+    def is_workday(self, d: date) -> bool:
+        """Reports whether the given date is a work day in this calendar."""
+        ...
     def snap_to_work_date(self, d: date, direction: int = 1) -> date:
         """Snap d to the nearest work date in the direction provided."""
         ...

@@ -175,6 +175,8 @@ class WorkCal:
         return dt
 
     def get_work_hours_between(self, start: datetime, end: datetime) -> float:
+        start -= self._cal_shift
+        end -= self._cal_shift
         if end <= start:
             return 0.0
         total = 0.0
@@ -192,7 +194,7 @@ class WorkCal:
         return total
 
     def offset_work_hours(self, start: datetime, hours: float):
-        start += self._cal_shift
+        start -= self._cal_shift
         direction = 1 if hours >= 0 else -1
         current = self._snap_to_work_datetime(start, direction)
         remaining = abs(hours)
@@ -216,4 +218,4 @@ class WorkCal:
                 prev_d = self.snap_to_work_date(d - timedelta(days=1), direction=-1)
                 current = datetime(prev_d.year, prev_d.month, prev_d.day) \
                     + timedelta(hours=self._day_end)
-        return current - self._cal_shift
+        return current + self._cal_shift

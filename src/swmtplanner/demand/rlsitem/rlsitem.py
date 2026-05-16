@@ -113,18 +113,26 @@ class RlsItem(HasID[str]):
     def _recompute_views(self):
         for v in (self._raw_view, self._safety_view):
             v.recompute(self._jobs, self._on_hand_lbs)
-    
-    def register_job(self, job: 'Job'):
-        idx = bisect_right(self._jobs, job.end, key=lambda j: j.end)
-        self._jobs.insert(idx, job)
+
+    def register_jobs(self, jobs: list['Job']):
+        """Insert each of `jobs` into the internal job list (kept sorted by
+        `job.end`) then re-run both views' `recompute` once. `jobs` may be
+        empty, in which case this just re-runs the views against the
+        unchanged job list."""
+        for job in jobs:
+            idx = bisect_right(self._jobs, job.end, key=lambda j: j.end)
+            self._jobs.insert(idx, job)
         self._recompute_views()
-    
-    def cost_if(self, job: 'Job'):
-        idx = bisect_right(self._jobs, job.end, key=lambda j: j.end)
-        new_jobs = [job]
-        if self._jobs:
-            new_jobs = self._jobs[:idx] + new_jobs + self._jobs[idx:]
-        
+
+    def cost_if(self, jobs: list['Job']):
+        """Return the `CostComponents` that would result if `jobs` were
+        registered, without mutating any state. Empty `jobs` returns the
+        current state's cost."""
+        new_jobs = list(self._jobs)
+        for job in jobs:
+            idx = bisect_right(new_jobs, job.end, key=lambda j: j.end)
+            new_jobs.insert(idx, job)
+
         self._raw_view.recompute(new_jobs, self._on_hand_lbs)
         self._safety_view.recompute(new_jobs, self._on_hand_lbs)
         res = CostComponents(self._raw_view.lateness,
