@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 
+import math
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable, Literal, TYPE_CHECKING
 
 from swmtplanner.support import HasID
 from swmtplanner.products import BeamSet
 from swmtplanner.schedule.activity import (
-    Activity, Job, Waste, BeamLoad, StyleChange, Idle,
-    BEAM_LOAD_DURATION,
+    Activity, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    BEAM_LOAD_DURATION, TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
 )
 from .status import Status
 
@@ -42,9 +43,11 @@ _FLOAT_EPS = 1e-2
 
 class Machine(HasID[str]):
     """Single knitting machine. Owns an append-only sequence of activities
-    and the derived `Status` after each. Plan-time queries
-    (`plan_production`) currently only support same-yarn / same-family
-    transitions; Phase 3 will lift that restriction."""
+    and the derived `Status` after each. `plan_production` produces a list
+    of activities to enact a desired production goal — handling the
+    changeover preamble (tape-outs, beam loads, style change as needed),
+    optional run-up of the current item, and the new item's production
+    loop with mid-stream reloads when beams exhaust mid-request."""
 
     def __init__(
         self,
@@ -117,6 +120,89 @@ class Machine(HasID[str]):
         hours = producible_before_runout / rate
         return self._workcal.offset_work_hours(s.as_of, hours)
 
+    def producible_lbs_in_week(
+        self, item: 'Greige', year: int, week: int,
+    ) -> float:
+        """Returns the lbs of `item` the machine could produce within the
+        given ISO week (Monday 00:00 to next Monday 00:00), starting from
+        `current_status.as_of`.
+
+        Accounts for required changeover preamble, mid-stream beam reloads,
+        non-work hours via `workcal`, and rounds the result down to a whole
+        multiple of `item.tgt_wt`. Returns 0.0 if `as_of` is already past
+        `week_end`, if the preamble alone exceeds the window, or if the
+        remaining time after the preamble can't accommodate a full roll.
+
+        Pure: does not mutate any machine state. Implementation re-uses
+        `plan_production` by asking for a generous upper bound and tallying
+        the lbs of `Job` activities whose execution falls within the
+        [week_start, week_end] window."""
+        monday = date.fromisocalendar(year, week, 1)
+        week_start = datetime(monday.year, monday.month, monday.day)
+        week_end = week_start + timedelta(days=7)
+
+        if self._current_status.as_of >= week_end:
+            return 0.0
+
+        rate = item.get_rate_on_mchn(self._id)
+        # Upper bound on plan_production's lbs argument: max producible if
+        # the entire 168 wall-clock hours of the week were work hours at
+        # full rate, plus one roll of headroom. plan_production will simply
+        # produce more activities than we need; we truncate via the window
+        # check below.
+        upper_lbs_bound = (
+            math.ceil(7 * 24 * rate / item.tgt_wt) * item.tgt_wt
+            + item.tgt_wt
+        )
+
+        # If `as_of` is before `week_start`, model the gap as an implicit
+        # idle: the machine sits unscheduled until the week begins, then
+        # the preamble + production start at week_start. This matches the
+        # "starting no earlier than as_of" clause — capacity is computed
+        # for the window [max(as_of, week_start), week_end]. The bridge
+        # is measured in **work hours** so a non-work gap (e.g., weekend
+        # under a weekday workcal) collapses to zero and `plan_production`
+        # picks up at the next work moment naturally.
+        bridge_hours = self._workcal.get_work_hours_between(
+            self._current_status.as_of, week_start,
+        )
+        idle_for = timedelta(hours=bridge_hours)
+        plan = self.plan_production(
+            item, upper_lbs_bound, start_at='next_job_end',
+            idle_for=idle_for,
+        )
+
+        # Tally lbs of `Job`s for `item` that overlap [week_start, week_end].
+        # Activities other than Job (TapeOut, BeamLoad, StyleChange, Waste,
+        # Idle) consume time but produce nothing; their effect on production
+        # capacity is already reflected in subsequent Jobs' start times.
+        total_lbs = 0.0
+        for a in plan:
+            if a.start >= week_end:
+                break
+            if not isinstance(a, Job):
+                continue
+            if a.item != item:
+                continue
+            if a.end <= week_start:
+                continue
+            window_start = max(a.start, week_start)
+            window_end = min(a.end, week_end)
+            hours_in_window = self._workcal.get_work_hours_between(
+                window_start, window_end,
+            )
+            total_lbs += hours_in_window * rate
+
+        # Round down to whole rolls, snapping near-integer rolls (float
+        # drift from `min(top_lbs/top_pct, btm_lbs/btm_pct) * rate` chains).
+        n_rolls_exact = total_lbs / item.tgt_wt
+        n_rolls_rounded = round(n_rolls_exact)
+        if abs(n_rolls_rounded - n_rolls_exact) < _FLOAT_EPS:
+            n_rolls = n_rolls_rounded
+        else:
+            n_rolls = math.floor(n_rolls_exact)
+        return max(0, n_rolls) * item.tgt_wt
+
     def status_at(self, t: datetime) -> Status:
         """Status at time `t`. Walks activities whose `end <= t`, then sets
         `as_of=t` on the result. If `t` falls strictly inside an activity
@@ -148,7 +234,7 @@ class Machine(HasID[str]):
             self._activities.append(a)
             self._current_status = self._current_status.apply_activity(a)
 
-    # ----- plan_production (Phase 2: same yarn + same family only) -----
+    # ----- plan_production --------------------------------------------
 
     def plan_production(
         self,
@@ -166,28 +252,16 @@ class Machine(HasID[str]):
         The entire downstream plan (run-up, preamble, production) needs an
         operator, so Idle precedes everything else.
 
-        Phase 2 restriction: `item` must share top yarn id, btm yarn id,
-        and family with the current item. Yarn/family-changing transitions
-        raise `NotImplementedError` until Phase 3.
-
-        See DESIGN.md for the full walk; this implementation follows the
-        Phase 2 subset (no `TapeOut` / cross-yarn `BeamLoad` in the
-        preamble; `StyleChange` is always the simple variant)."""
-        cur = self._current_status.current_item
-        cur_cfg = cur.configuration
-        new_cfg = item.configuration
-        if (new_cfg.top_beam != cur_cfg.top_beam
-                or new_cfg.btm_beam != cur_cfg.btm_beam
-                or item.family != cur.family):
-            raise NotImplementedError(
-                'plan_production currently only supports items that share '
-                'top yarn, btm yarn, and family with the current item; got '
-                f'{item.id!r} (top={new_cfg.top_beam!r}, '
-                f'btm={new_cfg.btm_beam!r}, family={item.family!r}) against '
-                f'current {cur.id!r} (top={cur_cfg.top_beam!r}, '
-                f'btm={cur_cfg.btm_beam!r}, family={cur.family!r})'
-            )
-
+        Walk (see DESIGN.md for details):
+          0. Optional `Idle` (when `idle_for > 0`).
+          1. Run-up — `'next_runout'` mode emits Jobs (and a possible
+             Waste) of the current item until a beam exhausts;
+             `'next_job_end'` mode emits nothing here.
+          2. Changeover preamble — per-bar `TapeOut`/`BeamLoad` for any
+             bar whose yarn doesn't match the new item, `BeamLoad` only
+             for any empty bar, then `StyleChange` if the item differs.
+          3. Production loop — Jobs/Waste/BeamLoad cycles until `lbs` are
+             complete."""
         if start_at not in ('next_job_end', 'next_runout'):
             raise ValueError(
                 f"start_at must be 'next_job_end' or 'next_runout', "
@@ -199,20 +273,18 @@ class Machine(HasID[str]):
         emitted: list[Activity] = []
         working = self._current_status
 
-        # Optional idle gap at the head of the plan.
+        # 0. Optional idle gap at the head of the plan.
         if idle_for > timedelta(0):
             working = self._emit_idle(emitted, working, idle_for)
 
-        # Phase 1: run-up (only in 'next_runout' mode).
+        # 1. Run-up (only in 'next_runout' mode).
         if start_at == 'next_runout':
             working = self._emit_run_up(emitted, working)
 
-        # Phase 2: changeover preamble. Phase 2 means same yarn, so the only
-        # beam work is a BeamLoad for any naturally exhausted bar (i.e., the
-        # post-runout case). Then a simple StyleChange if the item differs.
-        working = self._emit_phase2_preamble(emitted, working, item)
+        # 2. Changeover preamble.
+        working = self._emit_preamble(emitted, working, item)
 
-        # Phase 3: production loop for the new item.
+        # 3. Production loop for the new item.
         self._emit_production_loop(emitted, working, item, lbs)
         return emitted
 
@@ -236,25 +308,67 @@ class Machine(HasID[str]):
             working = self._emit_waste(emitted, working, cur, partial_lbs)
         return _clamp_zero_lbs(working)
 
-    def _emit_phase2_preamble(
+    def _emit_preamble(
         self, emitted: list[Activity], working: Status, item: 'Greige',
     ) -> Status:
-        """Phase 2 preamble: BeamLoad any empty bar (same yarn as current
-        item), then StyleChange if needed. No TapeOuts — the Phase 2
-        restriction guarantees yarn does not change, so threaded yarn is
-        already correct for `item`."""
+        """Full changeover preamble. Per-bar logic:
+
+        - Has yarn matching `item`: no activity for that bar.
+        - Has yarn not matching `item`: `TapeOut` + `BeamLoad`.
+        - Empty (post-runout): `BeamLoad` only — no `TapeOut`.
+
+        When both bars have yarn AND both need swapping, emit a single
+        `TapeOut('both')` instead of two singles (cheaper than two singles
+        per the design's duration table).
+
+        After all beam work, emit `StyleChange` if `item != current_item`,
+        with `is_family_change` set from the family comparison."""
         cfg = item.configuration
-        if working.top_lbs_remaining <= _FLOAT_EPS:
+
+        top_empty = working.top_lbs_remaining <= _FLOAT_EPS
+        btm_empty = working.btm_lbs_remaining <= _FLOAT_EPS
+
+        top_yarn_matches = (
+            not top_empty
+            and working.top_beam is not None
+            and working.top_beam.id == cfg.top_beam
+        )
+        btm_yarn_matches = (
+            not btm_empty
+            and working.btm_beam is not None
+            and working.btm_beam.id == cfg.btm_beam
+        )
+
+        top_needs_tape_out = (not top_empty) and (not top_yarn_matches)
+        btm_needs_tape_out = (not btm_empty) and (not btm_yarn_matches)
+        top_needs_load = top_empty or not top_yarn_matches
+        btm_needs_load = btm_empty or not btm_yarn_matches
+
+        # Tape-out phase. 'both' is reserved for the case where both bars
+        # still carry (mismatched) yarn — it cannot arise in 'next_runout'
+        # mode where at least one bar is empty after the run-up.
+        if top_needs_tape_out and btm_needs_tape_out:
+            working = self._emit_tape_out(emitted, working, 'both')
+        elif top_needs_tape_out:
+            working = self._emit_tape_out(emitted, working, 'top')
+        elif btm_needs_tape_out:
+            working = self._emit_tape_out(emitted, working, 'btm')
+
+        # Beam-load phase. Top first, then btm.
+        if top_needs_load:
             working = self._emit_beam_load(
                 emitted, working, 'top', BeamSet(cfg.top_beam),
             )
-        if working.btm_lbs_remaining <= _FLOAT_EPS:
+        if btm_needs_load:
             working = self._emit_beam_load(
                 emitted, working, 'btm', BeamSet(cfg.btm_beam),
             )
+
+        # Style-change phase.
         if item != working.current_item:
+            is_family_change = working.current_item.family != item.family
             working = self._emit_style_change(
-                emitted, working, item, is_family_change=False,
+                emitted, working, item, is_family_change=is_family_change,
             )
         return working
 
@@ -319,6 +433,19 @@ class Machine(HasID[str]):
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
         emitted.append(Waste(start=start, end=end, item=item, lbs=lbs))
+        return working.apply_activity(emitted[-1])
+
+    def _emit_tape_out(
+        self, emitted: list[Activity], working: Status,
+        bars: Literal['top', 'btm', 'both'],
+    ) -> Status:
+        duration = (TAPE_OUT_BOTH_DURATION if bars == 'both'
+                    else TAPE_OUT_SINGLE_DURATION)
+        start = working.as_of
+        end = self._workcal.offset_work_hours(
+            start, duration.total_seconds() / 3600,
+        )
+        emitted.append(TapeOut(start=start, end=end, bars=bars))
         return working.apply_activity(emitted[-1])
 
     def _emit_beam_load(

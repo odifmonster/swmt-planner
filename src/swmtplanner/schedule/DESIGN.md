@@ -343,8 +343,8 @@ starting from `current_status.as_of`. Accounts for:
 - Required changeover preamble if `current_status.current_item != item`
   (tape-outs, beam-loads, style-change).
 - Mid-stream beam swaps within the window (each consumes
-  `TAPE_OUT_SINGLE_DURATION + BEAM_LOAD_DURATION`, since natural exhaustion
-  doesn't require taping the exhausted bar).
+  `BEAM_LOAD_DURATION` only — natural exhaustion doesn't require taping the
+  exhausted bar).
 - `workcal` — only counts actual work hours in the week, starting no earlier
   than `current_status.as_of` and ending no later than the week boundary.
 - Rounds down to a whole multiple of `item.tgt_wt`.

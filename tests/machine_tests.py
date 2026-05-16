@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from swmtplanner.products import Greige, BeamSet
 from swmtplanner.schedule import (
     Machine, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
 )
 from swmtplanner.support import WorkCal
 
@@ -624,26 +625,6 @@ class PlanProductionInputAcceptanceTests(unittest.TestCase):
         m = _make_machine()
         m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
 
-    def test_different_top_yarn_rejected(self):
-        m = _make_machine()
-        with self.assertRaises(NotImplementedError):
-            m.plan_production(_ITEM_D, lbs=100.0, start_at='next_job_end')
-
-    def test_different_btm_yarn_rejected(self):
-        m = _make_machine()
-        with self.assertRaises(NotImplementedError):
-            m.plan_production(_ITEM_E, lbs=100.0, start_at='next_job_end')
-
-    def test_different_family_same_yarn_rejected(self):
-        m = _make_machine()
-        with self.assertRaises(NotImplementedError):
-            m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
-
-    def test_different_yarn_and_family_rejected(self):
-        m = _make_machine()
-        with self.assertRaises(NotImplementedError):
-            m.plan_production(_ITEM_F, lbs=100.0, start_at='next_job_end')
-
     def test_invalid_start_at_raises_value_error(self):
         m = _make_machine()
         with self.assertRaises(ValueError):
@@ -946,6 +927,408 @@ class PlanProductionIdleForTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end',
                               idle_for=timedelta(hours=-1))
+
+
+# ---------------------------- PHASE 3 -----------------------------------
+
+# Additional fixtures for cross-yarn / cross-family transitions.
+_ITEM_G = Greige(  # different yarn on BOTH bars, same family
+    'AU0007', family='A', tgt_wt=100.0,
+    top_beam='30D RED 1000X4', top_pct=0.4,
+    btm_beam='90D GREEN 1000X4', btm_pct=0.6,
+    safety=1000.0, machines={'M1': 100.0},
+)
+_ITEM_H = Greige(  # different top yarn only, different family
+    'AU0008', family='Q', tgt_wt=100.0,
+    top_beam='30D RED 1000X4', top_pct=0.4,
+    btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+    safety=1000.0, machines={'M1': 100.0},
+)
+
+# Pre-built BeamSet expected on emitted BeamLoads.
+_ALT_TOP = BeamSet('30D RED 1000X4')      # denier 30 → fresh 2800
+_ALT_BTM = BeamSet('90D GREEN 1000X4')    # denier 90 → fresh 1800
+
+
+# --- 3.1 Inputs previously rejected, by changeover shape ----------------
+
+class PlanProductionChangeoverShapeTests(unittest.TestCase):
+
+    def test_different_top_yarn_same_family(self):
+        # current A → D: top yarn differs (30D RED), btm yarn matches.
+        # Expect TapeOut('top') + BeamLoad(top, 2800) + StyleChange(False).
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'top'),
+            ('BeamLoad', 'top', 2800.0),
+            ('StyleChange', 'AU0001', 'AU0004', False),
+            ('Job', 100.0, 'AU0004'),
+        ])
+
+    def test_different_btm_yarn_same_family(self):
+        # current A → E: btm yarn differs (90D GREEN), top yarn matches.
+        # Expect TapeOut('btm') + BeamLoad(btm, 1800) + StyleChange(False).
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_E, lbs=100.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'btm'),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0005', False),
+            ('Job', 100.0, 'AU0005'),
+        ])
+
+    def test_different_yarn_on_both_bars_same_family(self):
+        # current A → G: both yarns differ, same family A.
+        # Expect TapeOut('both') + BeamLoad(top, 2800) + BeamLoad(btm, 1800)
+        # + StyleChange(False).
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'both'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0007', False),
+            ('Job', 100.0, 'AU0007'),
+        ])
+
+    def test_same_yarn_different_family(self):
+        # current A → C: same yarn on both bars, family changes (A → C).
+        # Expect StyleChange(True) only; no beam work.
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('StyleChange', 'AU0001', 'AU0003', True),
+            ('Job', 150.0, 'AU0003'),
+        ])
+
+    def test_different_top_yarn_different_family(self):
+        # current A → H: top yarn differs, btm yarn matches, family Q.
+        # Expect TapeOut('top') + BeamLoad(top) + StyleChange(True).
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_H, lbs=100.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'top'),
+            ('BeamLoad', 'top', 2800.0),
+            ('StyleChange', 'AU0001', 'AU0008', True),
+            ('Job', 100.0, 'AU0008'),
+        ])
+
+    def test_different_yarn_on_both_bars_different_family(self):
+        # current A → F: both yarns differ, family Q.
+        # Expect TapeOut('both') + BeamLoad(top) + BeamLoad(btm)
+        # + StyleChange(True).
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'both'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0006', True),
+            ('Job', 100.0, 'AU0006'),
+        ])
+
+
+# --- 3.2 'next_runout' with non-trivial changeovers ---------------------
+
+class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
+
+    def test_one_bar_exhausted_other_yarn_matches(self):
+        # top=200, btm=2000 → top exhausts at producible=500 (clean roll
+        # boundary, no Waste). After run-up: top empty, btm has matching
+        # yarn (A → D shares btm yarn). Expect only BeamLoad(top, new_top).
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Job', 500.0, 'AU0001'),               # run-up of current item
+            ('BeamLoad', 'top', 2800.0),            # exhausted bar reload
+            ('StyleChange', 'AU0001', 'AU0004', False),
+            ('Job', 100.0, 'AU0004'),
+        ])
+
+    def test_one_bar_exhausted_other_yarn_does_not_match(self):
+        # top=200, btm=2000 → top exhausts. A → G changes both yarns, so
+        # btm (still threaded with A's yarn) needs to be taped out single.
+        # Expect TapeOut('btm') + BeamLoad(top) + BeamLoad(btm) + StyleChange.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Job', 500.0, 'AU0001'),
+            ('TapeOut', 'btm'),                     # single, not 'both'
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0007', False),
+            ('Job', 100.0, 'AU0007'),
+        ])
+
+    def test_both_bars_exhaust_simultaneously_with_full_changeover(self):
+        # top=200, btm=300 → both exhaust at 500. After: both empty. A → G
+        # changes both yarns but no TapeOut is needed (bars empty). Two
+        # BeamLoads then StyleChange.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=200.0, init_btm_lbs=300.0)
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Job', 500.0, 'AU0001'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0007', False),
+            ('Job', 100.0, 'AU0007'),
+        ])
+
+    def test_tape_out_both_never_appears_in_next_runout_mode(self):
+        # Whatever the new item, after the run-up at least one bar is
+        # empty, so TapeOut('both') cannot be emitted. Spot-check with
+        # several new items spanning the changeover-shape cases.
+        for new_item in (_ITEM_D, _ITEM_E, _ITEM_F, _ITEM_G, _ITEM_H):
+            with self.subTest(new_item=new_item.id):
+                m = _make_machine(init_item=_ITEM_A,
+                                  init_top_lbs=200.0, init_btm_lbs=2000.0)
+                plan = m.plan_production(
+                    new_item, lbs=100.0, start_at='next_runout',
+                )
+                bars = [a.bars for a in plan if isinstance(a, TapeOut)]
+                self.assertNotIn('both', bars)
+
+    def test_style_change_is_family_change_reflects_family_comparison(self):
+        # next_runout into a different-family item triggers
+        # is_family_change=True.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_runout')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertTrue(sc.is_family_change)
+
+
+# --- 3.3 StyleChange duration -------------------------------------------
+
+class PlanProductionStyleChangeDurationTests(unittest.TestCase):
+
+    def test_simple_change_uses_simple_change_duration(self):
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertFalse(sc.is_family_change)
+        self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
+
+    def test_family_change_uses_family_change_duration(self):
+        # A → C is a family change with no beam work.
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertTrue(sc.is_family_change)
+        self.assertEqual(sc.end - sc.start, _FAMILY_CHANGE)
+
+    def test_durations_are_independent_per_machine(self):
+        # Same transition, two machines with different family_change_duration:
+        # expect the StyleChange end times to differ.
+        long_family = timedelta(hours=3)
+        m_short = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        m_long = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0,
+                               family_change_duration=long_family)
+        plan_short = m_short.plan_production(_ITEM_C, lbs=150.0,
+                                             start_at='next_job_end')
+        plan_long = m_long.plan_production(_ITEM_C, lbs=150.0,
+                                           start_at='next_job_end')
+        sc_short = next(a for a in plan_short if isinstance(a, StyleChange))
+        sc_long = next(a for a in plan_long if isinstance(a, StyleChange))
+        self.assertEqual(sc_short.end - sc_short.start, _FAMILY_CHANGE)
+        self.assertEqual(sc_long.end - sc_long.start, long_family)
+
+
+# --- 3.4 TapeOut duration -----------------------------------------------
+
+class PlanProductionTapeOutDurationTests(unittest.TestCase):
+
+    def test_single_tape_out_uses_single_duration(self):
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_job_end')
+        to = next(a for a in plan if isinstance(a, TapeOut))
+        self.assertEqual(to.bars, 'top')
+        self.assertEqual(to.end - to.start, TAPE_OUT_SINGLE_DURATION)
+
+    def test_both_tape_out_uses_both_duration(self):
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='next_job_end')
+        to = next(a for a in plan if isinstance(a, TapeOut))
+        self.assertEqual(to.bars, 'both')
+        self.assertEqual(to.end - to.start, TAPE_OUT_BOTH_DURATION)
+
+
+# ---------------------------- PHASE 4 -----------------------------------
+
+# Mon 2026-05-18 00:00 is the start of ISO week 2026-W21 (chosen because
+# _START = 2026-05-18 09:00 lives in this same ISO week — keeping the
+# Phase 4 fixtures aligned with the rest of the file).
+_W21 = (2026, 21)
+_W21_START = datetime(2026, 5, 18, 0, 0)
+_W21_END = _W21_START + timedelta(days=7)
+
+
+# --- 4.1 No preamble required -------------------------------------------
+
+class ProducibleLbsNoPreambleTests(unittest.TestCase):
+
+    def test_time_bound_under_huge_beams(self):
+        # Huge beams, 24/7 workcal: capacity is bounded by week-hours × rate.
+        # 168h × 100 lbs/h = 16800 lbs (168 rolls of 100).
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 16800.0)
+
+    def test_beam_bound_single_cycle(self):
+        # 5h window remaining in the week; initial top=200 (with top_pct=0.4)
+        # exhausts at 500 lbs producible = 5h. Reload would start at week_end
+        # exactly, so it doesn't fit.
+        as_of = _W21_END - timedelta(hours=5)
+        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 500.0)
+
+    def test_multiple_mid_stream_reloads_fit(self):
+        # top=200, btm=300 (simultaneous exhaustion at 500 lbs). 168h window.
+        # Plan trace: 7 full cycles produce 14500 lbs by hour 161; an 8th
+        # cycle starts at h=161 with 7h of window left, producing 700 more
+        # lbs (within the partial Job before week_end). 15200 lbs total.
+        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0,
+                          start=_W21_START)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 15200.0)
+
+
+# --- 4.2 Preamble required ----------------------------------------------
+
+class ProducibleLbsPreambleTests(unittest.TestCase):
+
+    def test_preamble_fits_and_leaves_time(self):
+        # Current = A, request B (same yarn, same family) → StyleChange of
+        # _SIMPLE_CHANGE (15 min). 168h - 0.25h = 167.75h of production time.
+        # 167.75 × 100 = 16775 lbs → floor to rolls of B's tgt_wt=200 =
+        # 83 rolls × 200 = 16600.
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_B, *_W21), 16600.0)
+
+    def test_preamble_alone_exceeds_window_returns_zero(self):
+        # as_of 3h before week_end. Preamble for A → F (different yarn on
+        # both bars, different family) = TapeOut('both', 6h) + 2×BeamLoad
+        # (2h each) + StyleChange(family, 1h) = 11h. Far exceeds 3h window.
+        as_of = _W21_END - timedelta(hours=3)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_F, *_W21), 0.0)
+
+    def test_preamble_fits_but_no_full_roll_returns_zero(self):
+        # as_of 1.5h before week_end. A → C is a family change with no beam
+        # work — only a StyleChange of _FAMILY_CHANGE (1h). 0.5h left for
+        # production = 50 lbs at rate 100, less than tgt_wt=150 of C.
+        as_of = _W21_END - timedelta(hours=1, minutes=30)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_C, *_W21), 0.0)
+
+
+# --- 4.3 Workcal alignment ----------------------------------------------
+
+class ProducibleLbsWorkcalAlignmentTests(unittest.TestCase):
+
+    def test_as_of_before_week_starts(self):
+        # as_of one day before week_start (Sun before W21). With 24/7 workcal
+        # the implicit idle bridges 24h, then full 168h production window.
+        # Result should equal the case where as_of == week_start.
+        as_of = _W21_START - timedelta(days=1)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 16800.0)
+
+    def test_as_of_strictly_inside_week(self):
+        # as_of = Wed 12:00 of W21. Window: Wed 12:00 → next Mon 00:00 =
+        # 108h. Capacity = 10800 lbs (huge beams, no preamble).
+        as_of = datetime(2026, 5, 20, 12, 0)   # Wed of W21
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 10800.0)
+
+    def test_as_of_past_week_end_returns_zero(self):
+        as_of = _W21_END + timedelta(hours=1)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 0.0)
+
+    def test_non_work_hours_excluded_under_weekday_workcal(self):
+        # Weekday 9h workcal: 5 days × 9h = 45 work hours in a week.
+        # 45h × 100 lbs/h = 4500 lbs (45 rolls). No preamble.
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START, workcal=_WEEKDAY_9H)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 4500.0)
+
+    def test_iso_cross_year_week_resolves_correctly(self):
+        # ISO 2026-W01 starts Mon Dec 29 2025. as_of in late Dec 2025; the
+        # bridge spans the year boundary into the W01 window.
+        as_of = datetime(2025, 12, 27, 0, 0)   # Sat before W01 Monday
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, 2026, 1), 16800.0)
+
+
+# --- 4.4 Determinism and purity -----------------------------------------
+
+class ProducibleLbsPurityTests(unittest.TestCase):
+
+    def test_does_not_mutate_state(self):
+        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0,
+                          start=_W21_START)
+        before_status = m.current_status
+        before_acts = m.activities
+        m.producible_lbs_in_week(_ITEM_B, *_W21)
+        self.assertEqual(m.current_status, before_status)
+        self.assertEqual(m.activities, before_acts)
+
+    def test_repeated_calls_yield_same_result(self):
+        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0,
+                          start=_W21_START)
+        a = m.producible_lbs_in_week(_ITEM_B, *_W21)
+        b = m.producible_lbs_in_week(_ITEM_B, *_W21)
+        self.assertEqual(a, b)
+
+
+# --- 4.5 Rounding -------------------------------------------------------
+
+class ProducibleLbsRoundingTests(unittest.TestCase):
+
+    def test_result_is_always_a_multiple_of_tgt_wt(self):
+        # Spot-check the multiple-of-tgt_wt property across varied scenarios.
+        scenarios = [
+            # (init_top, init_btm, as_of, item, year, week)
+            (100_000.0, 100_000.0, _W21_START, _ITEM_A, *_W21),
+            (200.0, 2000.0, _W21_END - timedelta(hours=5), _ITEM_A, *_W21),
+            (200.0, 300.0, _W21_START, _ITEM_A, *_W21),
+            (100_000.0, 100_000.0, _W21_START, _ITEM_B, *_W21),
+            (100_000.0, 100_000.0, _W21_START, _ITEM_C, *_W21),
+        ]
+        for top, btm, start, item, year, week in scenarios:
+            with self.subTest(start=start, item=item.id):
+                m = _make_machine(init_top_lbs=top, init_btm_lbs=btm,
+                                  start=start)
+                result = m.producible_lbs_in_week(item, year, week)
+                self.assertEqual(result % item.tgt_wt, 0.0,
+                                 f'{result} is not a multiple of {item.tgt_wt}')
+
+    def test_exactly_one_roll_fits(self):
+        # 1h window, no preamble. 1h × 100 lbs/h = 100 lbs = exactly one roll.
+        as_of = _W21_END - timedelta(hours=1)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 100.0)
+
+    def test_just_under_one_roll_returns_zero(self):
+        # 30 min window, no preamble. 0.5h × 100 = 50 lbs, less than
+        # tgt_wt=100. Result = 0.
+        as_of = _W21_END - timedelta(minutes=30)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 0.0)
 
 
 if __name__ == '__main__':
