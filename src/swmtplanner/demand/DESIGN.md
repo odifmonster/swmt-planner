@@ -24,9 +24,9 @@ differ enough that combining them would obscure rather than clarify.
 `RlsItem` is constructed with:
 
 - `greige` — product reference, source of `safety` target (scalar lbs).
-- `start_date` — anchor for week 0. Week N's `due_date` is
-  `start_date + (N+1) * 7 days` (or however the project conventionally defines
-  a week boundary).
+- `start_date` — anchor for week 0's `due_date`. Week N's `due_date` is
+  `start_date + N * 7 days`, so week 0 is due at `start_date` itself and
+  the four-week horizon ends at `start_date + 21 days` (week 3).
 - `on_hand_lbs` — inventory available at `start_date`.
 - `lead_time` — the carry duration before which early lbs are not penalized.
 - `weekly_demand` — 4 `WeeklyDemand` records (one per week, fixed horizon).

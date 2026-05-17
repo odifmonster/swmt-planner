@@ -1,0 +1,31 @@
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Literal
+
+from swmtplanner.products import Greige
+from swmtplanner.schedule import Activity, Machine
+from swmtplanner.demand.rlsitem import RlsItem
+
+__all__ = ['Move', 'State']
+
+
+@dataclass
+class Move:
+    machine_id: str
+    item: Greige
+    lbs: float
+    start_at: Literal['next_job_end', 'next_runout']
+    idle_for: timedelta
+    plan: list[Activity]
+
+
+@dataclass
+class State:
+    machines: dict[str, Machine]
+    rls_items: dict[str, RlsItem]
+    start_date: datetime
+    window_end: datetime
+    window_advance_amount: timedelta = ...
+    carrying_avoidance_margin: timedelta = ...
+    def commit_move(self, move: Move) -> None: ...
+    def advance_window(self) -> None: ...

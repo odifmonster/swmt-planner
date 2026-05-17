@@ -307,3 +307,16 @@ A pure capacity-reporting query. Does not mutate state.
 1. Returned value is always a whole multiple of `item.tgt_wt`
 2. Exactly one roll fits: capacity equals `tgt_wt`, not 0
 3. Slightly less than one roll fits: capacity is 0
+
+### 4.6 `start` parameter
+
+1. `start=None` (default) matches passing `start=current_status.as_of`
+   explicitly — same result for the same machine/item/week
+2. `start > current_status.as_of` inside the window delays production:
+   the result equals what's producible from `start` through `week_end`,
+   minus any preamble
+3. `start` later than `current_status.as_of` but before `week_start`
+   collapses to "production begins at `week_start`" (same result as
+   `start=None` when `as_of < week_start`)
+4. `start >= week_end` returns 0
+5. `start < current_status.as_of` raises `ValueError`

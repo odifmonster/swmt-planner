@@ -115,7 +115,7 @@ Machine (HasID)
   plan_production(item, lbs, start_at, idle_for=timedelta(0)) -> list[Activity]
   add_activities(activities) -> None
   # capacity + stopping-point queries
-  producible_lbs_in_week(item, year, week) -> float
+  producible_lbs_in_week(item, year, week, start=None) -> float
   next_job_end: datetime
   next_runout: datetime
 ```
@@ -334,20 +334,29 @@ because production rate is item × machine specific — only the schedule layer
 knows how much each machine can deliver.
 
 ```
-machine.producible_lbs_in_week(item, year, week) -> float
+machine.producible_lbs_in_week(item, year, week, start=None) -> float
 ```
 
-Returns the lbs of `item` the machine could produce within the given ISO week,
-starting from `current_status.as_of`. Accounts for:
+Returns the lbs of `item` the machine could produce within the given ISO
+week, starting at the earliest of `start` (if provided) or
+`current_status.as_of`, but never earlier than the schedule tail and
+never earlier than the week boundary. Accounts for:
 
-- Required changeover preamble if `current_status.current_item != item`
-  (tape-outs, beam-loads, style-change).
+- Required changeover preamble if the machine's threaded state doesn't
+  already match `item` (tape-outs, beam-loads, style-change).
 - Mid-stream beam swaps within the window (each consumes
   `BEAM_LOAD_DURATION` only — natural exhaustion doesn't require taping the
   exhausted bar).
-- `workcal` — only counts actual work hours in the week, starting no earlier
-  than `current_status.as_of` and ending no later than the week boundary.
+- `workcal` — only counts actual work hours in the window, starting no
+  earlier than `max(current_status.as_of, start, week_start)` and ending no
+  later than the week boundary.
 - Rounds down to a whole multiple of `item.tgt_wt`.
+
+`start` lets the planner ask "if I delay production until time T, how much
+of this item fits in the week?". Common values are `current_status.as_of`
+(the default; equivalent to `start=None`) and `next_runout` (use the
+runout time as the effective start). `start < current_status.as_of` is
+rejected — production can't begin before the machine is ready.
 
 Returns 0 if the changeover preamble alone exceeds the available hours, or if
 the resulting capacity is less than one full roll.

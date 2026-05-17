@@ -1331,5 +1331,61 @@ class ProducibleLbsRoundingTests(unittest.TestCase):
         self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 0.0)
 
 
+# --- 4.6 `start` parameter ---------------------------------------------
+
+class ProducibleLbsStartParameterTests(unittest.TestCase):
+
+    def test_start_none_matches_explicit_as_of(self):
+        # Passing start=current_status.as_of explicitly should produce the
+        # same result as omitting it (the default branch).
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        default = m.producible_lbs_in_week(_ITEM_A, *_W21)
+        explicit = m.producible_lbs_in_week(_ITEM_A, *_W21,
+                                             start=m.current_status.as_of)
+        self.assertEqual(default, explicit)
+
+    def test_start_inside_window_delays_production(self):
+        # as_of = week_start. With start = week_start + 48h, production
+        # effectively begins 2 days into the window. 168h - 48h = 120h
+        # of work-hour budget at rate 100 = 12000 lbs (huge beams).
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        start = _W21_START + timedelta(hours=48)
+        self.assertEqual(
+            m.producible_lbs_in_week(_ITEM_A, *_W21, start=start),
+            12000.0,
+        )
+
+    def test_start_before_week_start_collapses_to_week_start(self):
+        # as_of = day before week_start. start = 12h after as_of, still
+        # before week_start. Production effectively begins at week_start
+        # regardless — same result as start=None.
+        as_of = _W21_START - timedelta(days=1)
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=as_of)
+        default = m.producible_lbs_in_week(_ITEM_A, *_W21)
+        explicit_pre_week = m.producible_lbs_in_week(
+            _ITEM_A, *_W21, start=as_of + timedelta(hours=12),
+        )
+        self.assertEqual(default, explicit_pre_week)
+
+    def test_start_past_week_end_returns_zero(self):
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        start = _W21_END + timedelta(hours=1)
+        self.assertEqual(
+            m.producible_lbs_in_week(_ITEM_A, *_W21, start=start),
+            0.0,
+        )
+
+    def test_start_before_as_of_raises(self):
+        m = _make_machine(init_top_lbs=100_000.0, init_btm_lbs=100_000.0,
+                          start=_W21_START)
+        with self.assertRaises(ValueError):
+            m.producible_lbs_in_week(_ITEM_A, *_W21,
+                                      start=_W21_START - timedelta(hours=1))
+
+
 if __name__ == '__main__':
     unittest.main()

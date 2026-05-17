@@ -122,16 +122,23 @@ class Machine(HasID[str]):
 
     def producible_lbs_in_week(
         self, item: 'Greige', year: int, week: int,
+        start: datetime | None = None,
     ) -> float:
         """Returns the lbs of `item` the machine could produce within the
-        given ISO week (Monday 00:00 to next Monday 00:00), starting from
-        `current_status.as_of`.
+        given ISO week (Monday 00:00 to next Monday 00:00).
+
+        `start` is the earliest moment at which production may begin.
+        Defaults to `current_status.as_of`. Passing a later datetime (e.g.
+        `next_runout`) lets the caller ask "if I delay production until
+        this time, how much fits?". `start` may not be earlier than
+        `current_status.as_of` (the machine can't time-travel) — raises
+        `ValueError` if so.
 
         Accounts for required changeover preamble, mid-stream beam reloads,
         non-work hours via `workcal`, and rounds the result down to a whole
-        multiple of `item.tgt_wt`. Returns 0.0 if `as_of` is already past
-        `week_end`, if the preamble alone exceeds the window, or if the
-        remaining time after the preamble can't accommodate a full roll.
+        multiple of `item.tgt_wt`. Returns 0.0 if the effective start is
+        already past `week_end`, if the preamble alone exceeds the window,
+        or if the remaining time can't accommodate a full roll.
 
         Pure: does not mutate any machine state. Implementation re-uses
         `plan_production` by asking for a generous upper bound and tallying
@@ -141,7 +148,14 @@ class Machine(HasID[str]):
         week_start = datetime(monday.year, monday.month, monday.day)
         week_end = week_start + timedelta(days=7)
 
-        if self._current_status.as_of >= week_end:
+        as_of = self._current_status.as_of
+        if start is not None and start < as_of:
+            raise ValueError(
+                f'start={start!r} is before machine\'s '
+                f'current_status.as_of ({as_of!r})'
+            )
+        effective_start = start if start is not None else as_of
+        if effective_start >= week_end:
             return 0.0
 
         rate = item.get_rate_on_mchn(self._id)
@@ -155,16 +169,15 @@ class Machine(HasID[str]):
             + item.tgt_wt
         )
 
-        # If `as_of` is before `week_start`, model the gap as an implicit
-        # idle: the machine sits unscheduled until the week begins, then
-        # the preamble + production start at week_start. This matches the
-        # "starting no earlier than as_of" clause — capacity is computed
-        # for the window [max(as_of, week_start), week_end]. The bridge
-        # is measured in **work hours** so a non-work gap (e.g., weekend
-        # under a weekday workcal) collapses to zero and `plan_production`
-        # picks up at the next work moment naturally.
+        # Bridge: idle from the machine's actual schedule tail (as_of) to
+        # the production-begin moment, which is the later of
+        # `effective_start` and `week_start`. The bridge is measured in
+        # **work hours** so a non-work gap (weekend under a weekday
+        # workcal) collapses to zero and `plan_production` picks up at
+        # the next work moment naturally.
+        bridge_target = max(effective_start, week_start)
         bridge_hours = self._workcal.get_work_hours_between(
-            self._current_status.as_of, week_start,
+            as_of, bridge_target,
         )
         idle_for = timedelta(hours=bridge_hours)
         plan = self.plan_production(

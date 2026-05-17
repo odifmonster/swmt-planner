@@ -33,17 +33,14 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
         columns=["inventory", "plan"]
 
 [Buildable] greige_styles:
-    formatter="greige_style_table"
+    formatter="greige_styles"
     [Excel] source:
         folder=FOLDER1
         workbook=XREF
         sheet="Greige Styles"
-    [DatFile] dest:
+    [JSONFile] dest:
         folder=FOLDER3
-        file="greige-styles.dat"
-        columns=["id", "target", "alt1", "alt2", "safety", "family", ...
-            "gauge", "top_set", "top_pct", "btm_set", "btm_pct", "machines", ...
-            "machine_rates"]
+        file="greige-styles.json"
 
 [Buildable] dye_formulae:
     formatter="colors"
@@ -52,10 +49,9 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
         workbook=XREF
         sheet="Xref"
         col_names=["COLOR NAME", "COLOR NUMBER", "SHADE RATING"]
-    [DatFile] dest:
+    [JSONFile] dest:
         folder=FOLDER3
-        file="dye-formulae.dat"
-        columns=["id", "name", "shade"]
+        file="dye-formulae.json"
 
 [Buildable] ply1_items:
     formatter="finished_fabric"
@@ -67,10 +63,9 @@ rls_cols = ["Past Due", *Map(rls_wks, wk -> Concat("RLS+",wk))]
                 "COLOR NUMBER", "PA FIN ITEM", *jets, "TANKS", "SHADE RATING"] # Use a * to "unpack" lists
         str_cols=["GREIGE ITEM", "STYLE", "STATUS", "PLY 1 PART #", "PA FIN ITEM", ...
                 *jets, "TANKS"]
-    [DatFile] dest:
+    [JSONFile] dest:
         folder=FOLDER3
-        file="ply1-items.dat"
-        columns=["ply1", "pa_fin", "master", "color", "width", "greige", "yld", "jets"]
+        file="ply1-items.json"
 
 [Excel] adaptive:
     folder=FOLDER2
