@@ -218,11 +218,18 @@ The `loop/candidates.py` module exposes three functions:
    case is impossible by `next_runout >= next_job_end`, so no test for
    it.)
 
-6. **Multiple machines, mixed** — state contains several machines, at
+6. **Multiple machines** — state contains several machines, at
    least one in each of the four single-machine states above
    (excluding the "no machines" empty case). Verify each machine's
    contribution lands in the output and machines whose decision points
    are entirely out of window contribute nothing.
+    1. All decision points of all machines in window.
+    2. Only the next job decision point of all machines in window.
+    3. Various subsets of machines where all machines in the subset
+       have both decision points in window.
+    4. Various subsets of machines where all machines in the subset
+       have exactly one decision point (next_job_end) in window.
+    5. Various subsets that have a mix of decision points in window.
 
 #### 1.3.2 `eligible_orders`
 
@@ -263,3 +270,165 @@ records (modulo small float tolerance on `lbs`):
    the appropriate orders for each `RlsItem`, with no cross-talk.
    (Configuration (b) is the natural single test here — the
    constructor-only version is what scenarios 1–5 already cover.)
+
+#### 1.3.3 `enumerate_candidates`
+
+1. **Target filtering and idling correctness only**
+   - the machine/product configuration for these tests will adhere to the
+   following principle: for some greige family $G$, there is a set of machines
+   $M_g \subseteq M$ such that for all $g \in G$ and for any machine $m \in M$,
+   `g.can_run_on_machine(m)` iff $m \in M_g$. That is, the set of machines can be
+   divided into equivalence classes based on what family of greige styles they
+   can run.
+   - the initial status of all machines and the order sizes should be set such
+   that every order can be completed within the week they are targeting.
+   - no calls to plan_production emit schedules with runouts
+    1. **Trivial case**
+       - all greige items belong to the same family.
+       - there is one machine programmed to run each item at the start state.
+       - no orders trigger idling before production begins.
+       - orders assigned to the machine already programmed for that item emit only one Job.
+    2. **Multiple family case** - assert that no order gets assigned to a
+       machine that can't run it, otherwise same setup as in part 1.
+    3. **Idling case** - mix of orders across weeks such that some pairs will
+       force a machine to idle before production.
+2. **Orders correctly capped at one week of production**
+   - these tests verify `move.lbs` reflects the producible-in-week cap
+   reported by `Machine.producible_lbs_in_week` for the
+   `(item, year, week, start=effective_start)` query corresponding to
+   the candidate. Setup arranges `order.lbs` large enough that the
+   producible cap is the binding constraint (not the order size).
+   - covers cases where the existing schedule restricts available
+   hours, and where preamble activities (forced run-up, tape-outs,
+   style changes, carrying-avoidance idle) restrict hours.
+    1. **Mid-week schedule tail** — `current_status.as_of` falls
+       partway through the current ISO week, leaving partial remaining
+       hours. Order's item matches the current item so there's no
+       preamble work. `move.lbs` equals
+       `floor(remaining_work_hours × rate / tgt_wt) × tgt_wt`.
+    2. **Full changeover preamble** — machine's current item differs
+       from the order's in both bars' yarn and in family, forcing
+       `TapeOut('both') + 2 × BeamLoad + StyleChange(is_family_change=
+       True)` in the preamble. `as_of = week_start` so the preamble is
+       the only restriction. `move.lbs` equals
+       `floor((week_work_hours - preamble_hours) × rate / tgt_wt) ×
+       tgt_wt` where `preamble_hours = TAPE_OUT_BOTH_DURATION + 2 ×
+       BEAM_LOAD_DURATION + machine.family_change_duration`.
+    3. **Carrying-avoidance idle inside the week** — regular order
+       whose `due_date - lead_time - margin` falls partway through the
+       same ISO week as the decision point. `effective_start` advances
+       to that target via the carrying-avoidance idle, shrinking the
+       in-week production window; `move.lbs` equals
+       `floor((week_end - effective_start work hours - preamble_hours)
+       × rate / tgt_wt) × tgt_wt`.
+    4. **`'next_runout'` decision point inside the week** — current
+       item has partial beams at `as_of = week_start` such that
+       `next_runout` falls midway through the week. Order's item shares
+       yarn with the current item so the preamble is a single
+       `StyleChange(is_family_change=False)`. `move.lbs` equals
+       `floor((week_end - next_runout work hours - simple_change_
+       duration) × rate / tgt_wt) × tgt_wt`. (The cap simulation
+       idles from `as_of` to `next_runout` rather than running the
+       current item, but the post-`next_runout` budget is the same.)
+
+### 1.4 Main loop
+
+The `plan(state, costing)` function orchestrates the greedy loop:
+enumerate → score → commit-lowest, advancing the decision window when
+the candidate pool drops below `state.candidate_threshold` until the
+horizon is reached. The underlying operations
+(`enumerate_candidates`, `score_after_move`, `commit_move`,
+`advance_window`) are tested in earlier sections; tests here verify
+the loop's orchestration behavior.
+
+#### 1.4.1 Termination
+
+Verify the loop terminates without hanging in each of:
+
+1. **Empty state** — `state.machines = {}`, `state.rls_items = {}`.
+   Returns immediately with an all-empty `PlanReport` (empty `dict`s
+   for `schedules`, `jobs_by_item`, etc.; `total_score == 0.0`).
+2. **No machines** — `rls_items` present but `machines = {}`. Returns
+   immediately; `unmet_lbs_by_item_week` lists every week's full
+   demand for every item.
+3. **All demand pre-satisfied** — `on_hand_lbs` for each item already
+   covers its demand plus safety. No candidates ever emerge; the loop
+   returns having committed nothing.
+4. **Re-running on a completed state** — call `plan` twice in
+   sequence on the same `(state, costing)`. The second call commits
+   no new moves; `schedules`, `jobs_by_item`, `total_score`,
+   `cost_components_by_item`, and `unmet_lbs_by_item_week` match
+   between the two reports. (`state.window_end` may differ by at most
+   one advance step.)
+
+#### 1.4.2 Demand fully placed (capacity available)
+
+Given a plant whose capacity exceeds total demand + safety:
+
+1. **Single item, single machine** — total scheduled lbs (sum over
+   `report.jobs_by_item[item_id]`) ≥ `sum(weekly_lbs_needed) +
+   item.safety`. Every `safety_view.orders[i].remaining_lbs == 0` on
+   the post-plan rls_item. `unmet_lbs_by_item_week` is empty.
+2. **Single item, multiple eligible machines** — committed activities
+   appear on more than one machine (the window mechanism spreads
+   work). Total scheduled lbs still ≥ demand + safety.
+3. **Multiple items, multiple machines** — each item's demand and
+   safety placed; per-machine eligibility is honored (no machine
+   commits an item not in its `machines` dict).
+
+#### 1.4.3 Capacity-bound (some demand unmet)
+
+Given a plant whose capacity within the horizon is less than total
+demand + safety:
+
+1. **Single bottleneck** — one item with more demand than its
+   eligible machines can produce. `unmet_lbs_by_item_week` reflects
+   the shortfall; the loop nevertheless commits everything it can
+   before terminating.
+2. **Item with no eligible machines** — an `RlsItem` whose
+   `item.machines` dict shares no keys with `state.machines`. The
+   item appears in `unmet_lbs_by_item_week` with the full weekly
+   demand (no commits for it). Other items in the state are still
+   handled normally.
+3. **Tight horizon** — `state.planning_horizon_buffer` set short
+   enough that not all demand can be placed before the horizon. The
+   loop terminates without advancing past the horizon; whatever
+   couldn't be placed surfaces in `unmet_lbs_by_item_week`.
+
+#### 1.4.4 Window advancement
+
+1. **Narrow initial window** — `state.window_end = state.start_date`.
+   Fresh machines have `next_job_end == start_date` and are initially
+   in window. After commits push `next_job_end` past `window_end`,
+   the loop calls `advance_window()` to bring more decisions in.
+   Verify multiple advances occur during plan execution (e.g.,
+   snapshot `state.window_end` before and after `plan`; it should
+   have advanced past the initial value).
+2. **Threshold-driven advancement** — `state.candidate_threshold`
+   set to a value greater than the initial in-window candidate count.
+   The loop advances the window aggressively to refill the pool.
+   Verify the final `state.window_end` is at or past the value it
+   would be if `candidate_threshold == 1`.
+3. **Loop stops at horizon** — after `plan` returns,
+   `state.window_end <= horizon + state.window_advance_amount` where
+   `horizon = _compute_horizon(state)`. A single-step overshoot is
+   expected because the loop checks `window_end < horizon` *before*
+   advancing.
+
+#### 1.4.5 `PlanReport` snapshot fidelity
+
+For any non-trivial scenario, verify:
+
+1. `report.schedules[m_id]` equals `state.machines[m_id].activities`
+   for every machine.
+2. `report.jobs_by_item[item_id]` equals
+   `state.rls_items[item_id].jobs` for every item.
+3. `report.total_score` equals `costing.score(state)` on the post-loop
+   state.
+4. `report.cost_components_by_item[item_id]` matches each rls_item's
+   view trackers (`raw_view.lateness`, `safety_view.drainage`,
+   `safety_view.carrying`, `safety_view.excess`).
+5. `report.unmet_lbs_by_item_week` contains exactly the (item_id,
+   week_idx) pairs where the corresponding
+   `safety_view.orders[week_idx].remaining_lbs > 0`, with matching
+   lbs values. Pairs with `remaining_lbs == 0` are omitted.

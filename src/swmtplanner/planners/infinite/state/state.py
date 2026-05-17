@@ -61,6 +61,20 @@ class State:
     carrying_avoidance_margin: timedelta = field(
         default_factory=lambda: timedelta(hours=24),
     )
+    # Minimum number of in-window candidates the main loop tries to keep
+    # in the pool. When the pool falls below this, the loop calls
+    # `advance_window()` until the threshold is met or the planning
+    # horizon is reached. Tuneable; 1 is the conservative default
+    # (advance only when the pool is fully drained).
+    candidate_threshold: int = 1
+    # Buffer added to the latest rls_item due_date to form the planning
+    # horizon — the cutoff past which the loop won't advance the
+    # decision window. Lets the planner schedule late production /
+    # safety top-ups after the demand horizon without running away
+    # indefinitely. Tuneable.
+    planning_horizon_buffer: timedelta = field(
+        default_factory=lambda: timedelta(weeks=4),
+    )
 
     def commit_move(self, move: Move) -> None:
         """Apply `move` to the appropriate machine and rls_items. All
