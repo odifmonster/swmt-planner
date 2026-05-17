@@ -69,6 +69,7 @@ def _make_machine(
     init_btm_beam=_BTM_BEAM,
     simple_change_duration=_SIMPLE_CHANGE,
     family_change_duration=_FAMILY_CHANGE,
+    is_new=False,
 ) -> Machine:
     return Machine(
         id='M1',
@@ -81,6 +82,7 @@ def _make_machine(
         workcal=workcal,
         simple_change_duration=simple_change_duration,
         family_change_duration=family_change_duration,
+        is_new=is_new,
     )
 
 
@@ -1136,6 +1138,67 @@ class PlanProductionStyleChangeDurationTests(unittest.TestCase):
         sc_long = next(a for a in plan_long if isinstance(a, StyleChange))
         self.assertEqual(sc_short.end - sc_short.start, _FAMILY_CHANGE)
         self.assertEqual(sc_long.end - sc_long.start, long_family)
+
+
+# --- 3.5 New-machine behavior (is_new=True) -----------------------------
+
+class PlanProductionNewMachineTests(unittest.TestCase):
+    """A `Machine` constructed with `is_new=True` collapses family changes
+    into the same `StyleChange(is_family_change=False)` shape (and the
+    same duration) as in-family style changes. The hardware-time
+    distinction simply doesn't exist on these machines, and surfacing it
+    as `is_family_change=True` would let any downstream cost weight
+    that distinguishes family changes from simple ones double-charge a
+    transition that isn't actually more expensive."""
+
+    def test_is_new_attribute_round_trip(self):
+        self.assertFalse(_make_machine().is_new)
+        self.assertTrue(_make_machine(is_new=True).is_new)
+
+    def test_new_machine_cross_family_emits_simple_style_change(self):
+        # A → C (different family). On a legacy machine this would be
+        # is_family_change=True; on a new machine it's False.
+        m = _make_machine(
+            init_top_lbs=2800.0, init_btm_lbs=1800.0, is_new=True,
+        )
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertFalse(sc.is_family_change)
+        self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
+
+    def test_new_machine_in_family_unchanged(self):
+        # A → B (same family). is_family_change=False on both machine
+        # types; verifying the new-machine path doesn't perturb this.
+        m = _make_machine(
+            init_top_lbs=2800.0, init_btm_lbs=1800.0, is_new=True,
+        )
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertFalse(sc.is_family_change)
+        self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
+
+    def test_new_machine_ignores_family_change_duration(self):
+        # The `family_change_duration` param is still accepted (kept for
+        # API symmetry) but unused on new machines: every StyleChange
+        # uses simple_change_duration regardless.
+        long_family = timedelta(hours=10)
+        m = _make_machine(
+            init_top_lbs=2800.0, init_btm_lbs=1800.0,
+            family_change_duration=long_family, is_new=True,
+        )
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
+        self.assertFalse(sc.is_family_change)
+
+    def test_old_machine_still_emits_family_change(self):
+        # Regression check: the default (is_new=False) path is
+        # unchanged.
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        sc = next(a for a in plan if isinstance(a, StyleChange))
+        self.assertTrue(sc.is_family_change)
+        self.assertEqual(sc.end - sc.start, _FAMILY_CHANGE)
 
 
 # --- 3.4 TapeOut duration -----------------------------------------------

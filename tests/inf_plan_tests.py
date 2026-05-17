@@ -92,11 +92,13 @@ def _make_machine(
     init_top_lbs: float = 2800.0,
     init_btm_lbs: float = 1800.0,
     start: datetime = _START,
+    is_new: bool = False,
 ) -> Machine:
     return Machine(
         machine_id, init_item, start,
         _TOP_BEAM, init_top_lbs, _BTM_BEAM, init_btm_lbs,
         _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+        is_new=is_new,
     )
 
 
@@ -148,6 +150,7 @@ def _big_beam_machine(
     machine_id: str = 'M1',
     init_item: Greige = _T1,
     start: datetime = _START,
+    is_new: bool = False,
 ) -> Machine:
     """A machine whose initial beams hold so much yarn (1e6 lbs each)
     that no in-stream reload happens within the planning horizon. Used
@@ -158,6 +161,7 @@ def _big_beam_machine(
         machine_id, init_item, start,
         _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
         _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+        is_new=is_new,
     )
 
 

@@ -2,221 +2,265 @@
     {
         "id": "M1",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "M2",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "M3",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "N1",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "N2",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "N3",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "O1",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "O2",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "O3",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "O4",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "P1",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "P2",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "P3",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "P4",
         "style_change_time": 0.1,
-        "family_change_time": 0.1
+        "family_change_time": 0.1,
+        "is_new": true
     },
     {
         "id": "R4",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "I9",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K10",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "J7",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K7",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K9",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "B8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "Q6",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "J9",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K12",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K5",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "R3",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "R2",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "I8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "I4",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "J5",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "J8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "E8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "I3",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "G6",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "I5",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "R1",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "K11",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "E7",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "H5",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "Q7",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "Q8",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "F1",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     },
     {
         "id": "B4",
         "style_change_time": 0.25,
-        "family_change_time": 1.0
+        "family_change_time": 1.0,
+        "is_new": false
     }
 ]

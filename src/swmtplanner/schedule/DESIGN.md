@@ -36,6 +36,14 @@ The schedule layer is the source of `Job` activities. The demand layer
 - `simple_change_duration` — how long a within-config style change takes on
   this machine.
 - `family_change_duration` — how long a family change takes on this machine.
+  Ignored when `is_new=True` (see below).
+- `is_new` — `True` for newer/digital machines where switching to a different
+  family takes the same brief reconfigure as a within-family style change.
+  Defaults to `False` (legacy pattern-wheel machine, family changes are more
+  expensive). New machines never emit `StyleChange(is_family_change=True)` —
+  every style transition is reported as `is_family_change=False` so the
+  costing layer doesn't apply a heavier weight to transitions that aren't
+  actually heavier in hardware terms.
 
 The constructor builds `initial_status` from these fields. The status is then
 exposed read-only.
@@ -110,6 +118,7 @@ Machine (HasID)
   activities: tuple[Activity, ...]  # append-only
   current_status: Status            # status at the schedule tail
   simple_change_duration, family_change_duration
+  is_new: bool                      # default False; True ⇒ no family changes emitted
   status_at(t) -> Status
   duration_of(spec) -> timedelta
   plan_production(item, lbs, start_at, idle_for=timedelta(0)) -> list[Activity]
@@ -173,15 +182,21 @@ get drawn at different ratios for the new item. So
 `top_lbs_remaining` / `btm_lbs_remaining` carry across same-yarn transitions
 unchanged, and the next `Job` consumes them at the new item's ratios.
 
-`StyleChange.is_family_change` is computed from family names independently:
+`StyleChange.is_family_change` is computed from family names and the
+machine's `is_new` flag:
 
 ```
-is_family_change = (from_item.family != to_item.family)
+is_family_change = (not machine.is_new) and (from_item.family != to_item.family)
 ```
 
-A family change with shared yarns produces a `StyleChange(is_family_change=True)`
-with no surrounding beam work. The machine still pays `family_change_duration`
-for the pattern-wheel / programming reconfiguration.
+On a legacy machine (`is_new=False`), a family change with shared yarns
+produces a `StyleChange(is_family_change=True)` with no surrounding beam work;
+the machine still pays `family_change_duration` for the pattern-wheel /
+programming reconfiguration. On a new machine (`is_new=True`), the same
+transition is reported as `StyleChange(is_family_change=False)` — the
+hardware reconfigure is the same brief setup as any other style change, so
+flagging it as a family change would double-charge under any cost weight
+that distinguishes family changes from simple ones.
 
 ## Roll-level production
 
@@ -287,7 +302,8 @@ so the most we can emit is a single `TapeOut('top'|'btm')`.
 
 After all beam work (if any), if `working_status.current_item != item`,
 emit `StyleChange(from_item=working_status.current_item, to_item=item,
-is_family_change=(working_status.current_item.family != item.family))`.
+is_family_change=((not machine.is_new) and
+working_status.current_item.family != item.family))`.
 
 ### 3. Production loop
 

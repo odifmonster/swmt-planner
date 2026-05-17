@@ -61,21 +61,28 @@ State
   machines: dict[str, Machine]
   rls_items: dict[str, RlsItem]
   start_date: datetime
-  window_end: datetime          # right edge of the decision window
-  # query helpers as needed (e.g. eligible machines for an item,
-  # remaining unmet demand for an rls_item/week, etc.)
+  window_end: datetime              # right edge of the decision window
+  reference_week_idx: int           # right edge of the priority "urgent" bucket
+  # tuneable thresholds and step sizes (window_advance_amount,
+  # carrying_avoidance_margin, candidate_threshold,
+  # reference_advance_amount, reference_threshold,
+  # planning_horizon_buffer)
   commit_move(move) -> None
-  advance_window() -> None       # extends window_end forward
+  advance_window() -> None          # extends window_end forward
+  advance_reference_week() -> None  # extends reference_week_idx forward
 ```
 
 `State` is a thin container. Its primary purpose is to let any function
 take `state` as a single argument rather than threading a half-dozen
-dicts through call signatures. It owns two mutation operations:
+dicts through call signatures. It owns three mutation operations:
 
 - `commit_move` applies a chosen `Move` by calling the underlying
   `Machine` and `RlsItem` methods in lockstep.
 - `advance_window` extends `window_end` forward so additional decisions
   become eligible (see "Decision window" below).
+- `advance_reference_week` extends `reference_week_idx` forward so
+  additional regular orders count as urgent for priority purposes (see
+  "Priority assignment" below). Added in Phase 2.
 
 Keeping these in `state/` rather than in the main loop keeps the loop
 short and gives us a single point of truth for "what does it mean to
@@ -107,15 +114,22 @@ one number:
    discouragement on top of that — "we'd rather not do this even if
    the time fits".
 
-3. **Cross-cutting aggregates** (Phase 2+). Penalties on plant-wide
-   state metrics that can't be captured by any single item's view in
-   isolation — e.g. overproducing one item while another goes unmet, or
-   piling work onto one machine while others sit idle. Likely terms:
-   - Plant-wide total excess across all items.
-   - Machine-utilization imbalance (variance across machines).
-   - Aggregate changeover time.
+3. **Cross-cutting aggregates** (Phase 2+). Penalties that compare each
+   candidate against the others in the same iteration's pool — costs no
+   single item's or machine's view can capture alone. Phase 2 adds two:
+   - **Priority cost** — `rank × w.priority` per move, where `rank` is
+     the move's order's position in a global priority ordering. Higher-
+     priority orders rank lower, so the greedy min-score loop naturally
+     prefers them.
+   - **Level-loading cost** — `work_hours_delta × w.level_loading` per
+     move, where the delta is from the earliest decision point in the
+     candidate pool. Encourages spreading work across machines instead
+     of piling onto the one that happens to score lowest in isolation.
 
-   The exact set evolves with the phasing (see below).
+   See "Plant-wide coordination" below for both. Future cross-cutting
+   terms — once real-data behavior tells us priority + level-loading
+   isn't enough — may include plant-wide total excess, per-machine
+   utilization imbalance, and aggregate changeover time.
 
 ```
 CostWeights
@@ -124,19 +138,26 @@ CostWeights
   # per-machine schedule weights (Phase 1)
   tape_out_single, tape_out_both, family_change: float   # per occurrence
   idle_time: float                                       # per work-hour
-  # plant-wide aggregate weights (Phase 2+)
-  total_excess, util_imbalance, changeover_total: float
+  # cross-cutting weights (Phase 2)
+  priority: float                                        # per rank step
+  level_loading: float                                   # per work-hour delta from earliest DP
 
 Costing
-  score(state) -> float                          # current state's score
-  score_after_move(state, move) -> float         # post-commit score, pure
+  score(state, ctx) -> float                             # current state's score
+  score_after_move(state, move, ctx) -> float            # post-commit score, pure
 ```
+
+`ctx` is a `ScoringContext` (see "Plant-wide coordination" below) that
+bundles the priorities dict and the earliest DP time so the scorer can
+compute the cross-cutting cost contributions without re-running the
+priority sort or the candidate-wide min-DP scan.
 
 `score_after_move` is the loop's hot path. It computes what `score`
 would return if `move` were committed, without actually mutating
 anything — built on `RlsItem.cost_if(jobs)` for the demand-side
-contributions and on inspecting `move.plan` for the schedule-side
-changeover contributions.
+contributions, on inspecting `move.plan` for the schedule-side
+changeover contributions, and on the `ctx` lookups for the cross-
+cutting contributions.
 
 ### `loop/`
 
@@ -150,6 +171,7 @@ Move
   lbs: float
   start_at: Literal['next_job_end', 'next_runout']
   idle_for: timedelta
+  week_idx: int | None    # which order this move addresses; None for safety (Phase 2)
   plan: list[Activity]    # cached output of machine.plan_production
 
 plan(state, costing) -> PlanReport
@@ -157,16 +179,28 @@ plan(state, costing) -> PlanReport
 
 `plan` is the entrypoint. It iterates:
 
-1. **Enumerate** candidate `Move`s from the current state, filtered by
+1. **Advance the reference week** while the count of items with at
+   least one unmet `RegularOrder` at or before
+   `state.reference_week_idx` falls below `state.reference_threshold` —
+   see "Priority assignment" below. (Phase 2.)
+2. **Enumerate** candidate `Move`s from the current state, filtered by
    the decision window — see "Candidate enumeration" below.
-2. **If empty**, `state.advance_window()` and re-enumerate. If the
+3. **If empty**, `state.advance_window()` and re-enumerate. If the
    window has reached the planning horizon and still empty, terminate.
-3. **Score** each candidate via `costing.score_after_move(state, move)`.
-4. **Commit** the lowest-scoring move via `state.commit_move(move)`. If
-   no candidate would improve the score, terminate.
-5. **Maintain** the window: if the in-window candidate count fell below
+4. **Build the scoring context** (Phase 2): assign priorities via
+   `assign_priorities(state)`, compute `earliest_dp_time` as
+   `min(dp_time(c) for c in candidates)`, and pack both into a
+   `ScoringContext` — see "Plant-wide coordination" below.
+5. **Score** each candidate via
+   `costing.score_after_move(state, move, ctx)`.
+6. **Commit** the lowest-scoring move via `state.commit_move(move)`.
+   The score serves only as a tie-breaker among eligible candidates
+   within an iteration; there is no "best must improve" check, because
+   committing demand reliably matters more than minimizing score at any
+   single step.
+7. **Maintain** the window: if the in-window candidate count fell below
    the configured threshold after the commit, `state.advance_window()`.
-6. **Repeat.**
+8. **Repeat.**
 
 `PlanReport` is the artifact the operator actually consumes. Returned at
 the end of `plan`:
@@ -305,6 +339,133 @@ Safety replenishment orders never carry-avoidance-idle. Bucket-2 fills
 don't accrue carrying cost in the demand view, so there's nothing to
 avoid.
 
+## Plant-wide coordination
+
+Phase 2 adds two cross-candidate scoring concerns — priority assignment
+and level-loading. Both score each candidate against the others in the
+same iteration's pool (rather than against one rls_item or machine in
+isolation), and both feed into a `ScoringContext` that the main loop
+builds once per iteration and hands to `Costing.score_after_move`:
+
+```
+ScoringContext
+  priorities: dict[OrderKey, int]    # for priority assignment
+  earliest_dp_time: datetime         # for level-loading
+```
+
+See the two sections below for the details.
+
+## Priority assignment
+
+The planner ranks every eligible order each iteration of the main
+loop and adds `rank × w.priority` to each `Move`'s score. Rank 1 is
+highest priority (lowest cost contribution); lower-ranked candidates
+lose to their higher-ranked siblings unless some other cost component
+shifts the balance.
+
+Lives in `planners/infinite/priority/`, exposing:
+
+```
+OrderKey
+  item_id: str
+  week_idx: int | None    # None ⇒ safety order
+
+assign_priorities(state: State) -> dict[OrderKey, int]
+```
+
+### Priority order
+
+Three buckets, top to bottom:
+
+1. **Urgent regulars** — `RegularOrder`s with `week_idx <=
+   state.reference_week_idx`. Sorted by `(due_date asc,
+   safety_pool / safety_target asc)` so an item that is already light
+   on safety gets pulled forward when its order shares a due date with
+   a safer item's.
+2. **Safety orders** — sorted by `safety_pool / safety_target` ascending
+   (item with the largest relative safety depletion first; this scales
+   fairly across items whose `safety_target`s differ in absolute lbs).
+3. **Future regulars** — `RegularOrder`s with `week_idx >
+   state.reference_week_idx`. Same intra-bucket sort as urgent.
+
+Placing safety in the middle reflects the design intent: we should not
+discourage scheduling safety stock when only future regular demand
+remains, because that would force the planner to schedule next-month
+demand *this* week even though the safety pool is empty.
+`reference_week_idx` is the lever that controls how far out a regular
+order has to be before safety jumps the queue.
+
+`safety_pool` and `safety_target` come from each `RlsItem`'s safety
+view as currently committed — i.e., the final pool after all
+already-registered jobs and on-hand are allocated through the buckets.
+That's a coarse proxy for "how at-risk is this item" but it's a single
+number per item that's already computed; we can refine later if real
+data shows the planner mis-ordering things.
+
+### Reference-week advance
+
+`state.reference_week_idx` mirrors the decision window's advance
+pattern. It starts at `1` — next week's demand should be in production
+this week, so weeks 0 and 1 are urgent from the start — and advances in
+steps of `state.reference_advance_amount` (default `1`) when the count
+of items with at least one unmet `RegularOrder` at or before
+`reference_week_idx` drops below `state.reference_threshold` (default
+`5`). The main loop calls `state.advance_reference_week()` before the
+window-advance step each iteration, advancing until the threshold is
+met or `reference_week_idx` exceeds the latest order's `week_idx`.
+
+The threshold keeps a healthy pool of urgent regulars available to
+score against. With too few urgent items, safety stock would dominate
+the score early and starve later regulars; with too many, safety stock
+never gets a turn. Like `candidate_threshold`, this is a tuneable knob
+expected to be refined against real-data behavior.
+
+### Cost mapping
+
+Each move's priority cost is:
+
+```
+priority_cost(move) = priorities[OrderKey(move.item.id, move.week_idx)]
+                      × w.priority
+```
+
+with `move.week_idx = None` for safety orders. `Move` carries
+`week_idx` directly so the cost layer can form the key without re-
+running eligibility.
+
+## Level-loading
+
+For each in-iteration candidate, the level-loading cost is:
+
+```
+level_loading_cost(move) = machine.workcal.get_work_hours_between(
+    earliest_dp_time, dp_time(move)
+) × w.level_loading
+```
+
+where `dp_time(move)` is `state.machines[move.machine_id].next_job_end`
+when `move.start_at == 'next_job_end'` and `.next_runout` otherwise —
+the time the move's decision point falls at, *before* any carrying-
+avoidance idle. The delta is measured in **work hours** so a weekend
+gap between two DPs doesn't manufacture a level-loading difference
+where there's no production difference to speak of.
+
+The earliest DP in the candidate pool naturally pays zero. As soon as
+a commit pushes that machine's `next_job_end` past the others, the
+remaining machines become the earliest and inherit the zero-cost slot
+— so the level-loading penalty produces "spread work across machines"
+behavior without any explicit "distribute" enumerator.
+
+`earliest_dp_time` is `min(dp_time(c) for c in candidates)`, computed
+in the main loop once after `enumerate_candidates` returns and packed
+into the `ScoringContext`. Carrying-avoidance idle is **not** part of
+`dp_time`: idle is already discouraged by `idle_time`, and rolling the
+idle into level-loading would double-penalize moves that idle for
+legitimate just-in-time reasons.
+
+Like the other Phase 2 weights, `level_loading` is tuneable and
+expected to be calibrated against real plant behavior.
+
 ## End-to-end workflow
 
 ```
@@ -345,8 +506,9 @@ without any explicit "split" enumerator.
   commits the lowest-scoring candidate. Advances the window when
   in-window candidate count falls below threshold.
 - Termination: enumerator returns no candidates even after the window
-  has been advanced past the planning horizon, or the best candidate
-  doesn't decrease the score.
+  has been advanced past the planning horizon. No "best must improve"
+  check — committing demand matters more than minimizing score at any
+  single step.
 
 Delivers: a feasible end-to-end planner that respects the
 carrying-cost / idle trade-off and naturally spreads high-volume items
@@ -354,10 +516,39 @@ across multiple machines via the window mechanism.
 
 ### Phase 2 — cross-cutting cost aggregates
 
-- Extend `CostWeights` and `Costing.score` with plant-wide penalty
-  terms (total excess, util imbalance, changeover total).
-- Avoids globally-bad-but-locally-fine decisions that Phase 1 can't
-  see (e.g., committing every cycle to one machine while others idle).
+Adds the priority-cost and level-loading layers — the first two cross-
+cutting costs in scope. See "Plant-wide coordination" above for both
+mechanisms.
+
+- New `planners/infinite/priority/` submodule exposing `OrderKey` and
+  `assign_priorities(state) -> dict[OrderKey, int]`.
+- New `ScoringContext` dataclass bundling `priorities` and
+  `earliest_dp_time`, passed to `Costing.score` /
+  `Costing.score_after_move` each iteration.
+- Extend `State` with `reference_week_idx` (default `1`),
+  `reference_advance_amount` (default `1`), `reference_threshold`
+  (default `5`), and `advance_reference_week()`.
+- Extend `Move` with a `week_idx: int | None` field so the cost layer
+  can derive the order key.
+- Extend `CostWeights` with `priority` and `level_loading`, and change
+  `Costing.score` / `Costing.score_after_move` to take a
+  `ScoringContext` and add `rank × w.priority` plus
+  `work_hours_delta × w.level_loading` per move.
+- Extend the main loop with a reference-week advance step before the
+  window-advance step each iteration, plus a `ctx = ScoringContext(...)`
+  build step before scoring.
+
+Avoids two Phase-1 failure modes: the greedy loop filling a high-weight
+component (e.g., a near-due regular order on week 0) on an arbitrary
+machine while a more urgent order on a more-depleted item sits behind
+it in the candidate pool, and the loop piling work onto whichever
+machine happens to score lowest in isolation while other machines
+remain idle.
+
+Future cross-cutting cost terms — once real-data behavior tells us
+priority + level-loading isn't enough — may include plant-wide total
+excess, per-machine utilization imbalance, and aggregate changeover
+time.
 
 ### Phase 3 — local search post-pass
 

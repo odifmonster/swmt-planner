@@ -61,11 +61,13 @@ class Machine(HasID[str]):
         workcal: 'WorkCal',
         simple_change_duration: timedelta,
         family_change_duration: timedelta,
+        is_new: bool = False,
     ) -> None:
         self._id = id
         self._workcal = workcal
         self._simple_change_duration = simple_change_duration
         self._family_change_duration = family_change_duration
+        self._is_new = is_new
         self._initial_status = Status(
             as_of=start,
             top_beam=init_top_beam,
@@ -85,6 +87,16 @@ class Machine(HasID[str]):
     @property
     def workcal(self) -> 'WorkCal':
         return self._workcal
+
+    @property
+    def is_new(self) -> bool:
+        """True for modern/digital machines, where family changes and
+        in-family style changes are equally cheap (a brief reconfigure)
+        rather than the heavier pattern-wheel rework required on older
+        machines. New machines emit every style transition as
+        `StyleChange(is_family_change=False)` — see "Style changes" in
+        `schedule/DESIGN.md`."""
+        return self._is_new
 
     @property
     def initial_status(self) -> Status:
@@ -377,9 +389,16 @@ class Machine(HasID[str]):
                 emitted, working, 'btm', BeamSet(cfg.btm_beam),
             )
 
-        # Style-change phase.
+        # Style-change phase. On new machines a family-spanning
+        # transition takes the same time as an in-family one, so we
+        # collapse both to `is_family_change=False` — the StyleChange
+        # weight then doesn't double-charge transitions that aren't
+        # actually more expensive on the hardware in question.
         if item != working.current_item:
-            is_family_change = working.current_item.family != item.family
+            is_family_change = (
+                (not self._is_new)
+                and working.current_item.family != item.family
+            )
             working = self._emit_style_change(
                 emitted, working, item, is_family_change=is_family_change,
             )
