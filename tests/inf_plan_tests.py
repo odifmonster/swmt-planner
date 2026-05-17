@@ -13,6 +13,7 @@ from swmtplanner.planners.infinite import (
     State, Move, CostWeights, Costing,
     DecisionPoint, RegularOrder, SafetyOrder,
     eligible_decision_points, eligible_orders, enumerate_candidates,
+    PlanReport, plan,
 )
 
 
@@ -140,6 +141,23 @@ def _move_with_plan(
         machine_id=machine_id, item=item, lbs=0.0,
         start_at='next_job_end', idle_for=timedelta(0),
         plan=plan,
+    )
+
+
+def _big_beam_machine(
+    machine_id: str = 'M1',
+    init_item: Greige = _T1,
+    start: datetime = _START,
+) -> Machine:
+    """A machine whose initial beams hold so much yarn (1e6 lbs each)
+    that no in-stream reload happens within the planning horizon. Used
+    by the main-loop tests so that the per-week cap depends only on the
+    week's wall-clock window and the per-machine eligibility — not on
+    beam mechanics."""
+    return Machine(
+        machine_id, init_item, start,
+        _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
+        _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
     )
 
 
@@ -1356,6 +1374,402 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertFalse(style_changes[0].is_family_change)
         # No tape-outs anywhere in the plan.
         self.assertFalse(any(isinstance(a, TapeOut) for a in mv.plan))
+
+
+# --- 1.4 Main loop --------------------------------------------------------
+
+class MainLoopTests(unittest.TestCase):
+    """Section 1.4 of INF_PLAN_TEST_SPEC.md.
+
+    These tests exercise `plan(state, costing)` — the greedy
+    enumerate → score → commit-lowest loop. The lower-level operations
+    (enumerate, score_after_move, commit_move, advance_window) are
+    covered by earlier sections; here we verify orchestration:
+    termination behavior, that the loop places everything it can, that
+    capacity-bound scenarios surface the right shortfalls, that the
+    window advances and stops at the horizon as documented, and that
+    the returned `PlanReport` matches the post-loop `State`."""
+
+    # ===================================================================
+    # 1.4.1 Termination
+    # ===================================================================
+
+    def test_plan_empty_state(self):
+        # No machines, no rls_items — loop has nothing to do.
+        state = _make_state(machines={}, rls_items={})
+        report = plan(state, Costing(_weights()))
+        self.assertEqual(report.schedules, {})
+        self.assertEqual(report.jobs_by_item, {})
+        self.assertEqual(report.total_score, 0.0)
+        self.assertEqual(report.cost_components_by_item, {})
+        self.assertEqual(report.unmet_lbs_by_item_week, {})
+
+    def test_plan_no_machines_unmet_remains(self):
+        # rls_items present but no machines — no candidates ever; every
+        # week's full demand surfaces in unmet_lbs_by_item_week.
+        rls = _make_rls_item(item=_ITEM_A)  # weekly=[100]*4, on_hand=0
+        state = _make_state(machines={}, rls_items={'AU0001': rls})
+        report = plan(state, Costing(_weights()))
+        self.assertEqual(report.schedules, {})
+        self.assertEqual(
+            report.unmet_lbs_by_item_week,
+            {('AU0001', wk): 100.0 for wk in range(4)},
+        )
+
+    def test_plan_all_demand_pre_satisfied(self):
+        # on_hand alone covers all weekly demand AND the safety target,
+        # so eligible_orders returns [] and the loop terminates without
+        # committing anything.
+        rls = RlsItem(
+            item=_ITEM_A, start_date=_START, on_hand_lbs=900.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        machine = _make_machine('M1')
+        state = _make_state(
+            machines={'M1': machine}, rls_items={'AU0001': rls},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        self.assertEqual(report.schedules['M1'], ())
+        self.assertEqual(report.jobs_by_item['AU0001'], ())
+        self.assertEqual(report.unmet_lbs_by_item_week, {})
+
+    def test_plan_idempotent_on_completed_state(self):
+        # Running plan twice on the same (state, costing) commits nothing
+        # the second time around.
+        m = _big_beam_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m}, rls_items={_T1.id: rls},
+        )
+        costing = Costing(_weights(
+            lateness=10, drainage=1, carrying=1,
+        ))
+        report1 = plan(state, costing)
+        acts1 = state.machines['M1'].activities
+        jobs1 = state.rls_items[_T1.id].jobs
+
+        report2 = plan(state, costing)
+        acts2 = state.machines['M1'].activities
+        jobs2 = state.rls_items[_T1.id].jobs
+
+        # No new mutations.
+        self.assertEqual(acts1, acts2)
+        self.assertEqual(jobs1, jobs2)
+        # Per-field report equality on everything the spec requires.
+        self.assertEqual(report1.schedules, report2.schedules)
+        self.assertEqual(report1.jobs_by_item, report2.jobs_by_item)
+        self.assertAlmostEqual(report1.total_score, report2.total_score)
+        self.assertEqual(
+            report1.cost_components_by_item,
+            report2.cost_components_by_item,
+        )
+        self.assertEqual(
+            report1.unmet_lbs_by_item_week,
+            report2.unmet_lbs_by_item_week,
+        )
+
+    # ===================================================================
+    # 1.4.2 Demand fully placed (capacity available)
+    # ===================================================================
+
+    def test_plan_single_item_single_machine_fully_placed(self):
+        # One machine with abundant beam capacity; 4 weeks of small
+        # demand. Loop places every week.
+        m = _big_beam_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m}, rls_items={_T1.id: rls},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # Every safety-view order fully satisfied.
+        for order in rls.safety_view.orders:
+            self.assertEqual(order.remaining_lbs, 0.0)
+        self.assertEqual(report.unmet_lbs_by_item_week, {})
+        # Total scheduled lbs >= total demand (safety=0 for _T1).
+        total_scheduled = sum(j.lbs for j in rls.jobs)
+        self.assertGreaterEqual(total_scheduled, 400.0)
+
+    def test_plan_single_item_multiple_machines(self):
+        # Two identical eligible machines; the window mechanism spreads
+        # work across both as each machine's next_job_end falls out of
+        # window between commits.
+        m1 = _big_beam_machine('M1', init_item=_T1)
+        m2 = _big_beam_machine('M2', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m1, 'M2': m2}, rls_items={_T1.id: rls},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # Demand fully placed.
+        self.assertEqual(report.unmet_lbs_by_item_week, {})
+        # Both machines saw at least one commit (the planner spreads
+        # work across machines via the decision-window mechanism).
+        self.assertGreater(len(report.schedules['M1']), 0)
+        self.assertGreater(len(report.schedules['M2']), 0)
+
+    def test_plan_multiple_items_multiple_machines(self):
+        # Three items partitioned by family across three machines.
+        # Every item is fully placed; per-machine eligibility honored.
+        m1 = _big_beam_machine('M1', init_item=_T1)
+        m2 = _big_beam_machine('M2', init_item=_T2)
+        m3 = _big_beam_machine('M3', init_item=_TC)
+        rls_t1 = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        rls_t2 = RlsItem(
+            item=_T2, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        rls_tc = RlsItem(
+            item=_TC, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m1, 'M2': m2, 'M3': m3},
+            rls_items={_T1.id: rls_t1, _T2.id: rls_t2, _TC.id: rls_tc},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        self.assertEqual(report.unmet_lbs_by_item_week, {})
+        # Per-machine eligibility honored: every committed Job's item
+        # can run on the machine it landed on.
+        for m_id, schedule in report.schedules.items():
+            for a in schedule:
+                if isinstance(a, Job):
+                    self.assertTrue(
+                        a.item.can_run_on_mchn(m_id),
+                        f'{a.item.id} committed on {m_id} '
+                        'but cannot run there',
+                    )
+
+    # ===================================================================
+    # 1.4.3 Capacity-bound (some demand unmet)
+    # ===================================================================
+
+    def test_plan_single_bottleneck(self):
+        # Demand far exceeds what a single default-beam machine can
+        # produce within the horizon (default beams force in-stream
+        # reloads that cap weekly throughput well below 168×rate).
+        machine = _make_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[200_000.0, 0.0, 0.0, 0.0],
+        )
+        state = _make_state(
+            machines={'M1': machine}, rls_items={_T1.id: rls},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # Loop committed *something*.
+        scheduled = sum(j.lbs for j in state.rls_items[_T1.id].jobs)
+        self.assertGreater(scheduled, 0.0)
+        # …but a shortfall remains on week 0.
+        self.assertIn((_T1.id, 0), report.unmet_lbs_by_item_week)
+        self.assertGreater(
+            report.unmet_lbs_by_item_week[(_T1.id, 0)], 0.0,
+        )
+
+    def test_plan_item_with_no_eligible_machines(self):
+        # _T1 runs on M1/M2; _TC runs only on M3. With only M1/M2 in
+        # state, _TC is unplaceable — every _TC week surfaces in
+        # unmet_lbs_by_item_week, while _T1 is fully placed.
+        m1 = _big_beam_machine('M1', init_item=_T1)
+        m2 = _big_beam_machine('M2', init_item=_T2)
+        rls_t1 = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        rls_tc = RlsItem(
+            item=_TC, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m1, 'M2': m2},
+            rls_items={_T1.id: rls_t1, _TC.id: rls_tc},
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # _TC: every week unmet at full lbs.
+        for wk in range(4):
+            self.assertEqual(
+                report.unmet_lbs_by_item_week.get((_TC.id, wk)), 100.0,
+            )
+        # _T1: nothing unmet.
+        for wk in range(4):
+            self.assertNotIn((_T1.id, wk), report.unmet_lbs_by_item_week)
+
+    def test_plan_tight_horizon(self):
+        # planning_horizon_buffer = -14 days → horizon = latest_due - 14d
+        # = (_START + 21d) - 14d = _START + 7d. The loop can only place
+        # demand whose effective_start falls before _START + 7d, so the
+        # later weeks must surface as unmet.
+        m = _big_beam_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m}, rls_items={_T1.id: rls},
+            planning_horizon_buffer=-timedelta(days=14),
+        )
+        report = plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # Something is unmet (tight horizon cut off later weeks).
+        self.assertGreater(len(report.unmet_lbs_by_item_week), 0)
+        # Loop terminated without driving window_end far past the
+        # horizon — at most one advance step past.
+        horizon = (_START + timedelta(days=21)
+                   + state.planning_horizon_buffer)
+        self.assertLessEqual(
+            state.window_end, horizon + state.window_advance_amount,
+        )
+
+    # ===================================================================
+    # 1.4.4 Window advancement
+    # ===================================================================
+
+    def test_plan_narrow_initial_window_advances(self):
+        # Start with window_end == start_date. After the first commit
+        # M1.next_job_end pushes past window_end, forcing
+        # advance_window() to keep the loop progressing. By the end
+        # window has advanced past its initial value.
+        m = _big_beam_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m}, rls_items={_T1.id: rls},
+            window_end=_START,
+        )
+        plan(state, Costing(_weights(lateness=10, drainage=1)))
+        self.assertGreater(state.window_end, _START)
+
+    def test_plan_threshold_driven_advancement(self):
+        # With candidate_threshold > 1, the loop advances the window
+        # aggressively to keep the pool topped up. The final
+        # window_end with a high threshold is at-or-past the final
+        # window_end achieved with threshold=1.
+        def run(threshold: int) -> datetime:
+            m = _big_beam_machine('M1', init_item=_T1)
+            rls = RlsItem(
+                item=_T1, start_date=_START, on_hand_lbs=0.0,
+                lead_time=timedelta(0),
+                weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+            )
+            state = _make_state(
+                machines={'M1': m}, rls_items={_T1.id: rls},
+                candidate_threshold=threshold,
+            )
+            plan(state, Costing(_weights(lateness=10, drainage=1)))
+            return state.window_end
+
+        self.assertGreaterEqual(run(10), run(1))
+
+    def test_plan_stops_at_horizon(self):
+        # After plan() returns, window_end should not exceed
+        # horizon + one advance step. The advance check is
+        # `window_end < horizon` before advancing, so a single-step
+        # overshoot is the worst case.
+        m = _big_beam_machine('M1', init_item=_T1)
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m}, rls_items={_T1.id: rls},
+        )
+        plan(state, Costing(_weights(lateness=10, drainage=1)))
+        # Latest due for the 4-week demand is _START + 21 days.
+        horizon = (_START + timedelta(days=21)
+                   + state.planning_horizon_buffer)
+        self.assertLessEqual(
+            state.window_end, horizon + state.window_advance_amount,
+        )
+
+    # ===================================================================
+    # 1.4.5 PlanReport snapshot fidelity
+    # ===================================================================
+
+    def test_plan_report_matches_state(self):
+        # Run a non-trivial scenario; verify every PlanReport field
+        # mirrors the post-loop state.
+        m1 = _big_beam_machine('M1', init_item=_T1)
+        m2 = _big_beam_machine('M2', init_item=_T2)
+        rls_t1 = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        rls_t2 = RlsItem(
+            item=_T2, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
+        )
+        state = _make_state(
+            machines={'M1': m1, 'M2': m2},
+            rls_items={_T1.id: rls_t1, _T2.id: rls_t2},
+        )
+        costing = Costing(_weights(
+            lateness=10, drainage=1, carrying=1, excess=1,
+            tape_out_single=1, tape_out_both=1,
+            family_change=1, idle_time=0.1,
+        ))
+        report = plan(state, costing)
+
+        # 1. schedules mirror state.machines[*].activities.
+        for m_id, machine in state.machines.items():
+            self.assertEqual(report.schedules[m_id], machine.activities)
+        self.assertEqual(set(report.schedules), set(state.machines))
+
+        # 2. jobs_by_item mirrors state.rls_items[*].jobs.
+        for item_id, rls in state.rls_items.items():
+            self.assertEqual(report.jobs_by_item[item_id], rls.jobs)
+        self.assertEqual(
+            set(report.jobs_by_item), set(state.rls_items),
+        )
+
+        # 3. total_score equals the score recomputed on the state.
+        self.assertAlmostEqual(report.total_score, costing.score(state))
+
+        # 4. cost_components_by_item matches the view trackers.
+        for item_id, rls in state.rls_items.items():
+            cc = report.cost_components_by_item[item_id]
+            self.assertEqual(cc.lateness, rls.raw_view.lateness)
+            self.assertEqual(cc.drainage, rls.safety_view.drainage)
+            self.assertEqual(cc.carrying, rls.safety_view.carrying)
+            self.assertEqual(cc.excess, rls.safety_view.excess)
+
+        # 5. unmet_lbs_by_item_week contains exactly the (item, week)
+        # pairs with positive remaining_lbs in the safety view; lbs
+        # values match.
+        actual_unmet = {}
+        for item_id, rls in state.rls_items.items():
+            for order in rls.safety_view.orders:
+                if order.remaining_lbs > 0:
+                    actual_unmet[(item_id, order.week.week_idx)] = (
+                        order.remaining_lbs
+                    )
+        self.assertEqual(report.unmet_lbs_by_item_week, actual_unmet)
 
 
 if __name__ == '__main__':
