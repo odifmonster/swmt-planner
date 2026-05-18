@@ -126,7 +126,15 @@ def _map_warehouse(wh):
 
 def _pa_dmnd_report(writer):
     dmnd_path, dmnd_args = INFO_MAP['lam_release']
-    rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+
+    try:
+        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+    except ValueError as e:
+        dmnd_args['usecols'].remove('Plant')
+        dmnd_args['usecols'].insert(0, 'Unnamed: 0')
+        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+        rls_df.rename(columns={'Unnamed: 0': 'Plant'})
+
     to_drop = rls_df[rls_df['PA Item'].isna() | rls_df['Active?'].isna() | (rls_df['PA Item'] == 0)]
     rls_df = rls_df.drop(to_drop.index)
 
