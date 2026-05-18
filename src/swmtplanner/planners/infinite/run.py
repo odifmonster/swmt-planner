@@ -11,6 +11,7 @@ project is packaged)."""
 
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -24,45 +25,51 @@ from .loop import plan
 from .report import write_plan_report_xlsx
 from .state import State
 
+_Products = Annotated[Path, typer.Option(
+    '--products', '-p', exists=True, readable=True,
+    dir_okay=False, help='Path to the greige-styles JSON.'
+)]
+_Demand = Annotated[Path, typer.Option(
+    '--demand', '-d', exists=True, readable=True,
+    dir_okay=False, help='Path to the released-item demand JSON.'
+)]
 
-def main(
-    products: Path = typer.Option(
-        ..., '--products', '-p',
-        exists=True, readable=True, dir_okay=False,
-        help='Path to the greige-styles JSON.',
-    ),
-    demand: Path = typer.Option(
-        ..., '--demand', '-d',
-        exists=True, readable=True, dir_okay=False,
-        help='Path to the released-item demand JSON.',
-    ),
-    machines: Path = typer.Option(
-        ..., '--machines', '-m',
-        exists=True, readable=True, dir_okay=False,
-        help='Path to the machines JSON.',
-    ),
-    weights: Path = typer.Option(
-        ..., '--weights', '-w',
-        exists=True, readable=True, dir_okay=False,
-        help='Path to the cost-weights JSON.',
-    ),
-    workcal: Path = typer.Option(
-        ..., '--workcal', '-c',
-        exists=True, readable=True, dir_okay=False,
-        help='Path to the workcal JSON.',
-    ),
-    start_date: datetime = typer.Option(
-        ..., '--start-date', '-s',
-        formats=['%Y-%m-%d'],
-        help='Planning anchor date (YYYY-MM-DD). Week 0 is due on '
-             'this date.',
-    ),
-    output_dir: Path = typer.Option(
-        None, '--output-dir', '-o',
-        file_okay=False, dir_okay=True,
-        help='Directory to write the output xlsx to. Defaults to the '
-             'current working directory. Created if it does not exist.',
-    ),
+_Machines = Annotated[Path, typer.Option(
+    '--machines', '-m',
+    exists=True, readable=True, dir_okay=False,
+    help='Path to the machines JSON.',
+)]
+_Weights = Annotated[Path, typer.Option(
+    '--weights', '-w',
+    exists=True, readable=True, dir_okay=False,
+    help='Path to the cost-weights JSON.',
+)]
+_WorkCal = Annotated[Path, typer.Option(
+    '--workcal', '-c',
+    exists=True, readable=True, dir_okay=False,
+    help='Path to the workcal JSON.',
+)]
+_StartDate = Annotated[datetime, typer.Option(
+    '--start-date', '-s',
+    formats=['%Y-%m-%d'],
+    help='Planning anchor date (YYYY-MM-DD). Week 0 is due on '
+            'this date.',
+)]
+_OutDir = Annotated[Path, typer.Option(
+    '--output-dir', '-o',
+    file_okay=False, dir_okay=True,
+    help='Directory to write the output xlsx to. Defaults to the '
+            'current working directory. Created if it does not exist.',
+)]
+
+def run(
+    products: _Products,
+    demand: _Demand,
+    machines: _Machines,
+    weights: _Weights,
+    workcal: _WorkCal,
+    start_date: _StartDate,
+    output_dir: _OutDir
 ) -> None:
     """Run the Infinite Knitting greedy planner end-to-end."""
     if output_dir is None:
@@ -113,7 +120,3 @@ def main(
     typer.echo(f'Writing report to {output_path}')
     write_plan_report_xlsx(report, output_path)
     typer.echo('Done.')
-
-
-if __name__ == '__main__':
-    typer.run(main)

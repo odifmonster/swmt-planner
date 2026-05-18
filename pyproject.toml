@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swmtplanner"
-version = "1.0.0"
+version = "1.0.1"
 requires-python = ">=3.12"
 dependencies = [
     "pandas[excel]>=2.3.2",
@@ -25,4 +25,4 @@ classifiers = [
 ]
 
 [project.scripts]
-knit-plan = "swmtplanner.planners.infinit.cli:main"
+plan = "swmtplanner.planners.cli:app"

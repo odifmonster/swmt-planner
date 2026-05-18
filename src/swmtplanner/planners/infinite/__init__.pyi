@@ -13,6 +13,7 @@ from .report import (
     schedule_dataframe, production_dataframe, unmet_demand_dataframe,
     write_plan_report_xlsx,
 )
+from .run import run
 
 __all__ = [
     'Move', 'State', 'CostWeights', 'Costing',
@@ -22,5 +23,5 @@ __all__ = [
     'eligible_decision_points', 'enumerate_candidates',
     'PlanReport', 'plan',
     'schedule_dataframe', 'production_dataframe', 'unmet_demand_dataframe',
-    'write_plan_report_xlsx',
+    'write_plan_report_xlsx', 'run'
 ]

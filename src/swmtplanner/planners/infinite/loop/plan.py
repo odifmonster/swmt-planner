@@ -48,7 +48,10 @@ def plan(state: State, costing: Costing) -> PlanReport:
     result."""
     horizon = _compute_horizon(state)
 
+    move_count = 0
+
     while True:
+        print(f'Total moves committed: {move_count}', end='\r')
         candidates = enumerate_candidates(state)
         # Advance the window as needed: when below threshold AND the
         # window hasn't reached the horizon, ask for more decisions.
@@ -72,6 +75,9 @@ def plan(state: State, costing: Costing) -> PlanReport:
         )
         state.commit_move(best_move)
 
+        move_count += 1
+
+    print()
     return _build_report(state, costing)
 
 

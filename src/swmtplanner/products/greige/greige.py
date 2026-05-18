@@ -38,7 +38,10 @@ class Greige(HasID[str]):
         return self._safety
 
     def can_run_on_mchn(self, mchn: str) -> bool:
+        if self.id == 'NONE': return True
         return mchn in self._machines
 
     def get_rate_on_mchn(self, mchn: str) -> float:
+        if mchn not in self._machines:
+            return 80
         return self._machines[mchn]

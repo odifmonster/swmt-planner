@@ -108,7 +108,9 @@ def enumerate_candidates(state: State) -> list[Move]:
             effective_start = machine.workcal.offset_work_hours(
                 dp.time, idle_hours,
             )
+
             iso_year, iso_week, _ = effective_start.isocalendar()
+
             producible_cap = machine.producible_lbs_in_week(
                 order.item, iso_year, iso_week, start=effective_start,
             )

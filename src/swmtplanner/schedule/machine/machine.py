@@ -38,7 +38,7 @@ def fresh_beam_lbs(beam: BeamSet) -> float:
 # like 499.99999999999994 where 500.0 is meant. We round to nearest
 # multiple of tgt_wt within this tolerance to avoid spurious Waste
 # emissions at clean roll boundaries.
-_FLOAT_EPS = 1e-2
+_FLOAT_EPS = 1e-6
 
 
 class Machine(HasID[str]):

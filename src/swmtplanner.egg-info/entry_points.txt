@@ -1,2 +1,2 @@
 [console_scripts]
-knit-plan = swmtplanner.planners.infinit.cli:main
+plan = swmtplanner.planners.cli:app
