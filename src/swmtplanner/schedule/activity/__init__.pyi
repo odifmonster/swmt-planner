@@ -26,6 +26,7 @@ class Activity(HasID[str]):
 class Job(Activity):
     item: Greige
     lbs: float
+    rolls: tuple[tuple[float, datetime], ...] = ...
 
 
 @dataclass(frozen=True)

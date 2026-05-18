@@ -31,15 +31,26 @@ class RawView:
         return self._lateness
 
     def recompute(self, jobs: list['Job'], on_hand: float) -> None:
-        # FIFO stream over (availability_time, lbs). Jobs are expected sorted
-        # by job.end (RlsItem maintains the invariant via bisect.insort).
-        # On-hand is available "now"; stamping it at the first order's due
-        # date keeps it on-time for every order without taking start_date as a
-        # caller-supplied param (which would let a caller make on-hand
-        # unavailable to some orders).
+        # FIFO stream over (availability_time, lbs). Each Job expands
+        # into one chunk per roll via `Job.rolls` (sequence of
+        # `(lbs, completion_time)` pairs) — rolls ship as they come off
+        # the machine rather than as a single bundle at `Job.end`, so
+        # the chunk granularity matches reality. Hand-constructed Jobs
+        # with empty `rolls` fall back to single-chunk-at-end.
+        #
+        # On-hand is available "now"; stamping it at the first order's
+        # due date keeps it on-time for every order without taking
+        # start_date as a caller-supplied param.
         first_due = self._orders[0].week.due_date
         stream: list[tuple[datetime, float]] = [(first_due, on_hand)]
-        stream.extend((j.end, j.lbs) for j in jobs)
+        for j in jobs:
+            if j.rolls:
+                stream.extend((t, lbs) for lbs, t in j.rolls)
+            else:
+                stream.append((j.end, j.lbs))
+        # Multiple machines producing the same item can interleave
+        # rolls in time; sort to keep the FIFO walk well-formed.
+        stream.sort(key=lambda e: e[0])
 
         chunk_idx = 0
         chunk_remaining = stream[0][1]
@@ -132,8 +143,16 @@ class SafetyAwareView:
         # Merge chunk arrivals with order drain events. Chunks (priority 0)
         # fire before drains (priority 1) at the same timestamp — material is
         # available at the start of the period, demand ships at the end.
+        # Each Job expands into one chunk per roll via `Job.rolls` so the
+        # drainage sim sees fabric arriving as rolls come off the machine
+        # rather than bundled at `Job.end`. Hand-constructed Jobs with empty
+        # `rolls` fall back to single-chunk-at-end.
         events: list[tuple[datetime, int, _EventQty]] = [(first_due, 0, ('chunk', on_hand))]
-        events.extend((j.end, 0, ('chunk', j.lbs)) for j in jobs)
+        for j in jobs:
+            if j.rolls:
+                events.extend((t, 0, ('chunk', lbs)) for lbs, t in j.rolls)
+            else:
+                events.append((j.end, 0, ('chunk', j.lbs)))
         events.extend(
             (order.week.due_date, 1, ('drain', order)) for order in self._orders
         )

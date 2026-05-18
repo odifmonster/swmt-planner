@@ -18,7 +18,7 @@ from swmtplanner.products import Greige
 # file so the safety-stock target matches real inputs.
 _DEFAULT_LEAD_TIME = timedelta(days=7)
 _FakeRlsItem = namedtuple('_FakeRlsItem', ['item', 'lead_time'], defaults=[_DEFAULT_LEAD_TIME])
-_FakeJob = namedtuple('_FakeJob', ['end', 'lbs'])
+_FakeJob = namedtuple('_FakeJob', ['end', 'lbs', 'rolls'], defaults=[()])
 
 
 _GREIGE_FIXTURE = Path(__file__).parent / 'data-files' / 'greige-styles.json'

@@ -55,6 +55,10 @@ class Machine(HasID[str]):
     def next_job_end(self) -> datetime: ...
     @property
     def next_runout(self) -> datetime: ...
+    def producible_lbs_through(
+        self, item: Greige, end: datetime,
+        start: datetime | None = ...,
+    ) -> float: ...
     def producible_lbs_in_week(
         self, item: Greige, year: int, week: int,
         start: datetime | None = ...,

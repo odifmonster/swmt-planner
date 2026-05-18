@@ -685,9 +685,36 @@ class PlanProductionLoopTests(unittest.TestCase):
         ])
 
     def test_top_exhausts_mid_roll_emits_waste(self):
-        # Synthetic item with tgt_wt=300 so producible 500 splits 300 + 200.
+        # Synthetic item with tgt_wt=300 (half-roll threshold = 150).
+        # init_top_lbs=160 ⇒ producible=400 = 1 roll + 100 partial.
+        # 100 < 150, so the partial is below the half-roll threshold
+        # and is discarded as Waste rather than folded into the Job.
         item_big_roll = Greige(
             'AU_BIG', family='A', tgt_wt=300.0,
+            top_beam='40D BLACK 1000X4', top_pct=0.4,
+            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+            safety=1000.0, machines={'M1': 100.0},
+        )
+        m = _make_machine(init_item=item_big_roll,
+                          init_top_lbs=160.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(item_big_roll, lbs=600.0,
+                                 start_at='next_job_end')
+        self.assertEqual(_shape(plan), [
+            ('Job', 300.0, 'AU_BIG'),     # 1 complete roll before top runs out
+            ('Waste', 100.0, 'AU_BIG'),   # sub-half partial, discarded
+            ('BeamLoad', 'top', 2800.0),
+            ('Job', 300.0, 'AU_BIG'),     # 1 more complete roll on the new beam
+        ])
+
+    def test_top_exhausts_mid_roll_yields_half_roll_plus_waste(self):
+        # tgt_wt=300 ⇒ half-roll target = 150 lbs. init_top_lbs=200 gives
+        # producible = 200/0.4 = 500 lbs = 1 whole roll (300) + 200 over.
+        # The over-200 partial doesn't fit a whole roll, and it's above
+        # the 150-lb half-roll target — so one half-roll of *exactly*
+        # 150 lbs is taken, and the remaining 50 lbs becomes Waste
+        # (yarn that fits in neither a full nor a half roll).
+        item_big_roll = Greige(
+            'AU_HALF', family='A', tgt_wt=300.0,
             top_beam='40D BLACK 1000X4', top_pct=0.4,
             btm_beam='60D WHITE 1000X4', btm_pct=0.6,
             safety=1000.0, machines={'M1': 100.0},
@@ -697,10 +724,10 @@ class PlanProductionLoopTests(unittest.TestCase):
         plan = m.plan_production(item_big_roll, lbs=600.0,
                                  start_at='next_job_end')
         self.assertEqual(_shape(plan), [
-            ('Job', 300.0, 'AU_BIG'),     # 1 complete roll before top runs out
-            ('Waste', 200.0, 'AU_BIG'),   # partial fabric, discarded
+            ('Job', 450.0, 'AU_HALF'),    # 1 whole roll (300) + 1 half-roll (150)
+            ('Waste', 50.0, 'AU_HALF'),   # over-half yarn that doesn't fit
             ('BeamLoad', 'top', 2800.0),
-            ('Job', 300.0, 'AU_BIG'),     # 1 more complete roll on the new beam
+            ('Job', 150.0, 'AU_HALF'),    # final-leg half-roll for remaining 150
         ])
 
     def test_btm_exhausts_at_roll_boundary(self):
@@ -775,10 +802,34 @@ class PlanProductionStartAtTests(unittest.TestCase):
         ])
 
     def test_next_runout_with_partial_roll_emits_waste_in_run_up(self):
-        # Current item has tgt_wt=300, top exhausts at 500 lbs producible.
-        # Run-up: Job(300) + Waste(200). Only top exhausted → single BeamLoad.
+        # Current item has tgt_wt=300 (half-roll threshold = 150).
+        # init_top_lbs=160 ⇒ producible=400 = 1 roll + 100 partial.
+        # 100 < 150, so the partial discards as Waste in the run-up
+        # rather than folding into the Job. Only top exhausted ⇒ a
+        # single BeamLoad before the StyleChange.
         item_big = Greige(
             'AU_RUN', family='A', tgt_wt=300.0,
+            top_beam='40D BLACK 1000X4', top_pct=0.4,
+            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+            safety=1000.0, machines={'M1': 100.0},
+        )
+        m = _make_machine(init_item=item_big,
+                          init_top_lbs=160.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Job', 300.0, 'AU_RUN'),
+            ('Waste', 100.0, 'AU_RUN'),
+            ('BeamLoad', 'top', 2800.0),
+            ('StyleChange', 'AU_RUN', 'AU0001', False),
+            ('Job', 100.0, 'AU0001'),
+        ])
+
+    def test_next_runout_with_half_roll_partial_in_run_up(self):
+        # Same setup as above (tgt_wt=300, init_top=200 ⇒ producible=500).
+        # The 200-lb partial is split: 150-lb half-roll into the run-up
+        # Job, 50-lb over-half remainder into Waste before the changeover.
+        item_big = Greige(
+            'AU_HRUN', family='A', tgt_wt=300.0,
             top_beam='40D BLACK 1000X4', top_pct=0.4,
             btm_beam='60D WHITE 1000X4', btm_pct=0.6,
             safety=1000.0, machines={'M1': 100.0},
@@ -787,10 +838,10 @@ class PlanProductionStartAtTests(unittest.TestCase):
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 300.0, 'AU_RUN'),
-            ('Waste', 200.0, 'AU_RUN'),
+            ('Job', 450.0, 'AU_HRUN'),    # 1 whole roll + 1 half-roll
+            ('Waste', 50.0, 'AU_HRUN'),   # over-half yarn that doesn't fit
             ('BeamLoad', 'top', 2800.0),
-            ('StyleChange', 'AU_RUN', 'AU0001', False),
+            ('StyleChange', 'AU_HRUN', 'AU0001', False),
             ('Job', 100.0, 'AU0001'),
         ])
 

@@ -192,6 +192,12 @@ class WorkCal:
                     total += (hi - lo).total_seconds() / 3600
             d += timedelta(days=1)
         return total
+    
+    def work_hours_before_weekend(self, start: datetime) -> float:
+        start -= self._cal_shift
+        end = start.date() + timedelta(days=7 - start.weekday())
+        end = datetime(end.year, end.month, end.day)
+        return self.get_work_hours_between(start, end)
 
     def offset_work_hours(self, start: datetime, hours: float):
         start -= self._cal_shift

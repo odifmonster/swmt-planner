@@ -39,6 +39,7 @@ def fresh_beam_lbs(beam: BeamSet) -> float:
 # multiple of tgt_wt within this tolerance to avoid spurious Waste
 # emissions at clean roll boundaries.
 _FLOAT_EPS = 1e-6
+_ROLL_TOLERANCE = 1e-2
 
 
 class Machine(HasID[str]):
@@ -132,30 +133,115 @@ class Machine(HasID[str]):
         hours = producible_before_runout / rate
         return self._workcal.offset_work_hours(s.as_of, hours)
 
+    def producible_lbs_through(
+        self, item: 'Greige', end: datetime,
+        start: datetime | None = None,
+    ) -> float:
+        """Returns the lbs of `item` the machine could produce in the
+        window `[start, end)`.
+
+        `start` is the earliest moment at which production may begin.
+        Defaults to `current_status.as_of`. Passing a later datetime
+        (e.g. `next_runout`, or a carrying-avoidance idle target) lets
+        the caller ask "if I delay production until this time, how
+        much fits?". `start` may not be earlier than
+        `current_status.as_of` (the machine can't time-travel) —
+        raises `ValueError` if so.
+
+        Accounts for required changeover preamble, mid-stream beam
+        reloads, and non-work hours via `workcal`, and rounds the
+        result down to a whole multiple of `item.tgt_wt`. Returns 0.0
+        if `start` is already past `end`, if the preamble alone
+        exceeds the window, or if the remaining time can't accommodate
+        a full roll.
+
+        Pure: does not mutate any machine state. Implementation
+        re-uses `plan_production` by asking for a generous upper bound
+        and tallying the lbs of `Job` activities whose execution
+        overlaps `[start, end)`."""
+        as_of = self._current_status.as_of
+        if start is not None and start < as_of:
+            raise ValueError(
+                f'start={start!r} is before machine\'s '
+                f'current_status.as_of ({as_of!r})'
+            )
+        effective_start = start if start is not None else as_of
+        if effective_start >= end:
+            return 0.0
+
+        rate = item.get_rate_on_mchn(self._id)
+        # Upper bound on plan_production's lbs argument: max producible
+        # if the entire `[as_of, end]` span were work hours at full
+        # rate, plus one roll of headroom. plan_production will simply
+        # produce more activities than we need; we truncate via the
+        # window check below.
+        span_hours = (end - as_of).total_seconds() / 3600
+        upper_lbs_bound = (
+            math.ceil(span_hours * rate / item.tgt_wt) * item.tgt_wt
+            + item.tgt_wt
+        )
+
+        # Bridge: idle from the machine's actual schedule tail (as_of)
+        # to the production-begin moment, `effective_start`. The bridge
+        # is measured in **work hours** so a non-work gap (weekend
+        # under a weekday workcal) collapses to zero and
+        # `plan_production` picks up at the next work moment naturally.
+        bridge_hours = self._workcal.get_work_hours_between(
+            as_of, effective_start,
+        )
+        idle_for = timedelta(hours=bridge_hours)
+        plan = self.plan_production(
+            item, upper_lbs_bound, start_at='next_job_end',
+            idle_for=idle_for,
+        )
+
+        # Tally lbs of `Job`s for `item` that overlap
+        # [effective_start, end). Activities other than Job (TapeOut,
+        # BeamLoad, StyleChange, Waste, Idle) consume time but produce
+        # nothing; their effect on production capacity is already
+        # reflected in subsequent Jobs' start times.
+        total_lbs = 0.0
+        for a in plan:
+            if a.start >= end:
+                break
+            if not isinstance(a, Job):
+                continue
+            if a.item != item:
+                continue
+            if a.end <= effective_start:
+                continue
+            win_start = max(a.start, effective_start)
+            win_end = min(a.end, end)
+            hours_in_window = self._workcal.get_work_hours_between(
+                win_start, win_end,
+            )
+            total_lbs += hours_in_window * rate
+
+        # Round down to whole rolls, snapping near-integer rolls (float
+        # drift from `min(top_lbs/top_pct, btm_lbs/btm_pct) * rate`
+        # chains).
+        n_rolls_exact = total_lbs / item.tgt_wt
+        n_rolls_rounded = round(n_rolls_exact)
+        if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
+            n_rolls = n_rolls_rounded
+        else:
+            n_rolls = math.floor(n_rolls_exact)
+        return max(0, n_rolls) * item.tgt_wt
+
     def producible_lbs_in_week(
         self, item: 'Greige', year: int, week: int,
         start: datetime | None = None,
     ) -> float:
-        """Returns the lbs of `item` the machine could produce within the
-        given ISO week (Monday 00:00 to next Monday 00:00).
+        """Returns the lbs of `item` the machine could produce within
+        the given ISO week (Monday 00:00 to next Monday 00:00).
 
-        `start` is the earliest moment at which production may begin.
-        Defaults to `current_status.as_of`. Passing a later datetime (e.g.
-        `next_runout`) lets the caller ask "if I delay production until
-        this time, how much fits?". `start` may not be earlier than
-        `current_status.as_of` (the machine can't time-travel) — raises
-        `ValueError` if so.
+        Thin wrapper over `producible_lbs_through`: snaps `start` up to
+        `week_start` if it falls before the week begins (so the bridge
+        idle covers the gap to the week's beginning), then asks for
+        the cap through `week_end`.
 
-        Accounts for required changeover preamble, mid-stream beam reloads,
-        non-work hours via `workcal`, and rounds the result down to a whole
-        multiple of `item.tgt_wt`. Returns 0.0 if the effective start is
-        already past `week_end`, if the preamble alone exceeds the window,
-        or if the remaining time can't accommodate a full roll.
-
-        Pure: does not mutate any machine state. Implementation re-uses
-        `plan_production` by asking for a generous upper bound and tallying
-        the lbs of `Job` activities whose execution falls within the
-        [week_start, week_end] window."""
+        `start` defaults to `current_status.as_of` and may not be
+        earlier than it — raises `ValueError` otherwise."""
         monday = date.fromisocalendar(year, week, 1)
         week_start = datetime(monday.year, monday.month, monday.day)
         week_end = week_start + timedelta(days=7)
@@ -167,66 +253,11 @@ class Machine(HasID[str]):
                 f'current_status.as_of ({as_of!r})'
             )
         effective_start = start if start is not None else as_of
-        if effective_start >= week_end:
-            return 0.0
-
-        rate = item.get_rate_on_mchn(self._id)
-        # Upper bound on plan_production's lbs argument: max producible if
-        # the entire 168 wall-clock hours of the week were work hours at
-        # full rate, plus one roll of headroom. plan_production will simply
-        # produce more activities than we need; we truncate via the window
-        # check below.
-        upper_lbs_bound = (
-            math.ceil(7 * 24 * rate / item.tgt_wt) * item.tgt_wt
-            + item.tgt_wt
+        # Snap to week_start if effective_start falls before the week.
+        effective_start = max(effective_start, week_start)
+        return self.producible_lbs_through(
+            item, end=week_end, start=effective_start,
         )
-
-        # Bridge: idle from the machine's actual schedule tail (as_of) to
-        # the production-begin moment, which is the later of
-        # `effective_start` and `week_start`. The bridge is measured in
-        # **work hours** so a non-work gap (weekend under a weekday
-        # workcal) collapses to zero and `plan_production` picks up at
-        # the next work moment naturally.
-        bridge_target = max(effective_start, week_start)
-        bridge_hours = self._workcal.get_work_hours_between(
-            as_of, bridge_target,
-        )
-        idle_for = timedelta(hours=bridge_hours)
-        plan = self.plan_production(
-            item, upper_lbs_bound, start_at='next_job_end',
-            idle_for=idle_for,
-        )
-
-        # Tally lbs of `Job`s for `item` that overlap [week_start, week_end].
-        # Activities other than Job (TapeOut, BeamLoad, StyleChange, Waste,
-        # Idle) consume time but produce nothing; their effect on production
-        # capacity is already reflected in subsequent Jobs' start times.
-        total_lbs = 0.0
-        for a in plan:
-            if a.start >= week_end:
-                break
-            if not isinstance(a, Job):
-                continue
-            if a.item != item:
-                continue
-            if a.end <= week_start:
-                continue
-            window_start = max(a.start, week_start)
-            window_end = min(a.end, week_end)
-            hours_in_window = self._workcal.get_work_hours_between(
-                window_start, window_end,
-            )
-            total_lbs += hours_in_window * rate
-
-        # Round down to whole rolls, snapping near-integer rolls (float
-        # drift from `min(top_lbs/top_pct, btm_lbs/btm_pct) * rate` chains).
-        n_rolls_exact = total_lbs / item.tgt_wt
-        n_rolls_rounded = round(n_rolls_exact)
-        if abs(n_rolls_rounded - n_rolls_exact) < _FLOAT_EPS:
-            n_rolls = n_rolls_rounded
-        else:
-            n_rolls = math.floor(n_rolls_exact)
-        return max(0, n_rolls) * item.tgt_wt
 
     def status_at(self, t: datetime) -> Status:
         """Status at time `t`. Walks activities whose `end <= t`, then sets
@@ -316,21 +347,23 @@ class Machine(HasID[str]):
     # ----- private plan_production helpers -----
 
     def _emit_run_up(self, emitted: list[Activity], working: Status) -> Status:
-        """Produce `working.current_item` until a beam exhausts. Emits
-        complete-roll `Job`(s) and a `Waste` for any partial. Returns the
-        working status after the run-up (at least one beam at 0 lbs)."""
+        """Produce `working.current_item` until a beam exhausts. Emits a
+        `Job` for whole rolls plus any half-roll-or-larger partial, and a
+        `Waste` for any sub-half-roll partial — see `_split_roll` for the
+        rule. Returns the working status after the run-up (at least one
+        beam at 0 lbs)."""
         cur = working.current_item
         cfg = cur.configuration
         producible = min(
             working.top_lbs_remaining / cfg.top_pct,
             working.btm_lbs_remaining / cfg.btm_pct,
         )
-        complete_rolls_lbs, partial_lbs = _split_roll(producible, cur.tgt_wt)
+        job_lbs, waste_lbs = _split_roll(producible, cur.tgt_wt)
 
-        if complete_rolls_lbs > 0:
-            working = self._emit_job(emitted, working, cur, complete_rolls_lbs)
-        if partial_lbs > 0:
-            working = self._emit_waste(emitted, working, cur, partial_lbs)
+        if job_lbs > 0:
+            working = self._emit_job(emitted, working, cur, job_lbs)
+        if waste_lbs > 0:
+            working = self._emit_waste(emitted, working, cur, waste_lbs)
         return _clamp_zero_lbs(working)
 
     def _emit_preamble(
@@ -425,12 +458,15 @@ class Machine(HasID[str]):
                 return
 
             # Producible < remaining — produce up to runout, then reload.
-            complete_rolls_lbs, partial_lbs = _split_roll(producible, item.tgt_wt)
-            if complete_rolls_lbs > 0:
-                working = self._emit_job(emitted, working, item, complete_rolls_lbs)
-                remaining -= complete_rolls_lbs
-            if partial_lbs > 0:
-                working = self._emit_waste(emitted, working, item, partial_lbs)
+            # The `_split_roll` partition applies the half-roll rule:
+            # the partial counts as a smaller-than-target usable roll
+            # (Job) when at or above `tgt_wt / 2`, else as Waste.
+            job_lbs, waste_lbs = _split_roll(producible, item.tgt_wt)
+            if job_lbs > 0:
+                working = self._emit_job(emitted, working, item, job_lbs)
+                remaining -= job_lbs
+            if waste_lbs > 0:
+                working = self._emit_waste(emitted, working, item, waste_lbs)
 
             working = _clamp_zero_lbs(working)
 
@@ -454,7 +490,12 @@ class Machine(HasID[str]):
         rate = item.get_rate_on_mchn(self._id)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
-        emitted.append(Job(start=start, end=end, item=item, lbs=lbs))
+        rolls = _compute_rolls(
+            start, lbs, rate, item.tgt_wt, self._workcal,
+        )
+        emitted.append(Job(
+            start=start, end=end, item=item, lbs=lbs, rolls=rolls,
+        ))
         return working.apply_activity(emitted[-1])
 
     def _emit_waste(
@@ -522,16 +563,115 @@ class Machine(HasID[str]):
 
 
 def _split_roll(producible: float, tgt_wt: float) -> tuple[float, float]:
-    """Split `producible` lbs into (complete_rolls_lbs, partial_lbs). Snaps
-    to nearest multiple of `tgt_wt` within `_FLOAT_EPS` to avoid spurious
-    partials from float division drift (e.g., 200/0.4 == 499.99…)."""
-    n_rolls_exact = producible / tgt_wt
+    """Decide how a beam-runout's `producible` lbs of yarn should be
+    split between a `Job` and a `Waste` under the half-roll rule.
+
+    The plant ships only whole rolls (~`tgt_wt` lbs each) or half rolls
+    (~`tgt_wt / 2` lbs each), with each roll's weight within
+    `_ROLL_TOLERANCE * tgt_wt` lbs of its target. Yarn that doesn't fit
+    those two discrete sizes is waste.
+
+    Returns `(job_lbs, waste_lbs)`:
+
+    - `job_lbs` is the lbs to emit as a `Job` — N whole rolls of
+      `tgt_wt` each, optionally followed by one half-roll of
+      `tgt_wt / 2`. For example, `producible=500` with `tgt_wt=700`
+      yields one 350-lb half-roll, so `job_lbs = 350`.
+    - `waste_lbs` is yarn that doesn't fit in a full or half roll:
+      either yarn beyond `tgt_wt / 2` past the last whole roll, or
+      yarn below the half-roll tolerance band. For the same example,
+      `waste_lbs = 500 - 350 = 150`.
+
+    Float-drift handling: a `producible` within tolerance of either
+    `N * tgt_wt` or `N * tgt_wt + tgt_wt / 2` snaps to that target —
+    the actual `producible` lbs is preserved in `job_lbs` so mass
+    conservation holds (`job_lbs + waste_lbs == producible` always)."""
+    half = tgt_wt / 2
+    tol_lbs = _ROLL_TOLERANCE * tgt_wt
+
+    n_full = int(producible / tgt_wt)
+    remainder = producible - n_full * tgt_wt
+
+    # Remainder close to `tgt_wt` (snap up: treat as N+1 near-full
+    # rolls collectively weighing exactly `producible` lbs).
+    if tgt_wt - remainder < tol_lbs:
+        return producible, 0.0
+
+    # Remainder close to 0 (clean N-whole-roll count + drift). The
+    # drift goes to Waste so mass conservation holds and the runout's
+    # constraint bar still gets consumed to zero downstream.
+    if remainder < tol_lbs:
+        return n_full * tgt_wt, remainder
+
+    # Remainder close to `tgt_wt / 2` (half-roll within tolerance).
+    if abs(remainder - half) < tol_lbs:
+        return producible, 0.0
+
+    # Remainder above the half-roll target: take exactly `tgt_wt / 2`
+    # as a half-roll, discard the rest as Waste.
+    if remainder > half:
+        return n_full * tgt_wt + half, remainder - half
+
+    # Remainder below the half-roll target (minus tolerance): too
+    # small for a half-roll, all Waste.
+    return n_full * tgt_wt, remainder
+
+
+def _compute_rolls(
+    start: datetime, lbs: float, rate: float, tgt_wt: float,
+    workcal: 'WorkCal',
+) -> tuple[tuple[float, datetime], ...]:
+    """Break a Job's total `lbs` into a sequence of per-roll deliveries
+    `((roll_lbs, completion_time), ...)`. Each entry is either a whole
+    roll (`tgt_wt` lbs, within tolerance) or a half-roll
+    (`tgt_wt / 2`, within tolerance). The per-entry lbs sum to exactly
+    `lbs` (mass conservation); when the total snaps to a clean N-roll
+    count under `_ROLL_TOLERANCE`, the lbs are distributed evenly
+    across the N rolls. Completion times respect `workcal`.
+
+    Inputs are expected to come from `_emit_job`, where `lbs` is
+    already shaped by `_split_roll`'s half-roll rule — so a non-snap
+    `lbs` either has a clean half-roll partial (`tgt_wt / 2` ±
+    tolerance) or is a single sub-tgt_wt final-leg residual."""
+    rolls: list[tuple[float, datetime]] = []
+    cumulative = 0.0
+
+    # Snap to clean N-roll count if close. Distribute lbs equally
+    # across the N rolls so the sum exactly matches `lbs` (vs. emitting
+    # N rolls of `tgt_wt` each which would over- or under-count by the
+    # snap delta).
+    n_rolls_exact = lbs / tgt_wt
     n_rolls_rounded = round(n_rolls_exact)
-    if abs(n_rolls_rounded - n_rolls_exact) < _FLOAT_EPS:
-        return n_rolls_rounded * tgt_wt, 0.0
-    n_rolls_floor = int(n_rolls_exact)
-    complete = n_rolls_floor * tgt_wt
-    return complete, producible - complete
+    if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
+        if n_rolls_rounded == 0:
+            return ()
+        roll_lbs = lbs / n_rolls_rounded
+        for _ in range(n_rolls_rounded):
+            cumulative += roll_lbs
+            rolls.append((
+                roll_lbs,
+                workcal.offset_work_hours(start, cumulative / rate),
+            ))
+        return tuple(rolls)
+
+    # Non-snap: `floor(lbs / tgt_wt)` whole rolls plus one partial.
+    # The partial is normally a half-roll (~`tgt_wt / 2`) produced by
+    # `_split_roll`'s half-roll fold, but can be a sub-tgt_wt residual
+    # in the production loop's final-leg case.
+    n_full = int(n_rolls_exact)
+    for _ in range(n_full):
+        cumulative += tgt_wt
+        rolls.append((
+            tgt_wt, workcal.offset_work_hours(start, cumulative / rate),
+        ))
+    residual = lbs - cumulative
+    if residual > _FLOAT_EPS:
+        cumulative += residual
+        rolls.append((
+            residual,
+            workcal.offset_work_hours(start, cumulative / rate),
+        ))
+    return tuple(rolls)
 
 
 def _clamp_zero_lbs(working: Status) -> Status:

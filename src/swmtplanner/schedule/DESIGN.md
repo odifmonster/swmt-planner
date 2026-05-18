@@ -124,6 +124,7 @@ Machine (HasID)
   plan_production(item, lbs, start_at, idle_for=timedelta(0)) -> list[Activity]
   add_activities(activities) -> None
   # capacity + stopping-point queries
+  producible_lbs_through(item, end, start=None) -> float
   producible_lbs_in_week(item, year, week, start=None) -> float
   next_job_end: datetime
   next_runout: datetime
@@ -200,25 +201,41 @@ that distinguishes family changes from simple ones.
 
 ## Roll-level production
 
-The plant produces whole rolls only. `Greige.tgt_wt` is the lbs per roll for a
-given item.
+The plant ships only two roll sizes: **whole rolls** of ~`Greige.tgt_wt`
+lbs and **half rolls** of ~`tgt_wt / 2` lbs, each within tolerance of
+its target weight. Yarn that doesn't fit those two discrete sizes is
+waste.
 
-- `Job.lbs` is **always a multiple of `item.tgt_wt`**.
-- When a beam exhausts in the middle of a roll, the partial fabric is
-  discarded. The machine still runs the time to produce those lbs, so they
-  are recorded as a `Waste` activity.
-- `Waste.lbs` is the partial-roll amount; its duration is calculated at the
-  same production rate as a `Job`.
-- After a `Waste`, no doffing / cleanup activity is emitted — the time cost
-  of clearing the partial fabric is negligible (< 1 minute) and is ignored.
+When a beam exhausts mid-stream, the **half-roll rule** in
+`_split_roll` partitions the remaining producible yarn:
 
-`plan_production` is called with `lbs` already a multiple of `tgt_wt` (the
-demand layer plans in whole-roll quantities, since all real orders are for
-full rolls).
+- Producible close to `tgt_wt / 2`: yield one half-roll of that weight.
+  Example: `producible=350, tgt_wt=700` ⇒ one 350-lb half-roll.
+- Producible above the half-roll target: yield one half-roll of
+  exactly `tgt_wt / 2`, the over-half remainder becomes Waste. Example:
+  `producible=500, tgt_wt=700` ⇒ one 350-lb half-roll plus 150 lbs of
+  Waste.
+- Producible below the half-roll target (minus tolerance): too small
+  for any roll, all Waste. Example: `producible=14, tgt_wt=700` ⇒ 14
+  lbs of Waste.
+- Producible near `N * tgt_wt` (within tolerance): N whole rolls
+  summing to exactly `producible` lbs (each roll's weight may sit
+  within tolerance of `tgt_wt`).
+
+A Job's lbs is always whole rolls + at most one half-roll. `Job.rolls`
+is the per-roll breakdown (see `Job` in `activity.py`). `Waste.lbs`
+covers the discarded yarn; its duration is calculated at the same
+production rate as a Job, and no doffing / cleanup activity is emitted
+afterward.
+
+`plan_production` is called with `lbs` already a multiple of `tgt_wt`
+(the demand layer plans in whole-roll quantities, since all real orders
+are for full rolls). The half-roll rule applies only to runout-induced
+partials inside the production loop, not to the request shape.
 
 Only `Job` activities reach the demand layer. `Waste` shows up on the
-schedule for accurate machine occupation and end-time calculation but is
-never registered with an `RlsItem`.
+schedule for accurate machine occupation and end-time calculation but
+is never registered with an `RlsItem`.
 
 ## The `plan_production` walk
 
@@ -350,32 +367,40 @@ because production rate is item × machine specific — only the schedule layer
 knows how much each machine can deliver.
 
 ```
+machine.producible_lbs_through(item, end, start=None) -> float
 machine.producible_lbs_in_week(item, year, week, start=None) -> float
 ```
 
-Returns the lbs of `item` the machine could produce within the given ISO
-week, starting at the earliest of `start` (if provided) or
-`current_status.as_of`, but never earlier than the schedule tail and
-never earlier than the week boundary. Accounts for:
+`producible_lbs_through` returns the lbs of `item` the machine could
+produce in the window `[start, end)`, starting at `start` (if provided)
+or `current_status.as_of` and ending at `end`. Accounts for:
 
 - Required changeover preamble if the machine's threaded state doesn't
   already match `item` (tape-outs, beam-loads, style-change).
 - Mid-stream beam swaps within the window (each consumes
-  `BEAM_LOAD_DURATION` only — natural exhaustion doesn't require taping the
-  exhausted bar).
-- `workcal` — only counts actual work hours in the window, starting no
-  earlier than `max(current_status.as_of, start, week_start)` and ending no
-  later than the week boundary.
+  `BEAM_LOAD_DURATION` only — natural exhaustion doesn't require taping
+  the exhausted bar).
+- `workcal` — only counts actual work hours in the window.
 - Rounds down to a whole multiple of `item.tgt_wt`.
 
-`start` lets the planner ask "if I delay production until time T, how much
-of this item fits in the week?". Common values are `current_status.as_of`
-(the default; equivalent to `start=None`) and `next_runout` (use the
-runout time as the effective start). `start < current_status.as_of` is
-rejected — production can't begin before the machine is ready.
+`start` lets the planner ask "if I delay production until time T, how
+much of this item fits between now and `end`?". Common values are
+`current_status.as_of` (the default; equivalent to `start=None`),
+`next_runout`, and a carrying-avoidance idle target. `start <
+current_status.as_of` is rejected — production can't begin before the
+machine is ready.
 
-Returns 0 if the changeover preamble alone exceeds the available hours, or if
-the resulting capacity is less than one full roll.
+Returns 0 if `start >= end`, if the changeover preamble alone exceeds
+the available hours, or if the resulting capacity is less than one
+full roll.
+
+`producible_lbs_in_week` is a thin wrapper that picks `end =
+week_end` for a given ISO week and snaps `start` up to `week_start`
+if it falls earlier. It's preserved as a convenience for callers
+that naturally think in ISO weeks. The infinite planner's candidate
+enumerator uses `producible_lbs_through` directly, with a
+conditional one-week bump when the current-week cap would be 0 — see
+"Move sizing" in `planners/infinite/DESIGN.md`.
 
 This is a **reporting** call. It does not cap or constrain `plan_production`.
 The scheduler is responsible for sizing the `lbs` it passes to

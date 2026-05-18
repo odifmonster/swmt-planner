@@ -61,3 +61,7 @@ class WorkCal:
         """Get the available work hours between the two datetimes, skipping
         weekends and holidays."""
         ...
+    def work_hours_before_weekend(self, start: datetime) -> float:
+        """Get the work hours available between the start date and the end of
+        that week."""
+        ...

@@ -306,19 +306,36 @@ For each (machine, decision_point, item, order) tuple, the move's lbs
 is:
 
 ```
+effective_start = decision_point + carrying_avoidance_idle (work hours)
+cap_end          = end of ISO week containing effective_start
+producible_cap   = machine.producible_lbs_through(
+                       item, end=cap_end, start=effective_start)
+if producible_cap == 0:
+    cap_end       = cap_end + 7 days   # bump to end of next ISO week
+    producible_cap = machine.producible_lbs_through(
+                       item, end=cap_end, start=effective_start)
 move.lbs = min(
     order_lbs,    # remaining_lbs of the regular order, OR
                   # safety_target - safety_pool for the safety order
-    machine.producible_lbs_in_week(item, year, week,
-                                    start=decision_point),
+    producible_cap,
 )
 ```
 
-where `(year, week)` is the ISO week containing `decision_point`. The
-cap is computed from `decision_point` through the end of that week,
-accounting for the required preamble, any forced idle (below), and beam
-reloads. `Machine.producible_lbs_in_week` was extended with the optional
-`start` parameter specifically to support this query.
+The default cap window is `[effective_start, end_of_iso_week)`. When
+that window doesn't admit even a single full roll (e.g., the
+schedule tail landed late on a Friday with most of the week's work
+hours already consumed), the cap end is bumped forward by one week
+so a tightly-loaded machine doesn't get artificially excluded from
+contention. Without the bump, the enumerator would filter the
+candidate out (`n_rolls <= 0`), and the loop would have to advance
+the decision window past this machine entirely; with the bump, the
+planner can commit a sensible chunk of next week's work on it.
+
+`Machine.producible_lbs_through(item, end, start)` accounts for the
+required preamble, any forced idle (below), mid-stream beam reloads,
+and non-work hours via `workcal`. The legacy
+`Machine.producible_lbs_in_week(item, year, week, start)` remains as
+a thin wrapper for callers that want a single-ISO-week cap.
 
 ### Forced idle for carrying-cost avoidance (regular orders only)
 

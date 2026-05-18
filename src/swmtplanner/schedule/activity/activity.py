@@ -45,12 +45,32 @@ class Activity(HasID[str]):
 
 @dataclass(frozen=True)
 class Job(Activity):
-    """Productive activity. lbs is always a multiple of item.tgt_wt so a job
-    represents whole rolls only. Partial-roll fabric produced when a beam
-    exhausts mid-roll is recorded as a separate Waste activity, not folded
-    into Job.lbs."""
+    """Productive activity. The plant ships only whole rolls
+    (~`item.tgt_wt` lbs each) or half rolls (~`item.tgt_wt / 2`),
+    within tolerance — so `Job.lbs` is normally `N * tgt_wt` (N
+    whole rolls) or `N * tgt_wt + tgt_wt / 2` (N whole + a half-roll
+    from a beam runout). The half-roll rule lives in `_split_roll`
+    in `schedule/machine/machine.py`. Yarn that doesn't fit those
+    sizes — over-half scraps or sub-half tails at a runout — is
+    emitted as a separate `Waste` activity, never folded into
+    `Job.lbs`.
+
+    `rolls` is the per-roll delivery schedule: a tuple of
+    `(lbs, completion_time)` pairs, one per physical roll coming off
+    the machine, in chronological order. Each entry is either a whole
+    roll (`tgt_wt` ± tolerance) or a half-roll (`tgt_wt / 2` ±
+    tolerance); their lbs sum to exactly `Job.lbs`. The demand layer
+    reads `rolls` rather than treating the whole `Job.lbs` as
+    delivered at `Job.end`, since the dyeing plant is on the same
+    campus and rolls ship as they come off — lateness is per-roll,
+    not per-Job.
+
+    Defaults to `()` so hand-constructed `Job`s in tests continue to
+    work; the demand views treat an empty `rolls` as a single chunk
+    at `Job.end` (the pre-`rolls` behavior)."""
     item: 'Greige'
     lbs: float
+    rolls: tuple[tuple[float, datetime], ...] = ()
     _count: int = field(default_factory=_JOB_ID, init=False)
 
     @property
@@ -60,9 +80,11 @@ class Job(Activity):
 
 @dataclass(frozen=True)
 class Waste(Activity):
-    """Partial-roll fabric produced when a beam exhausts mid-roll. Time and
-    lbs are real (the machine ran) but the fabric is discarded and never
-    reaches the demand layer."""
+    """Sub-half-roll partial fabric produced when a beam exhausts
+    mid-roll. Time and lbs are real (the machine ran) but the fabric
+    is too small to keep and is discarded; never reaches the demand
+    layer. Partials at or above `tgt_wt / 2` are emitted as `Job`
+    activities instead — see `Job` and `_split_roll`."""
     item: 'Greige'
     lbs: float
     _count: int = field(default_factory=_WASTE_ID, init=False)

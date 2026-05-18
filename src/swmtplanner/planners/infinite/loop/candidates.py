@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from swmtplanner.planners.infinite.state import Move, State
@@ -103,16 +103,20 @@ def enumerate_candidates(state: State) -> list[Move]:
             idle_for = timedelta(hours=idle_hours)
 
             # Effective production-begin time after any leading idle.
-            # We hand this to `producible_lbs_in_week` as `start`, and
-            # use its ISO week as the cap window.
             effective_start = machine.workcal.offset_work_hours(
                 dp.time, idle_hours,
             )
 
-            iso_year, iso_week, _ = effective_start.isocalendar()
-
-            producible_cap = machine.producible_lbs_in_week(
-                order.item, iso_year, iso_week, start=effective_start,
+            # Cap window: normally `effective_start` through the end
+            # of the ISO week containing it. But if that window can't
+            # fit even one full roll (e.g., the schedule tail landed
+            # late Friday with not enough work hours left for a
+            # roll), bump the cap end to the end of the *following*
+            # ISO week so a tightly-loaded machine doesn't get
+            # artificially excluded from contention. The decision-
+            # window mechanism still spreads work across machines.
+            producible_cap = _producible_cap_with_bumpup(
+                machine, order.item, effective_start,
             )
 
             # Round min(order_lbs, producible_cap) down to whole rolls.
@@ -145,3 +149,41 @@ def enumerate_candidates(state: State) -> list[Move]:
             ))
 
     return out
+
+
+def _end_of_iso_week(t: datetime) -> datetime:
+    """End of the ISO week containing `t` — i.e., the start of the
+    following ISO week (Monday 00:00). Used as the default right edge
+    of the producible-cap window."""
+    iso_year, iso_week, _ = t.isocalendar()
+    monday = date.fromisocalendar(iso_year, iso_week, 1)
+    return datetime(monday.year, monday.month, monday.day) + timedelta(days=7)
+
+
+def _producible_cap_with_bumpup(
+    machine, item, effective_start: datetime,
+) -> float:
+    """Producible lbs from `effective_start` through the end of its
+    ISO week, with one-week bump-up when that window can't fit a
+    single roll.
+
+    The default cap window is `[effective_start, end_of_iso_week)`.
+    If `producible_lbs_through` returns 0 for that window — i.e., the
+    remaining work hours (after preamble) aren't enough to produce
+    even one full roll of `item` — we extend the cap end by 7 days
+    so the schedule tail doesn't artificially exclude this
+    (machine, item) pair from contention. A machine ending its
+    schedule late on a Friday should still be able to commit a
+    sensible chunk of next week's work; the alternative (returning
+    0 here) would force the loop to advance the decision window past
+    this machine entirely."""
+    current_week_end = _end_of_iso_week(effective_start)
+    cap = machine.producible_lbs_through(
+        item, end=current_week_end, start=effective_start,
+    )
+    if cap > 0:
+        return cap
+    next_week_end = current_week_end + timedelta(days=7)
+    return machine.producible_lbs_through(
+        item, end=next_week_end, start=effective_start,
+    )

@@ -1379,6 +1379,42 @@ class CandidateEnumerationTests(unittest.TestCase):
         # No tape-outs anywhere in the plan.
         self.assertFalse(any(isinstance(a, TapeOut) for a in mv.plan))
 
+    def test_enumerate_candidates_cap_bumpup_to_next_week(self):
+        # When `effective_start` lands so late in its ISO week that the
+        # rest-of-week window can't fit even one full roll, the
+        # enumerator extends the cap window through the end of the
+        # *next* ISO week. Without this bump, `n_rolls = 0` would
+        # filter the candidate out and the loop would have to advance
+        # the decision window past this machine entirely.
+        #
+        # Setup: machine starts Sunday 23:30 of ISO week 21 — just 30
+        # minutes before end-of-week. At rate=100 lbs/hr / tgt_wt=100,
+        # 30 min = 50 lbs = 0 rolls. The default current-week cap is 0,
+        # which triggers the bump.
+        # Beams are huge so the bumped window (Sun 23:30 of week 21 →
+        # Mon 00:00 of week 23) is cap-bounded by hours alone:
+        # 7 days + 30 min = 168.5h × 100 lbs/h = 16850 lbs, floored to
+        # 168 whole rolls × 100 = 16800 lbs.
+        start = _START + timedelta(days=6, hours=23, minutes=30)
+        machine = Machine(
+            'M1', _T1, start,
+            _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
+            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+        )
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[1_000_000.0, 0.0, 0.0, 0.0],
+        )
+        state = _make_state(
+            machines={'M1': machine},
+            rls_items={_T1.id: rls},
+            window_end=start,
+        )
+        moves = enumerate_candidates(state)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0].lbs, 16800.0)
+
 
 # --- 1.4 Main loop --------------------------------------------------------
 
