@@ -75,6 +75,21 @@ class State:
     planning_horizon_buffer: timedelta = field(
         default_factory=lambda: timedelta(weeks=4),
     )
+    # --- Phase 2: priority-assignment reference week ---
+    # The right edge of the "urgent" bucket in `assign_priorities`. Orders
+    # with `week_idx <= reference_week_idx` are urgent regulars (rank above
+    # any safety order); orders past it are future regulars (rank below
+    # safety). Starts at 1 — next week's demand should be in production
+    # this week — and the main loop advances it forward as urgent items
+    # get filled.
+    reference_week_idx: int = 1
+    # How many weeks `advance_reference_week()` advances per call.
+    reference_advance_amount: int = 1
+    # Minimum count of items with at least one unmet RegularOrder at or
+    # before reference_week_idx. When this falls below the threshold, the
+    # main loop calls `advance_reference_week()` until met or until the
+    # reference week exceeds the latest order's week_idx.
+    reference_threshold: int = 5
 
     def commit_move(self, move: Move) -> None:
         """Apply `move` to the appropriate machine and rls_items. All
@@ -98,3 +113,12 @@ class State:
         by the main loop when in-window candidate count falls below the
         configured threshold (or when the pool is fully drained)."""
         self.window_end += self.window_advance_amount
+
+    def advance_reference_week(self) -> None:
+        """Extend `reference_week_idx` forward by
+        `reference_advance_amount`. Called by the main loop's reference-
+        week-advance step when the count of items with at least one
+        unmet `RegularOrder` at or before `reference_week_idx` falls
+        below `reference_threshold` (see `coordination.assign_priorities`
+        for how the reference week feeds into the priority sort)."""
+        self.reference_week_idx += self.reference_advance_amount

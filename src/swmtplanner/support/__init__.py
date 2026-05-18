@@ -6,5 +6,8 @@ from .observer import Observer
 from .linkedlist import LinkedList
 
 WorkCal = workcal.WorkCal
+load_workcal = workcal.load_workcal
 
-__all__ = ['HasID', 'Observer', 'workcal', 'WorkCal', 'LinkedList']
+__all__ = [
+    'HasID', 'Observer', 'workcal', 'WorkCal', 'load_workcal', 'LinkedList',
+]

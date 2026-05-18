@@ -422,6 +422,32 @@ next_runout = workcal.offset_work_hours(current_status.as_of, hours)
 as activities on the machine's schedule yet — it just describes when the
 current beam state, run forward, would force a swap.
 
+## File I/O
+
+The schedule submodule owns its own input format for machine setups.
+Exported reader:
+
+```
+read_machines(
+    path: Path, *, start_date: datetime, workcal: WorkCal,
+    greige_by_id: dict[str, Greige],
+) -> dict[str, Machine]
+```
+
+`path` points to a JSON file with one entry per machine. Per-entry
+fields: machine id, initial item (resolved against `greige_by_id`),
+the lbs remaining on each bar (`init_top_lbs`, `init_btm_lbs`),
+`style_change_time` and `family_change_time` (decimal hours), and
+`is_new`. The initial top and bottom beam yarns are *not* in the file
+— they're derived from the resolved `Greige`'s `configuration`, since
+a machine currently set up to run an item is by definition threaded
+with that item's beams. `start_date` and `workcal` are plant-wide
+rather than per-machine, so they're passed alongside the path.
+
+No writer is exported from `schedule/`: per-machine schedules in the
+output Excel are written by the top-level CLI from the `PlanReport`,
+not by the schedule module itself.
+
 ## Test-placement contract
 
 `plan_production` is pure; it returns a list of activities anchored against

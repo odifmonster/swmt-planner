@@ -1,7 +1,11 @@
 from .holidays import FlexDate, FixedDate, load_holidays
 from datetime import date, datetime
+from pathlib import Path
 
-__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal']
+__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal', 'load_workcal']
+
+
+def load_workcal(path: str | Path) -> WorkCal: ...
 
 class WorkCal:
     """Convenience class for handling date math across business days/hours.

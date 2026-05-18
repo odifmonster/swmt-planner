@@ -2,5 +2,6 @@
 
 from .holidays import *
 from .workcal import WorkCal
+from .io import load_workcal
 
-__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal']
+__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal', 'load_workcal']

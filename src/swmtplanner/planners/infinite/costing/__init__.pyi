@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from swmtplanner.planners.infinite.state import Move, State
 
-__all__ = ['CostWeights', 'Costing']
+__all__ = ['CostWeights', 'Costing', 'load_weights']
 
 
 @dataclass
@@ -23,3 +24,6 @@ class Costing:
     def weights(self) -> CostWeights: ...
     def score(self, state: State) -> float: ...
     def score_after_move(self, state: State, move: Move) -> float: ...
+
+
+def load_weights(path: str | Path) -> CostWeights: ...

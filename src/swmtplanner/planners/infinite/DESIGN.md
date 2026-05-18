@@ -48,9 +48,10 @@ takes them ready-made.
 
 ## High-level structure
 
-Three modules under `infinite/`. Each has a single, well-defined
+Four modules under `infinite/`. Each has a single, well-defined
 responsibility, and the main loop only knows the surface of each rather
-than the internals.
+than the internals. `coordination/` is Phase 2; the other three are
+Phase 1.
 
 ### `state/`
 
@@ -158,6 +159,17 @@ anything — built on `RlsItem.cost_if(jobs)` for the demand-side
 contributions, on inspecting `move.plan` for the schedule-side
 changeover contributions, and on the `ctx` lookups for the cross-
 cutting contributions.
+
+### `coordination/` (Phase 2)
+
+Plant-wide relationships across candidate orders and decision points.
+Holds the cross-cutting identity (`OrderKey`), the scoring bundle
+(`ScoringContext`), and the priority ranker (`assign_priorities`). The
+costing layer consumes a `ScoringContext` but doesn't own its
+construction — `coordination/` does, so the priority sort and the
+shape of the cross-candidate inputs can evolve without touching
+`costing/` or `loop/`. See "Plant-wide coordination" below for the
+mechanism.
 
 ### `loop/`
 
@@ -345,15 +357,30 @@ Phase 2 adds two cross-candidate scoring concerns — priority assignment
 and level-loading. Both score each candidate against the others in the
 same iteration's pool (rather than against one rls_item or machine in
 isolation), and both feed into a `ScoringContext` that the main loop
-builds once per iteration and hands to `Costing.score_after_move`:
+builds once per iteration and hands to `Costing.score_after_move`.
+
+The related types and the priority-assignment function live in
+`planners/infinite/coordination/`:
 
 ```
+OrderKey
+  item_id: str
+  week_idx: int | None              # None ⇒ safety order
+
 ScoringContext
-  priorities: dict[OrderKey, int]    # for priority assignment
-  earliest_dp_time: datetime         # for level-loading
+  priorities: dict[OrderKey, int]   # for priority assignment
+  earliest_dp_time: datetime        # for level-loading
+
+assign_priorities(state: State) -> dict[OrderKey, int]
 ```
 
-See the two sections below for the details.
+The submodule is the natural home for everything that *defines
+relationships across the plant*: the `OrderKey` identity, the
+plant-wide priority sort, and the bundle the scorer reads from. Level-
+loading's only cross-candidate input is `earliest_dp_time`, which the
+main loop computes inline as `min(dp_time(c) for c in candidates)`
+when building the context — see the two sections below for the
+details.
 
 ## Priority assignment
 
@@ -361,17 +388,8 @@ The planner ranks every eligible order each iteration of the main
 loop and adds `rank × w.priority` to each `Move`'s score. Rank 1 is
 highest priority (lowest cost contribution); lower-ranked candidates
 lose to their higher-ranked siblings unless some other cost component
-shifts the balance.
-
-Lives in `planners/infinite/priority/`, exposing:
-
-```
-OrderKey
-  item_id: str
-  week_idx: int | None    # None ⇒ safety order
-
-assign_priorities(state: State) -> dict[OrderKey, int]
-```
+shifts the balance. The ranking function is `assign_priorities` in
+`coordination/` (see above).
 
 ### Priority order
 
@@ -478,6 +496,45 @@ report = plan(state, costing)
 The post-call `state` is the deliverable — machines now carry the
 committed activities, rls_items now carry the registered jobs.
 
+## CLI entry point
+
+A `typer` app in `planners/infinite/cli.py` runs the planner end-to-
+end. Invocation shape:
+
+```
+swmt-infinite-plan \
+    --products path/to/greige.xlsx \
+    --demand path/to/demand.xlsx \
+    --machines path/to/machines.xlsx \
+    --weights path/to/weights.json \
+    --start-date 2026-05-18 \
+    --workcal path/to/workcal.json \
+    --output path/to/plan.xlsx
+```
+
+The CLI is glue: it reads each input via the appropriate submodule's
+reader (`products.read_greige_styles`, `demand.read_rls_items`,
+`schedule.read_machines`), reads weights and workcal config, builds
+the `State` and `Costing`, calls `plan(state, costing)`, and writes
+the resulting `PlanReport` to a single Excel workbook.
+
+Output workbook layout:
+
+- **One sheet per machine** — chronological activity list with
+  start, end, duration, activity type, item, and lbs columns.
+- **One sheet per rls_item** — chronological job list with start,
+  end, machine, and lbs, plus a header section showing the item's
+  cost-component totals and any unmet weekly demand.
+- **A summary sheet** — total score, plant-wide cost-component
+  totals, an unmet-demand table, and the cost-weight config used
+  (for traceability).
+
+The CLI lives in `planners/infinite/` because it's the highest-level
+artifact that touches every submodule. Per-submodule reading stays in
+the submodules so the planner doesn't grow a spreadsheet dependency
+it doesn't need, and so per-input format evolution is local to the
+owner of that input.
+
 ## Phases
 
 Like the `schedule/` rollout, the planner is built up in phases. Each
@@ -520,11 +577,10 @@ Adds the priority-cost and level-loading layers — the first two cross-
 cutting costs in scope. See "Plant-wide coordination" above for both
 mechanisms.
 
-- New `planners/infinite/priority/` submodule exposing `OrderKey` and
-  `assign_priorities(state) -> dict[OrderKey, int]`.
-- New `ScoringContext` dataclass bundling `priorities` and
-  `earliest_dp_time`, passed to `Costing.score` /
-  `Costing.score_after_move` each iteration.
+- New `planners/infinite/coordination/` submodule exposing `OrderKey`,
+  `ScoringContext`, and `assign_priorities(state) -> dict[OrderKey, int]`.
+  `ScoringContext` bundles `priorities` and `earliest_dp_time` and is
+  passed to `Costing.score` / `Costing.score_after_move` each iteration.
 - Extend `State` with `reference_week_idx` (default `1`),
   `reference_advance_amount` (default `1`), `reference_threshold`
   (default `5`), and `advance_reference_week()`.

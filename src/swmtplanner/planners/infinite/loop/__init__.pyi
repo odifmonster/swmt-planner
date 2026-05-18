@@ -2,11 +2,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from swmtplanner.products import Greige
 from swmtplanner.schedule import Activity, Job
 from swmtplanner.demand.rlsitem import CostComponents
 from swmtplanner.planners.infinite.costing import Costing
 from swmtplanner.planners.infinite.state import Move, State
+from swmtplanner.planners.infinite.coordination import (
+    RegularOrder, SafetyOrder, eligible_orders,
+)
 
 __all__ = [
     'DecisionPoint', 'RegularOrder', 'SafetyOrder',
@@ -22,22 +24,7 @@ class DecisionPoint:
     time: datetime
 
 
-@dataclass(frozen=True)
-class RegularOrder:
-    item: Greige
-    week_idx: int
-    due_date: datetime
-    lbs: float
-
-
-@dataclass(frozen=True)
-class SafetyOrder:
-    item: Greige
-    lbs: float
-
-
 def eligible_decision_points(state: State) -> list[DecisionPoint]: ...
-def eligible_orders(state: State) -> list[RegularOrder | SafetyOrder]: ...
 def enumerate_candidates(state: State) -> list[Move]: ...
 
 

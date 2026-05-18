@@ -234,6 +234,29 @@ Derived from the two views and the job list:
 - No `total_cost` here. Cost components are exposed separately via the views
   and via `cost_if`; the scheduler combines them.
 
+## File I/O
+
+The demand submodule owns its own input format — the planner's CLI
+doesn't know how a demand spreadsheet is structured. Exported reader:
+
+```
+read_rls_items(
+    path: Path, *, start_date: datetime,
+    greige_by_id: dict[str, Greige],
+) -> dict[str, RlsItem]
+```
+
+`path` points to an Excel (.xlsx) workbook with one row per released
+item. Per-row fields: greige id (looked up in `greige_by_id` for the
+`Greige` instance), on-hand lbs, lead time, and the weekly demand
+series. Item-side fields (yarn, tgt_wt, safety, machines) come from
+the resolved `Greige`, not from the demand file — those are products-
+submodule data.
+
+No writer is exported from `demand/`: the human-readable output of a
+planning run is the `PlanReport`'s per-item job snapshot, written by
+the top-level CLI in `planners/infinite/`.
+
 ## Test-placement contract
 
 ```

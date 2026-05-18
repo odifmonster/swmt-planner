@@ -3,12 +3,12 @@
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, TYPE_CHECKING
+from typing import Literal
 
 from swmtplanner.planners.infinite.state import Move, State
-
-if TYPE_CHECKING:
-    from swmtplanner.products import Greige
+from swmtplanner.planners.infinite.coordination import (
+    RegularOrder, eligible_orders,
+)
 
 
 # Float-precision tolerance for snapping the lbs-cap to a clean roll
@@ -29,27 +29,6 @@ class DecisionPoint:
     machine_id: str
     start_at: Literal['next_job_end', 'next_runout']
     time: datetime
-
-
-@dataclass(frozen=True)
-class RegularOrder:
-    """The earliest week of unmet demand for an item (per the
-    safety-aware view's `remaining_lbs`). `due_date` is used by the
-    carrying-avoidance idle calculation when this order is paired with
-    a decision point."""
-    item: 'Greige'
-    week_idx: int
-    due_date: datetime
-    lbs: float
-
-
-@dataclass(frozen=True)
-class SafetyOrder:
-    """A request to top up an item's safety pool to its target. Safety
-    fills don't accrue carrying cost in the demand view, so they're not
-    subject to carrying-avoidance idle."""
-    item: 'Greige'
-    lbs: float
 
 
 def eligible_decision_points(state: State) -> list[DecisionPoint]:
@@ -79,38 +58,6 @@ def eligible_decision_points(state: State) -> list[DecisionPoint]:
                 start_at='next_runout',
                 time=runout,
             ))
-    return out
-
-
-def eligible_orders(state: State) -> list[RegularOrder | SafetyOrder]:
-    """For each `RlsItem`, return up to two eligible orders:
-
-    - One `RegularOrder` for the earliest week with unmet demand, read
-      from the safety-aware view. At most one per item per call.
-    - One `SafetyOrder` if `safety_view.safety_pool` is below the
-      `safety_target`. At most one per item per call.
-
-    Items whose demand is fully met *and* whose safety pool is at-or-
-    above target contribute nothing."""
-    out: list[RegularOrder | SafetyOrder] = []
-    for rls in state.rls_items.values():
-        # Regular: earliest safety-aware order with unmet demand. The
-        # safety_view.orders tuple is week_idx-ordered by construction.
-        for order in rls.safety_view.orders:
-            if order.remaining_lbs > 0:
-                out.append(RegularOrder(
-                    item=rls.item,
-                    week_idx=order.week.week_idx,
-                    due_date=order.week.due_date,
-                    lbs=order.remaining_lbs,
-                ))
-                break
-        # Safety: top-up if pool is below target.
-        safety_gap = (
-            rls.safety_view.safety_target - rls.safety_view.safety_pool
-        )
-        if safety_gap > 0:
-            out.append(SafetyOrder(item=rls.item, lbs=safety_gap))
     return out
 
 
