@@ -186,6 +186,67 @@ For any of the above scenarios (or a similar one), with a chosen
    view trackers (`raw_view.lateness`, `safety_view.drainage` /
    `carrying` / `excess` / `safety_pool`) are unchanged.
 
+#### 1.2.6 Priority cost
+
+The priority cost is the opportunity-cost estimate the cost layer
+charges per move for deferring higher-priority regular orders — see
+"Priority cost" in `planners/infinite/DESIGN.md` for the full
+formula. Each scenario below asserts on
+`Costing.cost_breakdown_after_move(state, move, ctx).priority`
+directly so other weights don't have to be zeroed (set `w.priority =
+1.0` for ease of comparison).
+
+The setups share a four-item state chosen so the priority sort lands
+in a predictable order:
+
+- **`U_LOW`** — `safety = 0`, week-1 unmet (urgent at the default
+  `reference_week_idx = 1`). The `safety_target == 0` convention
+  resolves its safety ratio to `0.0`, so it ranks ahead of any other
+  urgent regular sharing its due date.
+- **`U_HIGH`** — same week-1 due date as `U_LOW`, but `safety > 0`
+  and `on_hand` sized to fill the safety pool to target before
+  bucket-1 demand exhausts (e.g. `weekly=[300, 200, 0, 0]`,
+  `on_hand=400`, `safety=100`). Safety ratio = 1.0, so it ranks
+  behind `U_LOW` within the urgent bucket. No safety order emitted.
+- **`SAFETY`** — all weekly demand met; `safety > 0` with `on_hand`
+  sized to leave the pool below target. Emits one `SafetyOrder` and
+  no regular order.
+- **`FUTURE`** — `safety = 0`, week-3 unmet (future regular at
+  `reference_week_idx = 1`).
+
+Expected priority ordering: `U_LOW.reg` (rank 1), `U_HIGH.reg`
+(rank 2), `SAFETY.safety` (rank 3), `FUTURE.reg` (rank 4).
+
+For all four scenarios, the state has two machines (so
+`ctx.earliest_dp_excluding[move.machine_id]` resolves to the other
+machine's DP), with the other machine's DP set well before the
+orders' `due_date`s — so the `due_date + 1 day` floor binds for
+every higher-priority regular, giving `days_late = 1` and per-order
+contribution `O.lbs × 2 ** 1 = 2 × O.lbs`.
+
+1. **Highest-ranked move pays no priority cost** — move targets
+   `U_LOW`'s week-1 regular (rank 1). No higher-priority order
+   exists. Assert `breakdown.priority == 0.0`.
+
+2. **Same-urgency, less-depleted move pays for the more-depleted
+   sibling** — move targets `U_HIGH`'s week-1 regular (rank 2). The
+   only higher-priority order is `U_LOW.reg`. Assert
+   `breakdown.priority == w.priority × U_LOW.reg.lbs × 2`.
+
+3. **Safety move pays for both urgent regulars** — move targets
+   `SAFETY`'s safety order (rank 3). The higher-priority pool is
+   `U_LOW.reg` and `U_HIGH.reg` (both urgent regulars). Assert
+   `breakdown.priority == w.priority × (U_LOW.reg.lbs +
+   U_HIGH.reg.lbs) × 2`.
+
+4. **Future-regular move pays the same as the safety move** — move
+   targets `FUTURE`'s week-3 regular (rank 4). Higher-priority entries
+   are `U_LOW.reg`, `U_HIGH.reg`, and `SAFETY.safety`; the safety
+   order is filtered out by the regulars-only scope and contributes
+   nothing. Assert `breakdown.priority` equals scenario 3's value —
+   `w.priority × (U_LOW.reg.lbs + U_HIGH.reg.lbs) × 2`. Confirms
+   safety orders are skipped in the opportunity-cost sum.
+
 ### 1.3 Candidate enumeration
 
 The `loop/candidates.py` module exposes three functions:

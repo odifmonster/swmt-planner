@@ -118,10 +118,14 @@ one number:
 3. **Cross-cutting aggregates** (Phase 2+). Penalties that compare each
    candidate against the others in the same iteration's pool — costs no
    single item's or machine's view can capture alone. Phase 2 adds three:
-   - **Priority cost** — `rank × w.priority` per move, where `rank` is
-     the move's order's position in a global priority ordering. Higher-
-     priority orders rank lower, so the greedy min-score loop naturally
-     prefers them.
+   - **Priority cost** — for each move, sum the *predicted lateness
+     lb-days* across every higher-priority regular order under the
+     assumption that, if the planner doesn't address them now, those
+     orders won't ship until at least one day past their `due_date` or
+     until the earliest decision point on a different machine —
+     whichever is later. Weighted by `w.priority`. The result is an
+     opportunity cost: the higher-priority orders being deferred by
+     this move. See "Priority cost" below for the formula.
    - **Level-loading cost** — `work_hours_delta × w.level_loading` per
      move, where the delta is from the earliest decision point in the
      candidate pool. Encourages spreading work across machines instead
@@ -450,37 +454,47 @@ The related types and the priority-assignment function live in
 ```
 OrderKey
   item_id: str
-  week_idx: int | None                       # None ⇒ safety order
+  week_idx: int | None                                     # None ⇒ safety order
 
 ScoringContext
-  priorities: dict[OrderKey, int]            # for priority assignment
-  earliest_dp_time: datetime                 # for level-loading
-  new_machine_avail: dict[Greige, bool]      # for new-machine preference
+  priorities: dict[OrderKey, int]                          # for priority assignment
+  regular_orders_by_key: dict[OrderKey, RegularOrder]      # for priority cost — looks up due_date and remaining lbs
+  earliest_dp_excluding: dict[str, datetime]               # machine_id → earliest candidate DP NOT on that machine; missing key ⇒ no other machine has a DP this iteration
+  earliest_dp_time: datetime                               # for level-loading (global min DP)
+  new_machine_avail: dict[Greige, bool]                    # for new-machine preference
 
 assign_priorities(state: State) -> dict[OrderKey, int]
 build_new_machine_avail(
     state: State, candidates: list[Move],
 ) -> dict[Greige, bool]
+build_earliest_dp_excluding(
+    state: State, candidates: list[Move],
+) -> dict[str, datetime]
 ```
 
 The submodule is the natural home for everything that *defines
 relationships across the plant*: the `OrderKey` identity, the
-plant-wide priority sort, the new-machine availability sweep, and the
-bundle the scorer reads from. Level-loading's only cross-candidate
-input is `earliest_dp_time`, which the main loop computes inline as
-`min(dp_time(c) for c in candidates)` when building the context. New-
-machine preference's input is `new_machine_avail`, built by
-`build_new_machine_avail` — see the three sections below for the
-details.
+plant-wide priority sort, the new-machine availability sweep, the
+per-machine "earliest other DP" computation, and the bundle the
+scorer reads from. Level-loading's only cross-candidate input is
+`earliest_dp_time`, which the main loop computes inline as
+`min(dp_time(c) for c in candidates)` when building the context.
+New-machine preference's input is `new_machine_avail`, built by
+`build_new_machine_avail`. Priority cost's cross-candidate inputs
+are `regular_orders_by_key` (derived from `eligible_orders(state)`)
+and `earliest_dp_excluding`, built by `build_earliest_dp_excluding`
+— see the three sections below for the details.
 
 ## Priority assignment
 
 The planner ranks every eligible order each iteration of the main
-loop and adds `rank × w.priority` to each `Move`'s score. Rank 1 is
-highest priority (lowest cost contribution); lower-ranked candidates
-lose to their higher-ranked siblings unless some other cost component
-shifts the balance. The ranking function is `assign_priorities` in
-`coordination/` (see above).
+loop. The ranks themselves don't appear directly in any move's score;
+instead, they identify which orders are *higher priority than* a
+given move — the input to the priority cost (see "Priority cost"
+below). Rank 1 is highest priority; for a move at rank `R`, every
+order at rank `< R` is "higher priority" and contributes to the
+move's priority cost if it's a regular order. The ranking function
+is `assign_priorities` in `coordination/` (see above).
 
 ### Priority order
 
@@ -529,18 +543,71 @@ the score early and starve later regulars; with too many, safety stock
 never gets a turn. Like `candidate_threshold`, this is a tuneable knob
 expected to be refined against real-data behavior.
 
-### Cost mapping
+### Priority cost
 
-Each move's priority cost is:
+The priority cost reframes "did the planner take a higher-priority
+move first?" as an *opportunity cost*: every higher-priority regular
+order the move skips is assumed to be deferred to either one day
+past its `due_date` or the earliest non-self decision point in the
+candidate pool — whichever is later — and is charged the standard
+exponential lateness formula for that deferral.
+
+For a move at rank `r = priorities[OrderKey(move.item.id,
+move.week_idx)]`:
 
 ```
-priority_cost(move) = priorities[OrderKey(move.item.id, move.week_idx)]
-                      × w.priority
+priority_cost(move) = w.priority × sum_{O ∈ higher_priority_regulars(r)}
+                      predicted_lateness(O, move)
+
+higher_priority_regulars(r):
+  for K, rank in ctx.priorities.items():
+    if rank < r and K in ctx.regular_orders_by_key:
+      yield ctx.regular_orders_by_key[K]
+
+predicted_lateness(O, move):
+  other_dp = ctx.earliest_dp_excluding.get(
+      move.machine_id, ctx.earliest_dp_time,
+  )
+  fill_time = max(O.due_date + 1 day, other_dp)
+  days_late = (fill_time - O.due_date) in days
+  return O.lbs × 2 ** days_late
 ```
 
-with `move.week_idx = None` for safety orders. `Move` carries
-`week_idx` directly so the cost layer can form the key without re-
-running eligibility.
+Notes:
+
+- **Regular orders only.** Safety orders contribute no priority cost
+  for now — their "miss" cost is drainage, which has a different
+  temporal shape that doesn't compose cleanly into this per-move sum.
+  Future work may revisit.
+- **Minimum one day late.** The `due_date + 1 day` floor reflects
+  that even when another machine *is* available immediately, the
+  schedule won't fill the order until at least one work day past due
+  in practice (queue effects, hand-off). It also keeps `days_late ≥
+  1`, so each skipped higher-priority regular contributes at least
+  `2 × O.lbs × w.priority` to the move — a measurable floor.
+- **Self-machine excluded.** `earliest_dp_excluding[machine_id]`
+  drops every candidate on the move's own machine — that machine is
+  committed to this move and can't simultaneously fill the higher-
+  priority order. Missing key (no other machine has a DP this
+  iteration) falls back to `earliest_dp_time` (the global min, which
+  equals the move's own DP) — a slight underestimate that still
+  yields a sensible floor via the `due_date + 1 day` clause.
+- **Same shape as `w.lateness`.** `lbs × 2 ** days_late` matches the
+  raw view's lateness formula, so the priority cost and the
+  realized-lateness cost (`w.lateness × raw_view.lateness`) are
+  directly comparable scalars once the relevant weights are applied.
+  In practice `w.priority` should be tuned in roughly the same
+  order of magnitude as `w.lateness` for the trade-off to behave
+  intuitively.
+- **Move identity.** `Move` already carries `week_idx`, so the cost
+  layer forms `OrderKey(move.item.id, move.week_idx)` directly to
+  look up the move's own rank. `week_idx = None` (safety move) is a
+  valid key.
+- **Heuristic.** The "deferred to one-day-past-due-or-next-DP"
+  assumption is a proxy, not a prediction. Reality could fill the
+  order earlier (via window advance bringing more candidates in)
+  or later (via repeated commits piling up). Real-data tuning will
+  show whether this proxy needs to evolve.
 
 ## Level-loading
 
@@ -789,7 +856,7 @@ Columns (in order):
 | `tape_out_both`   | float       | Weighted count of `TapeOut(bars='both')`.                                                      |
 | `family_change`   | float       | Weighted count of `StyleChange(is_family_change=True)`.                                        |
 | `idle_time`       | float       | Weighted sum of `Idle` work-hour durations.                                                    |
-| `priority`        | float       | Cross-cutting: `rank × w.priority` per "Priority assignment".                                  |
+| `priority`        | float       | Cross-cutting: `w.priority × sum_O O.lbs × 2^days_late(O)` over higher-priority regular orders — see "Priority cost". |
 | `level_loading`   | float       | Cross-cutting: `work_hours_delta × w.level_loading` per "Level-loading".                       |
 | `old_machine`     | float       | Cross-cutting: `w.old_machine` when applicable, else 0; see "New-machine preference".          |
 
@@ -869,10 +936,12 @@ coordination" above for all three mechanisms.
 
 - New `planners/infinite/coordination/` submodule exposing `OrderKey`,
   `ScoringContext`, `assign_priorities(state) -> dict[OrderKey, int]`,
-  and `build_new_machine_avail(state, candidates) -> dict[Greige, bool]`.
-  `ScoringContext` bundles `priorities`, `earliest_dp_time`, and
-  `new_machine_avail`, and is passed to `Costing.score` /
-  `Costing.score_after_move` each iteration.
+  `build_new_machine_avail(state, candidates) -> dict[Greige, bool]`,
+  and `build_earliest_dp_excluding(state, candidates) -> dict[str,
+  datetime]`. `ScoringContext` bundles `priorities`,
+  `regular_orders_by_key`, `earliest_dp_excluding`,
+  `earliest_dp_time`, and `new_machine_avail`, and is passed to
+  `Costing.score` / `Costing.score_after_move` each iteration.
 - Extend `State` with `reference_week_idx` (default `1`),
   `reference_advance_amount` (default `1`), `reference_threshold`
   (default `5`), and `advance_reference_week()`.
@@ -881,12 +950,16 @@ coordination" above for all three mechanisms.
 - Extend `CostWeights` with `priority`, `level_loading`, and
   `old_machine`, and change `Costing.score` /
   `Costing.score_after_move` to take a `ScoringContext` and add
-  `rank × w.priority`, `work_hours_delta × w.level_loading`, and the
-  `old_machine_cost` per move.
+  the priority cost (per-move sum of predicted-lateness lb-days
+  across higher-priority regular orders × `w.priority`),
+  `work_hours_delta × w.level_loading`, and `old_machine_cost` per
+  move.
 - Extend the main loop with a reference-week advance step before the
   window-advance step each iteration, plus a `ctx = ScoringContext(...)`
   build step before scoring (calling `build_new_machine_avail` and
-  computing `earliest_dp_time` from the candidate pool).
+  `build_earliest_dp_excluding`, computing `earliest_dp_time` from
+  the candidate pool, and collecting `regular_orders_by_key` from
+  `eligible_orders(state)`).
 
 Avoids three Phase-1 failure modes: the greedy loop filling a high-
 weight component (e.g., a near-due regular order on week 0) on an

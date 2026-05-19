@@ -11,8 +11,9 @@ from swmtplanner.demand.rlsitem import RlsItem
 from swmtplanner.support import WorkCal
 from swmtplanner.planners.infinite import (
     State, Move, CostWeights, Costing,
-    DecisionPoint, RegularOrder, SafetyOrder, ScoringContext,
-    eligible_decision_points, eligible_orders, enumerate_candidates,
+    DecisionPoint, OrderKey, RegularOrder, SafetyOrder, ScoringContext,
+    assign_priorities, eligible_decision_points, eligible_orders,
+    enumerate_candidates,
     PlanReport, plan,
 )
 
@@ -669,6 +670,8 @@ class CostingTests(unittest.TestCase):
         # affect the score, but score_after_move requires a ctx.
         ctx = ScoringContext(
             priorities={},
+            regular_orders_by_key={},
+            earliest_dp_excluding={},
             earliest_dp_time=machine.next_job_end,
             new_machine_avail={},
         )
@@ -697,6 +700,176 @@ class CostingTests(unittest.TestCase):
         # matches the prediction.
         state.commit_move(move)
         self.assertAlmostEqual(predicted, costing.score(state))
+
+
+# --- 1.2.6 Priority cost --------------------------------------------------
+
+class PriorityCostTests(unittest.TestCase):
+    """Section 1.2.6 of INF_PLAN_TEST_SPEC.md.
+
+    Verifies the opportunity-cost shape of `Costing._priority_cost`
+    against four scenarios that span the three priority buckets
+    (urgent regular / safety / future regular). All tests use a shared
+    four-item state and assert on
+    `cost_breakdown_after_move(...).priority` with `w.priority = 1.0`
+    and every other weight = 0."""
+
+    # Greige fixtures for the four items. Same beam/tgt_wt/family across
+    # the board — only `safety` and the `machines` dict matter for the
+    # priority cost.
+    _U_LOW = Greige(
+        'U_LOW', family='A', tgt_wt=100.0,
+        top_beam='40D BLACK 1000X4', top_pct=0.5,
+        btm_beam='60D WHITE 1000X4', btm_pct=0.5,
+        safety=0.0, machines={'M1': 100.0, 'M2': 100.0},
+    )
+    _U_HIGH = Greige(
+        'U_HIGH', family='A', tgt_wt=100.0,
+        top_beam='40D BLACK 1000X4', top_pct=0.5,
+        btm_beam='60D WHITE 1000X4', btm_pct=0.5,
+        safety=100.0, machines={'M1': 100.0, 'M2': 100.0},
+    )
+    _SAFETY_ITEM = Greige(
+        'SAFETY', family='A', tgt_wt=100.0,
+        top_beam='40D BLACK 1000X4', top_pct=0.5,
+        btm_beam='60D WHITE 1000X4', btm_pct=0.5,
+        safety=100.0, machines={'M1': 100.0, 'M2': 100.0},
+    )
+    _FUTURE = Greige(
+        'FUTURE', family='A', tgt_wt=100.0,
+        top_beam='40D BLACK 1000X4', top_pct=0.5,
+        btm_beam='60D WHITE 1000X4', btm_pct=0.5,
+        safety=0.0, machines={'M1': 100.0, 'M2': 100.0},
+    )
+
+    def setUp(self):
+        """Build the shared 1.2.6 state, derive priorities, pack a
+        `ScoringContext`, and build a `Costing` instance with
+        `w.priority = 1.0` (all other weights 0). Stored on `self` for
+        each test to read."""
+        # U_LOW: weekly=[300, 100, 0, 0], on_hand=300 → bucket 1 fills
+        # week 0 (300), no safety (target=0), week 1 unmet 100 lbs.
+        rls_u_low = RlsItem(
+            item=self._U_LOW, start_date=_START, on_hand_lbs=300.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[300, 100, 0, 0],
+        )
+        # U_HIGH: weekly=[300, 200, 0, 0], on_hand=400 → bucket 1
+        # fills week 0 (300), bucket 2 fills safety (100=target),
+        # week 1 unmet 200 lbs.
+        rls_u_high = RlsItem(
+            item=self._U_HIGH, start_date=_START, on_hand_lbs=400.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[300, 200, 0, 0],
+        )
+        # SAFETY: weekly=[0]*4, on_hand=50 → no demand, safety pool=50
+        # (target=100 → SafetyOrder gap=50). No regular orders.
+        rls_safety = RlsItem(
+            item=self._SAFETY_ITEM, start_date=_START, on_hand_lbs=50.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[0, 0, 0, 0],
+        )
+        # FUTURE: weekly=[0, 0, 0, 100], on_hand=0 → week 3 unmet 100.
+        rls_future = RlsItem(
+            item=self._FUTURE, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[0, 0, 0, 100],
+        )
+        m1 = _make_machine('M1')
+        m2 = _make_machine('M2')
+        self.state = _make_state(
+            machines={'M1': m1, 'M2': m2},
+            rls_items={
+                'U_LOW': rls_u_low, 'U_HIGH': rls_u_high,
+                'SAFETY': rls_safety, 'FUTURE': rls_future,
+            },
+        )
+
+        priorities = assign_priorities(self.state)
+        regular_orders_by_key: dict[OrderKey, RegularOrder] = {}
+        self.u_low_reg = None
+        self.u_high_reg = None
+        self.future_reg = None
+        self.safety_order = None
+        for o in eligible_orders(self.state):
+            if isinstance(o, RegularOrder):
+                regular_orders_by_key[OrderKey(o.item.id, o.week_idx)] = o
+                if o.item.id == 'U_LOW':
+                    self.u_low_reg = o
+                elif o.item.id == 'U_HIGH':
+                    self.u_high_reg = o
+                elif o.item.id == 'FUTURE':
+                    self.future_reg = o
+            elif isinstance(o, SafetyOrder) and o.item.id == 'SAFETY':
+                self.safety_order = o
+
+        # earliest_dp_excluding: any time well before due_dates makes
+        # the `due_date + 1 day` floor bind for every higher-priority
+        # regular (days_late == 1). `_START` satisfies that for both
+        # week 1 (+14d) and week 3 (+28d) due dates.
+        other_dp = _START
+        self.ctx = ScoringContext(
+            priorities=priorities,
+            regular_orders_by_key=regular_orders_by_key,
+            earliest_dp_excluding={'M1': other_dp, 'M2': other_dp},
+            earliest_dp_time=other_dp,
+            new_machine_avail={},
+        )
+        self.costing = Costing(_weights(priority=1.0))
+
+    def _move(self, item, week_idx):
+        """Tiny `Move` helper — only `machine_id`, `item`, and
+        `week_idx` matter to the priority cost; `plan=[]` keeps the
+        per-item demand contribution at its current-view value (which
+        is multiplied by 0 weights anyway)."""
+        return Move(
+            machine_id='M1', item=item, lbs=0.0,
+            start_at='next_job_end', idle_for=timedelta(0),
+            plan=[], week_idx=week_idx,
+        )
+
+    def test_setup_priority_ordering(self):
+        # Pre-flight: confirm the four-item state sorts into the rank
+        # order the rest of section 1.2.6 relies on.
+        self.assertEqual(self.ctx.priorities[OrderKey('U_LOW', 1)], 1)
+        self.assertEqual(self.ctx.priorities[OrderKey('U_HIGH', 1)], 2)
+        self.assertEqual(self.ctx.priorities[OrderKey('SAFETY', None)], 3)
+        self.assertEqual(self.ctx.priorities[OrderKey('FUTURE', 3)], 4)
+
+    def test_highest_ranked_move_pays_no_priority_cost(self):
+        # 1.2.6.1: move targets U_LOW.reg (rank 1). No higher-priority
+        # order exists → priority cost is 0.
+        move = self._move(self.u_low_reg.item, self.u_low_reg.week_idx)
+        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
+        self.assertEqual(bd.priority, 0.0)
+
+    def test_same_urgency_less_depleted_pays_for_more_depleted(self):
+        # 1.2.6.2: move targets U_HIGH.reg (rank 2). Only U_LOW.reg is
+        # higher-priority. floor binds → days_late=1 → factor=2.
+        # Expected: w × U_LOW.lbs × 2 = 1.0 × 100 × 2 = 200.
+        move = self._move(self.u_high_reg.item, self.u_high_reg.week_idx)
+        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
+        self.assertAlmostEqual(bd.priority, self.u_low_reg.lbs * 2.0)
+
+    def test_safety_move_pays_for_both_urgent_regulars(self):
+        # 1.2.6.3: move targets SAFETY.safety (rank 3). U_LOW.reg and
+        # U_HIGH.reg are higher-priority. Expected:
+        # w × (U_LOW.lbs + U_HIGH.lbs) × 2 = 1.0 × (100+200) × 2 = 600.
+        # week_idx=None marks a safety move.
+        move = self._move(self.safety_order.item, week_idx=None)
+        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
+        expected = (self.u_low_reg.lbs + self.u_high_reg.lbs) * 2.0
+        self.assertAlmostEqual(bd.priority, expected)
+
+    def test_future_move_pays_same_as_safety_move(self):
+        # 1.2.6.4: move targets FUTURE.reg (rank 4). Higher-priority
+        # entries are U_LOW.reg, U_HIGH.reg, and SAFETY.safety; the
+        # safety order is filtered out by the regulars-only scope, so
+        # priority cost matches scenario 3.
+        move = self._move(self.future_reg.item, self.future_reg.week_idx)
+        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
+        expected = (self.u_low_reg.lbs + self.u_high_reg.lbs) * 2.0
+        self.assertAlmostEqual(bd.priority, expected)
 
 
 # --- 1.3 Candidate enumeration --------------------------------------------

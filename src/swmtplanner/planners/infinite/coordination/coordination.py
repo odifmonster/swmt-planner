@@ -53,14 +53,33 @@ class ScoringContext:
     `enumerate_candidates` returns and passed to every
     `Costing.score_after_move` call.
 
-    `priorities` maps every eligible order's `OrderKey` to its rank
-    (1 = highest priority); `earliest_dp_time` is the earliest decision
-    point time across the iteration's candidate pool, used as the zero
-    point for the level-loading cost; `new_machine_avail` maps each
-    `Greige` that appears in the candidate pool to `True` iff at least
-    one of that item's candidates targets a `Machine.is_new` machine,
-    used by the old-machine penalty."""
+    Fields:
+
+    - `priorities` maps every eligible order's `OrderKey` to its rank
+      (1 = highest priority). Drives the priority cost's "higher-
+      priority than this move" filter.
+    - `regular_orders_by_key` maps each `OrderKey` of a `RegularOrder`
+      to the order itself so the priority cost can read its
+      `due_date` and remaining `lbs` without re-running eligibility.
+      Safety orders are absent from this dict (they don't contribute
+      to the priority cost).
+    - `earliest_dp_excluding` maps each `machine_id` that appears in
+      the candidate pool to the earliest decision-point time across
+      candidates *not* on that machine. The priority cost uses it as
+      the "another machine could pick it up" arrival time for higher-
+      priority orders the move is skipping. Missing keys (no other
+      machine has a DP this iteration) fall back to
+      `earliest_dp_time`.
+    - `earliest_dp_time` is the earliest decision-point time across
+      the whole candidate pool — the zero point for the level-loading
+      cost and the fallback for `earliest_dp_excluding`.
+    - `new_machine_avail` maps each `Greige` that appears in the
+      candidate pool to `True` iff at least one of that item's
+      candidates targets a `Machine.is_new` machine, used by the
+      old-machine penalty."""
     priorities: dict[OrderKey, int]
+    regular_orders_by_key: dict[OrderKey, 'RegularOrder']
+    earliest_dp_excluding: dict[str, datetime]
     earliest_dp_time: datetime
     new_machine_avail: dict['Greige', bool]
 
@@ -187,6 +206,52 @@ def build_new_machine_avail(
     return out
 
 
+# ----- Earliest DP excluding self -----------------------------------------
+
+def build_earliest_dp_excluding(
+    state: 'State',
+    candidates: list['Move'],
+) -> dict[str, datetime]:
+    """Map each `machine_id` appearing in `candidates` to the earliest
+    `dp_time` across candidates *not* on that machine. Used by the
+    priority cost to estimate when a skipped higher-priority order
+    could be picked up by some other machine if the move being scored
+    commits its own machine.
+
+    `dp_time(c)` matches `build_context`:
+    `state.machines[c.machine_id].next_job_end` for
+    `start_at='next_job_end'` and `.next_runout` otherwise.
+
+    Machines whose only DPs are their own (i.e., no other machine has
+    a candidate this iteration) are absent from the returned dict —
+    callers fall back to `ctx.earliest_dp_time` in that case."""
+    def _dp_time(move: 'Move') -> datetime:
+        machine = state.machines[move.machine_id]
+        if move.start_at == 'next_job_end':
+            return machine.next_job_end
+        return machine.next_runout
+
+    # First pass: best (earliest) DP per machine that has any candidate.
+    best_per_machine: dict[str, datetime] = {}
+    for move in candidates:
+        t = _dp_time(move)
+        prev = best_per_machine.get(move.machine_id)
+        if prev is None or t < prev:
+            best_per_machine[move.machine_id] = t
+
+    # Second pass: for each machine, the min across all OTHER machines'
+    # best DP times. O(machines^2), which is fine — the plant has tens
+    # of machines, not thousands.
+    out: dict[str, datetime] = {}
+    for excluded in best_per_machine:
+        others = [
+            t for mid, t in best_per_machine.items() if mid != excluded
+        ]
+        if others:
+            out[excluded] = min(others)
+    return out
+
+
 # ----- ScoringContext construction ----------------------------------------
 
 def build_context(
@@ -194,9 +259,15 @@ def build_context(
     candidates: list['Move'],
 ) -> ScoringContext:
     """Build the per-iteration `ScoringContext` from `state` and the
-    enumerated candidate pool. Combines the three cross-candidate inputs:
+    enumerated candidate pool. Combines the five cross-candidate inputs:
 
     - `priorities` from `assign_priorities(state)`.
+    - `regular_orders_by_key` derived from `eligible_orders(state)` —
+      a `{OrderKey: RegularOrder}` dict that the priority cost reads
+      to recover each higher-priority regular's `due_date` and `lbs`.
+      Safety orders are dropped.
+    - `earliest_dp_excluding` from `build_earliest_dp_excluding(state,
+      candidates)`.
     - `earliest_dp_time` from `min(dp_time(c) for c in candidates)`
       where `dp_time` is the machine's `next_job_end` or `next_runout`
       depending on the move's `start_at` — i.e., the decision point
@@ -213,8 +284,17 @@ def build_context(
             return machine.next_job_end
         return machine.next_runout
 
+    regular_orders_by_key: dict[OrderKey, RegularOrder] = {}
+    for order in eligible_orders(state):
+        if isinstance(order, RegularOrder):
+            regular_orders_by_key[OrderKey(
+                item_id=order.item.id, week_idx=order.week_idx,
+            )] = order
+
     return ScoringContext(
         priorities=assign_priorities(state),
+        regular_orders_by_key=regular_orders_by_key,
+        earliest_dp_excluding=build_earliest_dp_excluding(state, candidates),
         earliest_dp_time=min(_dp_time(c) for c in candidates),
         new_machine_avail=build_new_machine_avail(state, candidates),
     )

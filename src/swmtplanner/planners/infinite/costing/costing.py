@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from swmtplanner.schedule import Job, TapeOut, StyleChange, Idle
@@ -217,11 +218,9 @@ class Costing:
                         a.start, a.end,
                     )
 
-        # Cross-cutting (unweighted).
+        # Cross-cutting.
         move_machine = state.machines[move.machine_id]
-        rank = ctx.priorities.get(
-            OrderKey(item_id=move.item.id, week_idx=move.week_idx), 0,
-        )
+        priority_cost = self._priority_cost(move, ctx)
         dp_time = (
             move_machine.next_job_end
             if move.start_at == 'next_job_end'
@@ -245,7 +244,7 @@ class Costing:
             tape_out_both=w.tape_out_both * tob_q,
             family_change=w.family_change * fc_q,
             idle_time=w.idle_time * it_q,
-            priority=w.priority * rank,
+            priority=priority_cost,
             level_loading=w.level_loading * work_hours_delta,
             old_machine=(
                 w.old_machine if old_machine_applies else 0.0
@@ -257,19 +256,13 @@ class Costing:
     def _cross_cutting_cost(
         self, state: State, move: Move, ctx: ScoringContext,
     ) -> float:
-        """Per-move cross-cutting cost: priority rank × w.priority,
-        level-loading work-hour delta × w.level_loading, and the flat
-        old-machine penalty when applicable."""
+        """Per-move cross-cutting cost: predicted-lateness priority
+        sum, level-loading work-hour delta × w.level_loading, and the
+        flat old-machine penalty when applicable."""
         w = self._weights
         machine = state.machines[move.machine_id]
 
-        # Priority: rank from ctx; default 0 if the move's order didn't
-        # appear in the priority pool (e.g., directly-constructed test
-        # moves without a matching eligible order).
-        rank = ctx.priorities.get(
-            OrderKey(item_id=move.item.id, week_idx=move.week_idx), 0,
-        )
-        priority_cost = w.priority * rank
+        priority_cost = self._priority_cost(move, ctx)
 
         # Level-loading: work hours between the iteration's earliest DP
         # and this move's DP (pre-idle).
@@ -290,6 +283,46 @@ class Costing:
             old_machine_cost = 0.0
 
         return priority_cost + level_loading_cost + old_machine_cost
+
+    def _priority_cost(
+        self, move: Move, ctx: ScoringContext,
+    ) -> float:
+        """Weighted priority cost — an opportunity-cost estimate of
+        the lateness this move would incur on higher-priority regular
+        orders the planner is deferring. For each regular order with a
+        better rank than the move's own, charge the standard
+        `lbs × 2^days_late` shape assuming a fill time of
+        `max(due_date + 1 day, earliest_dp_excluding[move.machine_id])`
+        (falling back to `ctx.earliest_dp_time` when no other machine
+        has a candidate). Safety orders are skipped — their miss-cost
+        is drainage, not lateness. See "Priority cost" in DESIGN.md."""
+        move_key = OrderKey(
+            item_id=move.item.id, week_idx=move.week_idx,
+        )
+        move_rank = ctx.priorities.get(move_key)
+        if move_rank is None:
+            # Hand-built moves in tests may not correspond to any
+            # eligible order; no anchor for "higher priority than".
+            return 0.0
+
+        other_dp = ctx.earliest_dp_excluding.get(
+            move.machine_id, ctx.earliest_dp_time,
+        )
+        one_day = timedelta(days=1)
+
+        lateness_lb_days = 0.0
+        for key, rank in ctx.priorities.items():
+            if rank >= move_rank:
+                continue
+            order = ctx.regular_orders_by_key.get(key)
+            if order is None:
+                # Safety order — skipped (regulars-only scope).
+                continue
+            fill_time = max(order.due_date + one_day, other_dp)
+            days_late = (fill_time - order.due_date) / one_day
+            lateness_lb_days += order.lbs * (2.0 ** days_late)
+
+        return self._weights.priority * lateness_lb_days
 
     # ---- helpers -------------------------------------------------------
 
