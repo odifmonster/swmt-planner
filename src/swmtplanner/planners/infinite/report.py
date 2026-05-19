@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'schedule_dataframe', 'production_dataframe', 'unmet_demand_dataframe',
-    'write_plan_report_xlsx',
+    'late_orders_dataframe', 'write_plan_report_xlsx',
 ]
 
 
@@ -97,6 +97,21 @@ def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
     return df.set_index(['item', 'activity_id'])
 
 
+def late_orders_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    rows = [
+        {
+            'order_id': order.id,
+            'item': order.rls_item.item.id,
+            'week_idx': order.week.week_idx,
+            'late_lbs': order.late_lbs,
+            'fill_date': order.late_fill_date
+        }
+        for order in report.late_orders
+    ]
+    df = pd.DataFrame(rows, columns=['order_id', 'week_idx', 'late_lbs', 'fill_date'])
+    return df.set_index('order_id')
+
+
 def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
     """One row per `(item, week)` pair with positive remaining lbs in
     the post-plan safety view. Columns: `item`, `week_idx`,
@@ -159,6 +174,9 @@ def write_plan_report_xlsx(
         )
         production_dataframe(report).to_excel(
             writer, sheet_name='production',
+        )
+        late_orders_dataframe(report).to_excel(
+            writer, sheet_name='late_orders'
         )
         unmet_demand_dataframe(report).to_excel(
             writer, sheet_name='unmet_demand', index=False,

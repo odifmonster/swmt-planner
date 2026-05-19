@@ -11,7 +11,7 @@ from .loop import (
 )
 from .report import (
     schedule_dataframe, production_dataframe, unmet_demand_dataframe,
-    write_plan_report_xlsx,
+    late_orders_dataframe, write_plan_report_xlsx,
 )
 from .run import run
 
@@ -23,5 +23,5 @@ __all__ = [
     'eligible_decision_points', 'enumerate_candidates',
     'PlanReport', 'plan',
     'schedule_dataframe', 'production_dataframe', 'unmet_demand_dataframe',
-    'write_plan_report_xlsx', 'run'
+    'late_orders_dataframe', 'write_plan_report_xlsx', 'run'
 ]
