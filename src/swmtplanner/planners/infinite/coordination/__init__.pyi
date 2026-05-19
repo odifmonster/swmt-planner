@@ -2,11 +2,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from swmtplanner.products import Greige
-from swmtplanner.planners.infinite.state import State
+from swmtplanner.planners.infinite.state import Move, State
 
 __all__ = [
     'OrderKey', 'RegularOrder', 'SafetyOrder', 'ScoringContext',
     'eligible_orders', 'assign_priorities',
+    'build_new_machine_avail', 'build_context',
 ]
 
 
@@ -34,7 +35,14 @@ class SafetyOrder:
 class ScoringContext:
     priorities: dict[OrderKey, int]
     earliest_dp_time: datetime
+    new_machine_avail: dict[Greige, bool]
 
 
 def eligible_orders(state: State) -> list[RegularOrder | SafetyOrder]: ...
 def assign_priorities(state: State) -> dict[OrderKey, int]: ...
+def build_new_machine_avail(
+    state: State, candidates: list[Move],
+) -> dict[Greige, bool]: ...
+def build_context(
+    state: State, candidates: list[Move],
+) -> ScoringContext: ...

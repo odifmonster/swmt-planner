@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 __all__ = [
     'schedule_dataframe', 'production_dataframe', 'unmet_demand_dataframe',
     'late_orders_dataframe', 'write_plan_report_xlsx',
+    'iteration_log_dataframe', 'write_iteration_log_tsv',
 ]
 
 
@@ -60,6 +61,7 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
         rows,
         columns=['machine', 'activity_id', 'start', 'end', 'lbs', 'desc'],
     )
+    df['lbs'] = _round_int(df['lbs'])
     return df.set_index(['machine', 'activity_id'])
 
 
@@ -94,6 +96,7 @@ def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
     )
     if not df.empty:
         df = df.sort_values(['item', 'start']).reset_index(drop=True)
+    df['lbs'] = _round_int(df['lbs'])
     return df.set_index(['item', 'activity_id'])
 
 
@@ -109,7 +112,66 @@ def late_orders_dataframe(report: 'PlanReport') -> pd.DataFrame:
         for order in report.late_orders
     ]
     df = pd.DataFrame(rows, columns=['order_id', 'week_idx', 'late_lbs', 'fill_date'])
+    df['late_lbs'] = _round_int(df['late_lbs'])
     return df.set_index('order_id')
+
+
+def iteration_log_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    """One row per record in `report.iteration_log`, columns mirroring
+    `IterationLogRecord`'s fields. The source for the verbose
+    iteration-log TSV — see "Verbose iteration log" in
+    `planners/infinite/DESIGN.md` for the column-by-column contract.
+
+    Raises `ValueError` when `report.iteration_log` is `None` — i.e.,
+    when the planner wasn't invoked with `verbose=True`. Callers check
+    the flag before invoking this builder; gating it inside the
+    builder is a safety net."""
+    if report.iteration_log is None:
+        raise ValueError(
+            'report.iteration_log is None — was the planner run with '
+            'verbose=True?'
+        )
+    rows = [
+        {
+            'iteration': r.iteration_idx,
+            'role': r.role,
+            'score_rank': r.score_rank,
+            'item_id': r.item_id,
+            'target_type': r.target_type,
+            'target_week': r.target_week,
+            'machine_id': r.machine_id,
+            'machine_is_new': r.machine_is_new,
+            'start_at': r.start_at,
+            'idle_hours': r.idle_hours,
+            'total_score': r.total_score,
+            'lateness': r.lateness,
+            'drainage': r.drainage,
+            'carrying': r.carrying,
+            'excess': r.excess,
+            'tape_out_single': r.tape_out_single,
+            'tape_out_both': r.tape_out_both,
+            'family_change': r.family_change,
+            'idle_time': r.idle_time,
+            'priority': r.priority,
+            'level_loading': r.level_loading,
+            'old_machine': r.old_machine,
+        }
+        for r in report.iteration_log
+    ]
+    df = pd.DataFrame(rows, columns=[
+        'iteration', 'role', 'score_rank',
+        'item_id', 'target_type', 'target_week',
+        'machine_id', 'machine_is_new', 'start_at', 'idle_hours',
+        'total_score',
+        'lateness', 'drainage', 'carrying', 'excess',
+        'tape_out_single', 'tape_out_both', 'family_change', 'idle_time',
+        'priority', 'level_loading', 'old_machine',
+    ])
+    # Mixed int/None across rows gets promoted to float by pandas; the
+    # spec wants regular-row cells to read as plain integers and safety
+    # rows to be blank. `Int64` (nullable) does both.
+    df['target_week'] = df['target_week'].astype('Int64')
+    return df
 
 
 def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
@@ -124,7 +186,20 @@ def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=['item', 'week_idx', 'unmet_lbs'])
     if not df.empty:
         df = df.sort_values(['item', 'week_idx']).reset_index(drop=True)
+    df['unmet_lbs'] = _round_int(df['unmet_lbs'])
     return df
+
+
+# ----- Numeric helpers ----------------------------------------------------
+
+def _round_int(s: pd.Series) -> pd.Series:
+    """Round a numeric column to the nearest integer, preserving NaN via
+    pandas' nullable `Int64` dtype. The schedule's `lbs` column has NaN
+    for non-Job activities (Idle / TapeOut / StyleChange); Int64
+    preserves those as `pd.NA`, which `to_excel` renders as a blank
+    cell. For columns without NaN this still produces clean integer
+    output (no trailing `.0`)."""
+    return s.round(0).astype('Int64')
 
 
 # ----- Per-activity helpers -----------------------------------------------
@@ -181,3 +256,14 @@ def write_plan_report_xlsx(
         unmet_demand_dataframe(report).to_excel(
             writer, sheet_name='unmet_demand', index=False,
         )
+
+
+def write_iteration_log_tsv(
+    report: 'PlanReport', path: str | Path,
+) -> None:
+    """Write `report.iteration_log` to a tab-separated file at `path`
+    via `iteration_log_dataframe`. `target_week` cells are blank for
+    safety-order rows (`pandas` writes `NaN` as an empty cell by
+    default). Raises if the report wasn't produced with
+    `plan(..., verbose=True)`."""
+    iteration_log_dataframe(report).to_csv(path, sep='\t', index=False)

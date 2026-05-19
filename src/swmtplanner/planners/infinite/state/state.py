@@ -20,13 +20,20 @@ class Move:
     `plan` is the cached output of `machine.plan_production(item, lbs,
     start_at, idle_for)`. The loop computes it once at enumeration time
     and reuses it for scoring (via `Costing.score_after_move`) and
-    committing (via `State.commit_move`)."""
+    committing (via `State.commit_move`).
+
+    `week_idx` is the week index of the order this move addresses, or
+    `None` for safety-replenishment moves. The cost layer uses it to
+    form the `OrderKey` for priority-cost lookup; defaults to `None`
+    so directly-constructed `Move`s in tests don't have to set it
+    when priority weights are zero."""
     machine_id: str
     item: 'Greige'
     lbs: float
     start_at: Literal['next_job_end', 'next_runout']
     idle_for: timedelta
     plan: list[Activity]
+    week_idx: int | None = None
 
 
 @dataclass

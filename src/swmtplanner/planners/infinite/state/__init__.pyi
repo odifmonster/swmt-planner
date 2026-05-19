@@ -17,6 +17,7 @@ class Move:
     start_at: Literal['next_job_end', 'next_runout']
     idle_for: timedelta
     plan: list[Activity]
+    week_idx: int | None = ...
 
 
 @dataclass

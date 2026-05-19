@@ -11,7 +11,7 @@ from swmtplanner.demand.rlsitem import RlsItem
 from swmtplanner.support import WorkCal
 from swmtplanner.planners.infinite import (
     State, Move, CostWeights, Costing,
-    DecisionPoint, RegularOrder, SafetyOrder,
+    DecisionPoint, RegularOrder, SafetyOrder, ScoringContext,
     eligible_decision_points, eligible_orders, enumerate_candidates,
     PlanReport, plan,
 )
@@ -174,6 +174,7 @@ def _weights(**overrides) -> CostWeights:
         lateness=0.0, drainage=0.0, carrying=0.0, excess=0.0,
         tape_out_single=0.0, tape_out_both=0.0,
         family_change=0.0, idle_time=0.0,
+        priority=0.0, level_loading=0.0, old_machine=0.0,
     )
     defaults.update(overrides)
     return CostWeights(**defaults)
@@ -646,6 +647,10 @@ class CostingTests(unittest.TestCase):
         state = _make_state(
             machines={'M1': machine}, rls_items={'AU0001': rls},
         )
+        # All Phase 1 weights non-zero; Phase 2 weights zero so the
+        # cross-cutting term is 0 regardless of ctx contents — this test
+        # is about the equivalence of per-item + per-machine costing
+        # before vs after commit.
         weights = _weights(
             lateness=10.0, drainage=1.0, carrying=2.0, excess=5.0,
             tape_out_single=100.0, tape_out_both=150.0,
@@ -660,6 +665,13 @@ class CostingTests(unittest.TestCase):
             machine_id='M1', item=_ITEM_A, lbs=100.0,
             start_at='next_job_end', idle_for=timedelta(0), plan=plan,
         )
+        # Minimal ctx — Phase 2 weights are 0, so its contents don't
+        # affect the score, but score_after_move requires a ctx.
+        ctx = ScoringContext(
+            priorities={},
+            earliest_dp_time=machine.next_job_end,
+            new_machine_avail={},
+        )
 
         # --- Purity: snapshot state, call score_after_move, verify
         # nothing changed.
@@ -671,7 +683,7 @@ class CostingTests(unittest.TestCase):
         pre_excess = rls.safety_view.excess
         pre_safety_pool = rls.safety_view.safety_pool
 
-        predicted = costing.score_after_move(state, move)
+        predicted = costing.score_after_move(state, move, ctx)
 
         self.assertEqual(machine.activities, pre_activities)
         self.assertEqual(rls.jobs, pre_jobs)

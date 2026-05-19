@@ -146,6 +146,10 @@ def enumerate_candidates(state: State) -> list[Move]:
                 start_at=dp.start_at,
                 idle_for=idle_for,
                 plan=plan,
+                week_idx=(
+                    order.week_idx if isinstance(order, RegularOrder)
+                    else None
+                ),
             ))
 
     return out

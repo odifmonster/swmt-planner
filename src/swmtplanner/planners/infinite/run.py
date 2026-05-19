@@ -28,7 +28,7 @@ from .costing import (
     Costing, load_weights, weights_from_dict,
 )
 from .loop import plan
-from .report import write_plan_report_xlsx
+from .report import write_plan_report_xlsx, write_iteration_log_tsv
 from .state import State
 
 
@@ -74,6 +74,14 @@ _OutDir = Annotated[Path | None, typer.Option(
     help='Directory to write the output xlsx to. Defaults to the '
          'current working directory.',
 )]
+_Verbose = Annotated[bool, typer.Option(
+    '--verbose', '-v',
+    help='Emit a per-iteration audit-log TSV alongside the XLSX. Each '
+         'row covers one scored candidate (the committed move plus up '
+         'to three next-lowest-scoring rejects per iteration) with its '
+         'full cost breakdown — useful for diagnosing planner decisions '
+         'and tuning weights.',
+)]
 
 
 def run(
@@ -85,6 +93,7 @@ def run(
     demand: _Demand = None,
     weights: _Weights = None,
     output_dir: _OutDir = None,
+    verbose: _Verbose = False,
 ) -> None:
     """Run the Infinite Knitting greedy planner end-to-end. The
     required `config` arg is a JSON file that holds every input either
@@ -164,7 +173,7 @@ def run(
     costing = Costing(cost_weights)
 
     typer.echo('Running planner...')
-    report = plan(state, costing)
+    report = plan(state, costing, verbose=verbose)
     typer.echo(f'  total_score: {report.total_score:.2f}')
     typer.echo(
         f'  unmet (item, week) pairs: '
@@ -175,8 +184,27 @@ def run(
     output_path = (
         output_dir / f'knit_plan_{sd.strftime("%Y%m%d")}.xlsx'
     )
+    idx = 1
+    while output_path.exists():
+        idx += 1
+        output_path = output_dir / f'knit_plan_{sd.strftime('%Y%m%d')}_{idx}.xlsx'
     typer.echo(f'Writing report to {output_path}')
     write_plan_report_xlsx(report, output_path)
+
+    if verbose:
+        log_path = (
+            output_dir / f'iteration_log_{sd.strftime("%Y%m%d")}.tsv'
+        )
+        idx = 1
+        while log_path.exists():
+            idx += 1
+            log_path = (
+                output_dir
+                / f'iteration_log_{sd.strftime("%Y%m%d")}_{idx}.tsv'
+            )
+        typer.echo(f'Writing verbose log to {log_path}')
+        write_iteration_log_tsv(report, log_path)
+
     typer.echo('Done.')
 
 

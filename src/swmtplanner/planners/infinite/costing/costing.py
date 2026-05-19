@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from swmtplanner.schedule import Job, TapeOut, StyleChange, Idle
 
+from swmtplanner.planners.infinite.coordination import OrderKey, ScoringContext
 from swmtplanner.planners.infinite.state import Move, State
 
 if TYPE_CHECKING:
@@ -14,14 +15,18 @@ if TYPE_CHECKING:
 
 @dataclass
 class CostWeights:
-    """Weights for Phase 1 cost scoring. Each component is multiplied by
-    its corresponding weight and summed into the state's total score.
+    """Weights for Phase 1+2 cost scoring. Each component is multiplied
+    by its corresponding weight and summed into the state's total score.
 
     Per-item demand weights apply to the unweighted `CostComponents`
     returned by `RlsItem.cost_if` / the demand views. Per-machine
     schedule weights apply per occurrence (TapeOut, StyleChange) or per
-    work-hour (Idle). Phase 2+ will add cross-cutting aggregate
-    weights; those are not part of this dataclass yet."""
+    work-hour (Idle). Phase 2 cross-cutting weights apply per move
+    being scored — `priority` per rank step, `level_loading` per work-
+    hour delta from the earliest decision point, `old_machine` per move
+    that targets a legacy machine when a new one is candidate-available
+    for the same item. All weights are required; callers must set every
+    field explicitly (0 to opt out of a contribution)."""
     # per-item demand weights
     lateness: float
     drainage: float
@@ -33,13 +38,58 @@ class CostWeights:
     family_change: float
     # per-machine schedule weight — per work-hour
     idle_time: float
+    # cross-cutting weights (Phase 2)
+    priority: float
+    level_loading: float
+    old_machine: float
+
+
+@dataclass(frozen=True)
+class CostBreakdown:
+    """Per-component weighted contributions for a single
+    `score_after_move` evaluation. The sum of the eleven fields equals
+    `Costing.score_after_move(state, move, ctx)`. Returned by
+    `Costing.cost_breakdown_after_move` and consumed by the verbose
+    iteration log (Phase 3)."""
+    # per-item demand contributions
+    lateness: float
+    drainage: float
+    carrying: float
+    excess: float
+    # per-machine schedule contributions
+    tape_out_single: float
+    tape_out_both: float
+    family_change: float
+    idle_time: float
+    # cross-cutting contributions
+    priority: float
+    level_loading: float
+    old_machine: float
+
+    @property
+    def total(self) -> float:
+        return (
+            self.lateness + self.drainage + self.carrying + self.excess
+            + self.tape_out_single + self.tape_out_both
+            + self.family_change + self.idle_time
+            + self.priority + self.level_loading + self.old_machine
+        )
 
 
 class Costing:
-    """Combines per-item demand costs and per-machine schedule penalties
-    into a single scalar `score(state)`. The `score_after_move(state,
-    move)` variant returns the same number computed against the
-    hypothetical post-commit state — pure, no mutation."""
+    """Combines per-item demand costs, per-machine schedule penalties,
+    and (Phase 2) per-move cross-cutting costs into a single scalar.
+
+    `score(state)` returns the state-only portion — per-item demand +
+    per-machine schedule. There is no ctx parameter: the cross-cutting
+    costs are inherently per-move and only apply during candidate
+    evaluation, not when scoring a post-loop final state.
+
+    `score_after_move(state, move, ctx)` returns the same per-item +
+    per-machine portion computed against the hypothetical post-commit
+    state, *plus* the move's cross-cutting contributions read off
+    `ctx` (priority, level-loading, old-machine). Pure — does not
+    mutate `state`. `ctx` is required."""
 
     def __init__(self, weights: CostWeights) -> None:
         self._weights = weights
@@ -65,13 +115,17 @@ class Costing:
             total += self._schedule_penalty(machine)
         return total
 
-    def score_after_move(self, state: State, move: Move) -> float:
+    def score_after_move(
+        self, state: State, move: Move, ctx: ScoringContext,
+    ) -> float:
         """Score the state as if `move` were committed. Pure — does not
         mutate `state`. Internally uses `RlsItem.cost_if(jobs)` for the
         item(s) the move's plan touches, and reads the current view
         trackers for everything else. Schedule penalties for the
         affected machine combine its existing activities with the plan's;
-        other machines use their current counts."""
+        other machines use their current counts. Adds the move's
+        cross-cutting contributions (priority, level-loading,
+        old-machine) read off `ctx`."""
         # Group plan's Jobs by their item.id. Multiple items can appear
         # in a single plan (the 'next_runout' run-up may add Jobs of the
         # current item ahead of the new item's production).
@@ -106,7 +160,136 @@ class Costing:
                 )
             else:
                 total += self._schedule_penalty(machine)
+
+        # Cross-cutting per-move contributions (Phase 2).
+        total += self._cross_cutting_cost(state, move, ctx)
         return total
+
+    def cost_breakdown_after_move(
+        self, state: State, move: Move, ctx: ScoringContext,
+    ) -> CostBreakdown:
+        """Same total as `score_after_move`, returned as one weighted
+        scalar per component. Pure — does not mutate `state`. Used by
+        the verbose iteration log; the hot loop sticks with the scalar
+        `score_after_move` because it avoids the `CostBreakdown`
+        allocation."""
+        # Demand: aggregate unweighted quantities across rls_items,
+        # using cost_if for items touched by move.plan and current
+        # views for the rest.
+        jobs_by_item: dict[str, list[Job]] = {}
+        for a in move.plan:
+            if isinstance(a, Job):
+                jobs_by_item.setdefault(a.item.id, []).append(a)
+        lateness_q = drainage_q = carrying_q = excess_q = 0.0
+        for item_id, rls in state.rls_items.items():
+            if item_id in jobs_by_item:
+                cc = rls.cost_if(jobs_by_item[item_id])
+                lateness_q += cc.lateness
+                drainage_q += cc.drainage
+                carrying_q += cc.carrying
+                excess_q += cc.excess
+            else:
+                lateness_q += rls.raw_view.lateness
+                drainage_q += rls.safety_view.drainage
+                carrying_q += rls.safety_view.carrying
+                excess_q += rls.safety_view.excess
+
+        # Schedule: aggregate unweighted counts / hours across
+        # machines, combining the affected machine's activities with
+        # the move's plan.
+        tos_q = tob_q = fc_q = it_q = 0.0
+        for machine_id, machine in state.machines.items():
+            if machine_id == move.machine_id:
+                activities = list(machine.activities) + list(move.plan)
+            else:
+                activities = machine.activities
+            for a in activities:
+                if isinstance(a, TapeOut):
+                    if a.bars == 'both':
+                        tob_q += 1
+                    else:
+                        tos_q += 1
+                elif isinstance(a, StyleChange):
+                    if a.is_family_change:
+                        fc_q += 1
+                elif isinstance(a, Idle):
+                    it_q += machine.workcal.get_work_hours_between(
+                        a.start, a.end,
+                    )
+
+        # Cross-cutting (unweighted).
+        move_machine = state.machines[move.machine_id]
+        rank = ctx.priorities.get(
+            OrderKey(item_id=move.item.id, week_idx=move.week_idx), 0,
+        )
+        dp_time = (
+            move_machine.next_job_end
+            if move.start_at == 'next_job_end'
+            else move_machine.next_runout
+        )
+        work_hours_delta = move_machine.workcal.get_work_hours_between(
+            ctx.earliest_dp_time, dp_time,
+        )
+        old_machine_applies = (
+            ctx.new_machine_avail.get(move.item, False)
+            and not move_machine.is_new
+        )
+
+        w = self._weights
+        return CostBreakdown(
+            lateness=w.lateness * lateness_q,
+            drainage=w.drainage * drainage_q,
+            carrying=w.carrying * carrying_q,
+            excess=w.excess * excess_q,
+            tape_out_single=w.tape_out_single * tos_q,
+            tape_out_both=w.tape_out_both * tob_q,
+            family_change=w.family_change * fc_q,
+            idle_time=w.idle_time * it_q,
+            priority=w.priority * rank,
+            level_loading=w.level_loading * work_hours_delta,
+            old_machine=(
+                w.old_machine if old_machine_applies else 0.0
+            ),
+        )
+
+    # ---- helpers -------------------------------------------------------
+
+    def _cross_cutting_cost(
+        self, state: State, move: Move, ctx: ScoringContext,
+    ) -> float:
+        """Per-move cross-cutting cost: priority rank × w.priority,
+        level-loading work-hour delta × w.level_loading, and the flat
+        old-machine penalty when applicable."""
+        w = self._weights
+        machine = state.machines[move.machine_id]
+
+        # Priority: rank from ctx; default 0 if the move's order didn't
+        # appear in the priority pool (e.g., directly-constructed test
+        # moves without a matching eligible order).
+        rank = ctx.priorities.get(
+            OrderKey(item_id=move.item.id, week_idx=move.week_idx), 0,
+        )
+        priority_cost = w.priority * rank
+
+        # Level-loading: work hours between the iteration's earliest DP
+        # and this move's DP (pre-idle).
+        dp_time = (
+            machine.next_job_end if move.start_at == 'next_job_end'
+            else machine.next_runout
+        )
+        level_loading_cost = w.level_loading * machine.workcal.get_work_hours_between(
+            ctx.earliest_dp_time, dp_time,
+        )
+
+        # Old-machine: flat penalty when scheduling a legacy machine
+        # while at least one new-machine candidate exists for this item.
+        if (ctx.new_machine_avail.get(move.item, False)
+                and not machine.is_new):
+            old_machine_cost = w.old_machine
+        else:
+            old_machine_cost = 0.0
+
+        return priority_cost + level_loading_cost + old_machine_cost
 
     # ---- helpers -------------------------------------------------------
 

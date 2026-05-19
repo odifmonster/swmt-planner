@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
-    from swmtplanner.planners.infinite.state import State
+    from swmtplanner.planners.infinite.state import Move, State
 
 
 # ----- Order identity & types ---------------------------------------------
@@ -56,9 +56,13 @@ class ScoringContext:
     `priorities` maps every eligible order's `OrderKey` to its rank
     (1 = highest priority); `earliest_dp_time` is the earliest decision
     point time across the iteration's candidate pool, used as the zero
-    point for the level-loading cost."""
+    point for the level-loading cost; `new_machine_avail` maps each
+    `Greige` that appears in the candidate pool to `True` iff at least
+    one of that item's candidates targets a `Machine.is_new` machine,
+    used by the old-machine penalty."""
     priorities: dict[OrderKey, int]
     earliest_dp_time: datetime
+    new_machine_avail: dict['Greige', bool]
 
 
 # ----- Order eligibility --------------------------------------------------
@@ -163,3 +167,54 @@ def assign_priorities(state: 'State') -> dict[OrderKey, int]:
         rank += 1
 
     return ranks
+
+
+# ----- New-machine availability -------------------------------------------
+
+def build_new_machine_avail(
+    state: 'State',
+    candidates: list['Move'],
+) -> dict['Greige', bool]:
+    """Map each `Greige` that appears in `candidates` to `True` iff at
+    least one of that item's candidate moves targets a `Machine.is_new`
+    machine. Items absent from the candidate pool are absent from the
+    returned dict; the cost layer reads with `.get(item, False)` so
+    missing keys default to "no new alternative" (no penalty applies)."""
+    out: dict['Greige', bool] = {}
+    for move in candidates:
+        is_new = state.machines[move.machine_id].is_new
+        out[move.item] = out.get(move.item, False) or is_new
+    return out
+
+
+# ----- ScoringContext construction ----------------------------------------
+
+def build_context(
+    state: 'State',
+    candidates: list['Move'],
+) -> ScoringContext:
+    """Build the per-iteration `ScoringContext` from `state` and the
+    enumerated candidate pool. Combines the three cross-candidate inputs:
+
+    - `priorities` from `assign_priorities(state)`.
+    - `earliest_dp_time` from `min(dp_time(c) for c in candidates)`
+      where `dp_time` is the machine's `next_job_end` or `next_runout`
+      depending on the move's `start_at` — i.e., the decision point
+      time *before* any carrying-avoidance idle.
+    - `new_machine_avail` from `build_new_machine_avail(state,
+      candidates)`.
+
+    Requires `candidates` to be non-empty — the main loop only invokes
+    scoring on a non-empty pool, so an empty list is a programmer
+    error (raises `ValueError` via the `min` call)."""
+    def _dp_time(move: 'Move') -> datetime:
+        machine = state.machines[move.machine_id]
+        if move.start_at == 'next_job_end':
+            return machine.next_job_end
+        return machine.next_runout
+
+    return ScoringContext(
+        priorities=assign_priorities(state),
+        earliest_dp_time=min(_dp_time(c) for c in candidates),
+        new_machine_avail=build_new_machine_avail(state, candidates),
+    )

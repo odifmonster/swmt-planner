@@ -15,10 +15,13 @@ def weights_from_dict(
 ) -> CostWeights:
     """Build a `CostWeights` from an already-parsed dict.
 
-    `cfg` must contain every `CostWeights` field as a numeric key
-    (Phase 1: `lateness`, `drainage`, `carrying`, `excess`,
-    `tape_out_single`, `tape_out_both`, `family_change`, `idle_time`).
-    Extra keys raise `TypeError` so a typo isn't silently dropped.
+    `cfg` must contain every `CostWeights` field as a numeric key —
+    Phase 1: `lateness`, `drainage`, `carrying`, `excess`,
+    `tape_out_single`, `tape_out_both`, `family_change`, `idle_time`;
+    Phase 2 cross-cutting: `priority`, `level_loading`, `old_machine`.
+    All fields are required (callers set 0 to opt out of a
+    contribution). Extra keys raise `TypeError` so a typo isn't
+    silently dropped.
 
     `source` is included in error messages so callers (e.g., a
     higher-level config loader) can point users at the file or section
