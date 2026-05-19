@@ -1,5 +1,0 @@
-#!/usr/bin/env python
-
-from . import infinite, cli
-
-__all__ = ['infinite', 'cli']
