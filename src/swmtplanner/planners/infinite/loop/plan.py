@@ -12,21 +12,24 @@ from swmtplanner.planners.infinite.state import State
 from .candidates import enumerate_candidates
 
 if TYPE_CHECKING:
+    from swmtplanner.demand.order import RawOrder
     from swmtplanner.schedule import Activity, Job
 
 
 @dataclass
 class PlanReport:
     """Snapshot of a `plan` invocation's output. Bundles the schedules,
-    registered jobs, final cost picture, and unmet-demand summary so
-    callers can persist or render the result without holding the
-    mutable `State` around. The schedules themselves also still live on
-    the `Machine` instances inside `state` — this is a copy."""
+    registered jobs, final cost picture, unmet-demand summary, and
+    late-order summary so callers can persist or render the result
+    without holding the mutable `State` around. The schedules themselves
+    also still live on the `Machine` instances inside `state` — this is
+    a copy."""
     schedules: dict[str, tuple['Activity', ...]]
     jobs_by_item: dict[str, tuple['Job', ...]]
     total_score: float
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
+    late_orders: tuple['RawOrder', ...]
 
 
 def plan(state: State, costing: Costing) -> PlanReport:
@@ -126,4 +129,10 @@ def _build_report(state: State, costing: Costing) -> PlanReport:
             for order in r.safety_view.orders
             if order.remaining_lbs > 0
         },
+        late_orders=tuple(
+            order
+            for r in state.rls_items.values()
+            for order in r.raw_view.orders
+            if order.late_lbs > 0
+        ),
     )

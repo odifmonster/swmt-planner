@@ -5,7 +5,118 @@ on FulfillmentViews.
 
 ## FulfillmentView tests
 
-Desired test coverage for view objects. RawView tests are already covered.
+Desired test coverage for view objects. RawView's `allocated_lbs` and
+view-level `lateness` scalar are already covered; the `RawView` section
+below adds coverage for the per-order late-reporting attributes
+(`RawOrder.late_lbs` and `RawOrder.late_fill_date`) introduced after the
+original RawView suite was written.
+
+### RawView
+
+Per-order late reporting on `RawOrder.late_lbs` and `RawOrder.late_fill_date`,
+both written by `RawView.recompute` during the FIFO walk. The view-level
+`lateness` scalar and `allocated_lbs` are already covered by the existing
+RawView suite; these tests focus on the two new per-order attributes. For
+every test, also assert `allocated_lbs` so the late-reporting checks ride
+alongside the canonical allocation invariants. Recall that on-hand is stamped
+at the first order's `due_date`, so any chunk drawn from on-hand is on-time
+for every order it can reach.
+
+1. Empty case
+    - No jobs, `on_hand == 0`. Every order has `allocated_lbs == 0`,
+    `late_lbs == 0.0`, and `late_fill_date is None`.
+2. On-hand only (no jobs)
+    1. On-hand fully covers all four weeks' demand
+        - Every order fully filled by on-hand. `late_lbs == 0.0` for all
+        orders; `late_fill_date == first_due` for all orders.
+    2. On-hand partially covers the horizon
+        - On-hand exhausts midway through some week N (1 <= N <= 3).
+        Orders 0..N have `late_fill_date == first_due` and `late_lbs == 0.0`
+        (with order N's `allocated_lbs` being the partial amount). Orders
+        N+1..3 have `allocated_lbs == 0`, `late_lbs == 0.0`, and
+        `late_fill_date is None`.
+3. On-hand + jobs, no late or unfilled orders
+    - All four orders fully filled; every contributing chunk arrives at or
+    before its target order's `due_date`.
+    1. Jobs all end strictly before their target order's `due_date`
+        - `late_lbs == 0.0` for every order. `late_fill_date` is the latest
+        chunk-arrival time among the chunks that fed that order (either
+        `first_due` if on-hand was the last contributor, or the contributing
+        job's `end` otherwise).
+    2. A job ends exactly on an order's `due_date`
+        - Boundary case: `avail_time == due_date` is on-time (not late).
+        That order's `late_lbs == 0.0`; `late_fill_date == due_date`.
+4. On-hand + jobs, no late orders but some unfilled
+    - Total supply < total demand, but everything supplied arrives on time.
+    `late_lbs == 0.0` for every order in this group.
+    1. Last order partially filled
+        - The partially-filled order's `late_fill_date` is the
+        `availability_time` of the last chunk that contributed to it. Earlier
+        fully-filled orders behave as in section 3.
+    2. Last order completely unfilled (no chunk touches it)
+        - On that order, `allocated_lbs == 0.0`, `late_lbs == 0.0`, and
+        `late_fill_date is None`. Earlier filled orders behave as in section 3.
+5. Jobs with late orders
+    - Variations where at least one chunk arrives after its target order's
+    `due_date`, producing `late_lbs > 0` and a `late_fill_date` past
+    `due_date`. Mix of with- and without-on-hand cases.
+    1. All four orders filled late, no on-hand
+        - Every chunk is a late job. For each order, `allocated_lbs ==
+        qty_lbs`, `late_lbs == allocated_lbs` (all of it late),
+        `late_fill_date > week.due_date`.
+    2. All four orders filled late, on-hand partially fills week 0
+        - On-hand covers part of week 0 on-time (stamped at `first_due ==
+        week 0's due_date`); the rest of week 0's demand and all of weeks
+        1–3 come from late jobs.
+            - Week 0: `late_lbs == qty_lbs - on_hand_lbs`, `late_fill_date`
+            is the latest late chunk that contributed.
+            - Weeks 1–3: `late_lbs == allocated_lbs`, `late_fill_date >
+            week.due_date`.
+    3. Week 0 fully covered and week 1 partially covered by on-hand; jobs
+       fill the rest late
+        - Week 0: fully filled by on-hand. `late_lbs == 0.0`,
+        `late_fill_date == first_due` (== week 0's due_date).
+        - Week 1: on-hand contributes on-time lbs, remainder from late jobs.
+        `late_lbs == qty_lbs - (on_hand - week_0.qty_lbs)`, `late_fill_date`
+        is the latest late chunk contributing.
+        - Weeks 2–3: fully filled by late jobs. `late_lbs == allocated_lbs`,
+        `late_fill_date > week.due_date`.
+    4. No on-hand; jobs fill weeks 0–1 late but weeks 2–3 on-time
+        - Earliest job ends after week 1's `due_date` and its lbs flow to
+        weeks 0 and 1 (both late); a later job ends before week 2's
+        `due_date` and its lbs flow to weeks 2 and 3 on-time.
+            - Weeks 0–1: `late_lbs == allocated_lbs`, `late_fill_date >
+            week.due_date`.
+            - Weeks 2–3: `late_lbs == 0.0`, `late_fill_date <=
+            week.due_date`.
+    5. Same as case 4 but on-hand partially fills week 0
+        - Week 0: on-hand contributes on-time lbs, remainder from the
+        late job. `late_lbs == qty_lbs - on_hand_lbs`, `late_fill_date`
+        is the late job's `availability_time` of its last contributing
+        chunk.
+        - Week 1: fully filled by the late job. `late_lbs ==
+        allocated_lbs`, `late_fill_date > week.due_date`.
+        - Weeks 2–3: fully filled by the later on-time job. `late_lbs ==
+        0.0`, `late_fill_date <= week.due_date`.
+    6. Same as case 4 but week 3's demand is partially unmet
+        - Weeks 0–1: filled late as in case 4. `late_lbs == allocated_lbs`,
+        `late_fill_date > week.due_date`.
+        - Week 2: fully filled on-time by the later job. `late_lbs == 0.0`,
+        `late_fill_date <= week.due_date`.
+        - Week 3: on-time job exhausts before week 3 is satisfied.
+        `allocated_lbs < qty_lbs`, `late_lbs == 0.0`, `late_fill_date` is
+        the last on-time chunk to contribute (`<= week.due_date`).
+    7. Same as case 5 but week 3's demand is partially unmet
+        - Week 0: on-hand + late job as in case 5. `late_lbs == qty_lbs -
+        on_hand_lbs`, `late_fill_date` is the late job's last contributing
+        chunk.
+        - Week 1: fully filled by the late job. `late_lbs == allocated_lbs`,
+        `late_fill_date > week.due_date`.
+        - Week 2: fully filled on-time by the later job. `late_lbs == 0.0`,
+        `late_fill_date <= week.due_date`.
+        - Week 3: on-time job exhausts before week 3 is satisfied.
+        `allocated_lbs < qty_lbs`, `late_lbs == 0.0`, `late_fill_date` is
+        the last on-time chunk to contribute (`<= week.due_date`).
 
 ### SafetyAwareView
 

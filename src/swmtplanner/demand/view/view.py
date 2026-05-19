@@ -58,6 +58,8 @@ class RawView:
 
         for order in self._orders:
             order.allocated_lbs = 0.0
+            order.late_lbs = 0.0
+            order.late_fill_date = None
             needed = order.week.qty_lbs
 
             while needed > 0 and chunk_idx < len(stream):
@@ -72,7 +74,10 @@ class RawView:
                 order.allocated_lbs += take
 
                 avail_time = stream[chunk_idx][0]
+                if order.late_fill_date is None or avail_time > order.late_fill_date:
+                    order.late_fill_date = avail_time
                 if avail_time > order.week.due_date:
+                    order.late_lbs += take
                     days_late = (avail_time - order.week.due_date).total_seconds() / _SECONDS_PER_DAY
                     self._lateness += take * (2.0 ** days_late)
 

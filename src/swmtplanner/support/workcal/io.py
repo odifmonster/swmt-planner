@@ -2,44 +2,58 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
-from .holidays import load_holidays
+from .holidays import holidays_from_list, load_holidays
 from .workcal import WorkCal
 
-__all__ = ['load_workcal']
+__all__ = ['load_workcal', 'workcal_from_dict']
 
 
-def load_workcal(path: str | Path) -> WorkCal:
-    """Load a `WorkCal` from a JSON file.
+def workcal_from_dict(
+    cfg: dict[str, Any],
+    *,
+    holidays_base_dir: str | Path | None = None,
+    source: str = '<workcal dict>',
+) -> WorkCal:
+    """Build a `WorkCal` from an already-parsed dict.
 
-    Expected file shape:
+    The dict's `holidays` field can be either:
 
-        {
-            "work_days": [0, 1, 2, 3, 4],
-            "day_start": 8,
-            "day_end": 17,
-            "holidays": "holidays.json",
-            "cal_shift": 0
-        }
+    - A list of holiday objects (inline) — built directly via
+      `holidays_from_list`.
+    - A path string — opened via `load_holidays`. Relative paths are
+      resolved against `holidays_base_dir` if provided; an absolute
+      path resolves without needing one. Passing a relative path
+      without a base directory is an error.
 
-    `holidays` is a path to a holidays JSON file in the format
-    `load_holidays` consumes. Relative paths are resolved against the
-    directory containing the workcal file (so a workcal and its
-    referenced holidays can sit next to each other in the same data
-    folder). `cal_shift` is optional (defaults to 0)."""
-    path = Path(path)
-    with open(path) as f:
-        cfg = json.load(f)
+    Other fields: `work_days` (list of weekday ints, Mon=0), `day_start`
+    / `day_end` (hour-of-day ints), `cal_shift` (optional, defaults to
+    0). `source` is woven into error messages for context."""
     if not isinstance(cfg, dict):
-        raise TypeError(
-            f'workcal file at {path!r} must contain a top-level object'
-        )
+        raise TypeError(f'{source} must be an object')
 
     holidays_ref = cfg['holidays']
-    holidays_path = Path(holidays_ref)
-    if not holidays_path.is_absolute():
-        holidays_path = path.parent / holidays_path
-    holidays = load_holidays(str(holidays_path))
+    if isinstance(holidays_ref, list):
+        holidays = holidays_from_list(
+            holidays_ref, source=f"{source} ['holidays']",
+        )
+    elif isinstance(holidays_ref, str):
+        holidays_path = Path(holidays_ref)
+        if not holidays_path.is_absolute():
+            if holidays_base_dir is None:
+                raise ValueError(
+                    f"{source} has a relative path string for "
+                    f"'holidays' but no base directory to resolve it "
+                    f'against'
+                )
+            holidays_path = Path(holidays_base_dir) / holidays_path
+        holidays = load_holidays(str(holidays_path))
+    else:
+        raise TypeError(
+            f"{source} ['holidays'] must be a list of holiday objects "
+            f'or a path string'
+        )
 
     return WorkCal(
         work_days=list(cfg['work_days']),
@@ -47,4 +61,18 @@ def load_workcal(path: str | Path) -> WorkCal:
         day_end=int(cfg['day_end']),
         holidays=holidays,
         cal_shift=int(cfg.get('cal_shift', 0)),
+    )
+
+
+def load_workcal(path: str | Path) -> WorkCal:
+    """Load a `WorkCal` from a JSON file. Thin wrapper over
+    `workcal_from_dict` — relative `holidays` paths inside the file
+    are resolved against the file's own directory."""
+    path = Path(path)
+    with open(path) as f:
+        cfg = json.load(f)
+    return workcal_from_dict(
+        cfg,
+        holidays_base_dir=path.parent,
+        source=f'workcal file at {path!r}',
     )

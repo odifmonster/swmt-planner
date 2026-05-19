@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Literal
 
 from swmtplanner.schedule import Activity, Job
+from swmtplanner.demand.order import RawOrder
 from swmtplanner.demand.rlsitem import CostComponents
 from swmtplanner.planners.infinite.costing import Costing
 from swmtplanner.planners.infinite.state import Move, State
@@ -35,6 +36,7 @@ class PlanReport:
     total_score: float
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
+    late_orders: tuple[RawOrder, ...]
 
 
 def plan(state: State, costing: Costing) -> PlanReport: ...

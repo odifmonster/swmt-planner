@@ -1,9 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from swmtplanner.planners.infinite.state import Move, State
 
-__all__ = ['CostWeights', 'Costing', 'load_weights']
+__all__ = [
+    'CostWeights', 'Costing', 'load_weights', 'weights_from_dict',
+]
 
 
 @dataclass
@@ -27,3 +30,6 @@ class Costing:
 
 
 def load_weights(path: str | Path) -> CostWeights: ...
+def weights_from_dict(
+    cfg: dict[str, Any], source: str = ...,
+) -> CostWeights: ...

@@ -1,11 +1,23 @@
-from .holidays import FlexDate, FixedDate, load_holidays
+from .holidays import (
+    FlexDate, FixedDate, holidays_from_list, load_holidays,
+)
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
-__all__ = ['FlexDate', 'FixedDate', 'load_holidays', 'WorkCal', 'load_workcal']
+__all__ = [
+    'FlexDate', 'FixedDate', 'holidays_from_list', 'load_holidays',
+    'WorkCal', 'load_workcal', 'workcal_from_dict',
+]
 
 
 def load_workcal(path: str | Path) -> WorkCal: ...
+def workcal_from_dict(
+    cfg: dict[str, Any],
+    *,
+    holidays_base_dir: str | Path | None = ...,
+    source: str = ...,
+) -> WorkCal: ...
 
 class WorkCal:
     """Convenience class for handling date math across business days/hours.

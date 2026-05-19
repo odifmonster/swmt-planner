@@ -60,9 +60,23 @@ Order (HasID)         # one week's slice of one view's accounting
   is_fulfilled
 
 SafetyAwareOrder(Order)
+  # No extra attributes; allocation logic lives on SafetyAwareView.
+
 RawOrder(Order)
-  # The subclasses exist for typing and so each view's orders are
-  # distinguishable. The allocation logic lives on the views, not the orders.
+  late_lbs: float                # subset of `allocated_lbs` that came
+                                 # from chunks arriving past
+                                 # `week.due_date`
+  late_fill_date: datetime|None  # latest chunk-arrival time across the
+                                 # chunks that fed `allocated_lbs` —
+                                 # i.e., when the order became whole,
+                                 # or (when recompute ends with
+                                 # `remaining_lbs > 0`) the time of
+                                 # the last job that made progress on
+                                 # it. `None` when nothing was
+                                 # allocated to the order at all.
+  # Allocation logic still lives on RawView; `recompute` writes all
+  # three per-order attributes (allocated_lbs, late_lbs,
+  # late_fill_date) during the FIFO walk.
 
 FulfillmentView (abstract)
   orders: list[Order]              # length 4, week-ordered
@@ -115,7 +129,21 @@ its `availability_time`; if `availability_time > week.due_date`, that lb is
 late by `availability_time - week.due_date`.
 
 `RawOrder.allocated_lbs` includes both on-time and late lbs (per
-"the plant ships whatever it has").
+"the plant ships whatever it has"). The same walk also writes two
+per-order late-reporting attributes:
+
+- `RawOrder.late_lbs` — the subset of `allocated_lbs` whose
+  `availability_time > week.due_date`. The view-level `lateness`
+  scalar still aggregates the exponential lb-day cost; `late_lbs` is
+  the raw lbs view that the scheduler turns into an operator-facing
+  table.
+- `RawOrder.late_fill_date` — the latest `availability_time` across
+  the chunks that contributed to `allocated_lbs`. When the order is
+  fully filled, this is the moment it became whole; when recompute
+  ends with `remaining_lbs > 0`, it's the time the last contributing
+  job made progress on it (so the scheduler can still report a
+  meaningful "filled by" date even for orders with unmet demand).
+  Stays `None` for orders with `allocated_lbs == 0`.
 
 Anything left in the stream after week 3 is fully covered = excess. The raw
 view ignores excess and carrying — it only cares about lateness.

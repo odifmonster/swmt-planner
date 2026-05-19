@@ -227,12 +227,21 @@ PlanReport
   cost_components_by_item: dict[str, CostComponents]
   # what couldn't be placed
   unmet_lbs_by_item_week: dict[tuple[str, int], float]
+  # which orders ship late and when they finish filling
+  late_orders: tuple[RawOrder, ...]
 ```
 
 The full schedules also remain on the `Machine` instances inside
 `state`; the report bundles them into a self-contained snapshot so
 callers can persist or render without holding the mutable `State`
 around.
+
+`late_orders` is the sequence of `RawOrder`s across all rls_items
+whose `late_lbs > 0` after the planner's last commit — sourced
+directly from each `RlsItem.raw_view.orders` and filtered. Each
+order's `late_lbs` and `late_fill_date` come from
+`RawView.recompute` (see `demand/DESIGN.md`). The CLI uses this
+sequence to build the operator-facing `late_orders` sheet.
 
 ## Candidate enumeration
 
@@ -515,42 +524,139 @@ committed activities, rls_items now carry the registered jobs.
 
 ## CLI entry point
 
-A `typer` app in `planners/infinite/cli.py` runs the planner end-to-
-end. Invocation shape:
+A `typer` app in `planners/infinite/run.py` runs the planner end-to-
+end. The CLI takes one required positional argument — a path to a
+**run-config JSON** — plus a set of optional override flags:
 
 ```
-swmt-infinite-plan \
-    --products path/to/greige.xlsx \
-    --demand path/to/demand.xlsx \
-    --machines path/to/machines.xlsx \
-    --weights path/to/weights.json \
-    --start-date 2026-05-18 \
-    --workcal path/to/workcal.json \
-    --output path/to/plan.xlsx
+swmt-infinite-plan <config.json>
+    [--start-date YYYY-MM-DD]
+    [--products PATH] [--workcal PATH] [--machines PATH]
+    [--demand PATH]   [--weights PATH]
+    [--output-dir DIR]
 ```
 
-The CLI is glue: it reads each input via the appropriate submodule's
-reader (`products.read_greige_styles`, `demand.read_rls_items`,
-`schedule.read_machines`), reads weights and workcal config, builds
-the `State` and `Costing`, calls `plan(state, costing)`, and writes
-the resulting `PlanReport` to a single Excel workbook.
+### Run-config JSON
 
-Output workbook layout:
+A top-level object with six required keys:
 
-- **One sheet per machine** — chronological activity list with
-  start, end, duration, activity type, item, and lbs columns.
-- **One sheet per rls_item** — chronological job list with start,
-  end, machine, and lbs, plus a header section showing the item's
-  cost-component totals and any unmet weekly demand.
-- **A summary sheet** — total score, plant-wide cost-component
-  totals, an unmet-demand table, and the cost-weight config used
-  (for traceability).
+```
+{
+    "start_date": "YYYY-MM-DD",                # always inline
+    "products":   <path-string | list of greige objects>,
+    "workcal":    <path-string | workcal object>,
+    "machines":   <path-string | list of machine objects>,
+    "demand":     <path-string | list of demand objects>,
+    "weights":    <path-string | weights object>
+}
+```
+
+Every key except `start_date` can hold **either** a string (a path
+to a JSON file with the same shape that the per-input loader would
+read from disk) **or** the inline value (the object/list that the
+file would have contained). The two forms are interchangeable and
+can be mixed freely from one key to the next, so a run-config can:
+
+- Reference external JSONs for fields that change frequently (e.g.,
+  `demand` pulled fresh from the database each day).
+- Inline fields that are stable or session-specific (e.g., a one-off
+  `weights` variation for an experiment).
+- Whatever combination is most convenient.
+
+String paths in the config are resolved against the directory
+holding the config file, so a whole input bundle can sit in one
+folder and move together as a unit.
+
+### CLI option overrides
+
+Each input key has a matching CLI flag that, when provided,
+overrides the config value for that key. The override always wins —
+even if the config inlines the value. Options are truly optional;
+the config alone suffices for a full run.
+
+| Option         | Short | Value                                                       |
+|---|---|---|
+| `--start-date` | `-s`  | `YYYY-MM-DD` literal                                        |
+| `--products`   | `-p`  | path to greige-styles JSON, *or* an inline JSON string      |
+| `--workcal`    | `-c`  | path to workcal JSON, *or* an inline JSON string            |
+| `--machines`   | `-m`  | path to machines JSON, *or* an inline JSON string           |
+| `--demand`     | `-d`  | path to demand JSON, *or* an inline JSON string             |
+| `--weights`    | `-w`  | path to weights JSON, *or* an inline JSON string            |
+| `--output-dir` | `-o`  | output directory (defaults to cwd)                          |
+
+Non-`start_date` override values are interpreted as **inline JSON**
+when the first non-whitespace character is `{` or `[`, otherwise as
+a **file path**. The inline form is primarily for testing —
+realistic input objects are too big to comfortably paste on a
+command line, but a one-off small `--weights '{"lateness": 10, ...}'`
+is sometimes the quickest way to vary a single field during an
+experiment. CLI paths are resolved against the shell's current
+working directory (typer's default), not the config's directory.
+
+### Resolution rule
+
+For each input key, the value is determined in this order:
+
+1. **CLI override** — when the matching flag is present:
+   - If the value starts with `{` or `[` (after whitespace), parse
+     it as inline JSON and build the input directly from that data.
+   - Otherwise treat it as a path (relative to cwd) and load.
+2. **Config string** — when the config's value is a string, treat
+   it as a path relative to the config's directory and load.
+3. **Config inline** — when the config's value is an object/list,
+   build the input directly from that data.
+
+Concretely each per-submodule loader exposes two entry points:
+
+- `read_X(path, ...)` — file-based; opens the JSON and delegates.
+- `X_from_dict(...)` / `X_from_list(...)` — in-memory; takes the
+  already-parsed value (`weights_from_dict` is the existing example).
+
+`run()` picks the right one per key based on the resolved value's
+shape. Inline `workcal` objects whose `holidays` field is a string
+resolve that nested path against the config's directory (the only
+sub-path inside a config-inlined value the planner is aware of).
+Inline `workcal` from a CLI override has no enclosing directory to
+resolve against; its `holidays` must also be inlined.
+
+### Output
+
+The CLI writes a single Excel workbook at
+`<output_dir>/knit_plan_<YYYYMMDD>.xlsx` where the YYYYMMDD is the
+resolved `start_date`. Four sheets:
+
+- `schedule` — multi-indexed by `(machine, activity_id)`, every
+  activity across all machines.
+- `production` — multi-indexed by `(item, activity_id)`, every
+  committed `Job`.
+- `unmet_demand` — flat `(item, week_idx, unmet_lbs)`, one row per
+  `safety_view.orders` entry with `remaining_lbs > 0`.
+- `late_orders` — flat `(item, week_idx, late_lbs, late_fill_date)`,
+  one row per `PlanReport.late_orders` entry. `late_fill_date`
+  reports when the order will finish filling (the latest contributing
+  chunk's arrival time), even if some demand remains unmet.
+
+See `report.py` for the per-sheet layouts.
+
+### Why a config file (with overrides)
 
 The CLI lives in `planners/infinite/` because it's the highest-level
-artifact that touches every submodule. Per-submodule reading stays in
-the submodules so the planner doesn't grow a spreadsheet dependency
-it doesn't need, and so per-input format evolution is local to the
-owner of that input.
+artifact that touches every submodule. Per-submodule reading stays
+in the submodules so the planner doesn't grow a spreadsheet
+dependency it doesn't need, and per-input format evolution is local
+to the owner of that input.
+
+The config-plus-overrides shape supports two normal workflows:
+
+- **Production runs** — one stable config per shift / week, all
+  inputs cleanly pinned in one file; the user just points at it.
+- **Experiments / re-runs** — same config plus an override or two
+  (e.g., `--weights variant.json` to try a different cost setup
+  without editing the canonical config).
+
+It's also intentional groundwork for a future user-friendlier shell
+(dashboard for editing weights and triggering runs) — the JSON-only
+inputs make that wrapper straightforward to build.
 
 ## Phases
 

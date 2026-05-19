@@ -3,40 +3,28 @@
 import json
 from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 from .costing import CostWeights
 
-__all__ = ['load_weights']
+__all__ = ['load_weights', 'weights_from_dict']
 
 
-def load_weights(path: str | Path) -> CostWeights:
-    """Load a `CostWeights` from a JSON file.
+def weights_from_dict(
+    cfg: dict[str, Any], source: str = '<weights dict>',
+) -> CostWeights:
+    """Build a `CostWeights` from an already-parsed dict.
 
-    Expected file shape: a top-level object with one key per
-    `CostWeights` field (Phase 1: `lateness`, `drainage`, `carrying`,
-    `excess`, `tape_out_single`, `tape_out_both`, `family_change`,
-    `idle_time`; Phase 2 will add `priority` and `level_loading`):
+    `cfg` must contain every `CostWeights` field as a numeric key
+    (Phase 1: `lateness`, `drainage`, `carrying`, `excess`,
+    `tape_out_single`, `tape_out_both`, `family_change`, `idle_time`).
+    Extra keys raise `TypeError` so a typo isn't silently dropped.
 
-        {
-            "lateness": 10.0,
-            "drainage": 1.0,
-            "carrying": 1.0,
-            "excess": 5.0,
-            "tape_out_single": 100.0,
-            "tape_out_both": 150.0,
-            "family_change": 50.0,
-            "idle_time": 10.0
-        }
-
-    All `CostWeights` fields are required (no implicit defaults); the
-    JSON must contain every key. Extra keys in the JSON raise
-    `TypeError` so a typo doesn't silently get dropped."""
-    with open(path) as f:
-        cfg = json.load(f)
+    `source` is included in error messages so callers (e.g., a
+    higher-level config loader) can point users at the file or section
+    where the problem is."""
     if not isinstance(cfg, dict):
-        raise TypeError(
-            f'weights file at {path!r} must contain a top-level object'
-        )
+        raise TypeError(f'{source} must be an object')
 
     expected = {f.name for f in fields(CostWeights)}
     got = set(cfg.keys())
@@ -44,13 +32,24 @@ def load_weights(path: str | Path) -> CostWeights:
     missing = expected - got
     if missing:
         raise TypeError(
-            f'weights file at {path!r} is missing required keys: '
-            f'{sorted(missing)}'
+            f'{source} is missing required keys: {sorted(missing)}'
         )
     extra = got - expected
     if extra:
         raise TypeError(
-            f'weights file at {path!r} has unknown keys: {sorted(extra)}'
+            f'{source} has unknown keys: {sorted(extra)}'
         )
 
     return CostWeights(**{k: float(cfg[k]) for k in expected})
+
+
+def load_weights(path: str | Path) -> CostWeights:
+    """Load a `CostWeights` from a standalone JSON file. Thin wrapper
+    over `weights_from_dict` for callers who want a file-based config
+    rather than an inline `weights` object inside a larger config.
+
+    Expected file shape: a top-level object with one key per
+    `CostWeights` field. See `weights_from_dict` for the field list."""
+    with open(path) as f:
+        cfg = json.load(f)
+    return weights_from_dict(cfg, source=f'weights file at {path!r}')

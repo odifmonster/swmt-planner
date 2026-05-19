@@ -5,10 +5,11 @@ from .activity import (
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION, BEAM_LOAD_DURATION,
 )
 from .machine import Status, Machine, fresh_beam_lbs
-from .io import read_machines
+from .io import read_machines, machines_from_list
 
 __all__ = [
     'Activity', 'Job', 'Waste', 'TapeOut', 'BeamLoad', 'StyleChange', 'Idle',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION', 'BEAM_LOAD_DURATION',
-    'Status', 'Machine', 'fresh_beam_lbs', 'read_machines',
+    'Status', 'Machine', 'fresh_beam_lbs',
+    'read_machines', 'machines_from_list',
 ]
