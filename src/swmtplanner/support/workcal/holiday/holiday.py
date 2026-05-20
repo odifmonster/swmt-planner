@@ -6,7 +6,7 @@ from abc import abstractmethod
 from datetime import date
 
 
-@dataclass
+@dataclass(frozen=True)
 class Holiday:
     name: str
     month: int

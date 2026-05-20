@@ -6,7 +6,7 @@ from datetime import date
 __all__ = ['Holiday', 'FixedDate', 'FlexDate']
 
 
-@dataclass
+@dataclass(frozen=True)
 class Holiday:
     """Abstract base class for holidays."""
     name: str

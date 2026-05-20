@@ -16,11 +16,14 @@ class WorkCal:
         day_start: int,
         day_end: int,
         holidays: list[Holiday],
+        cal_shift: int = 0
     ) -> None:
         self._weekdays = tuple(weekdays)
         self._day_start = day_start
         self._day_end = day_end
         self._holidays = tuple(holidays)
+        self._cal_shift = cal_shift
+        self._shift_dt = timedelta(hours=cal_shift)
 
         self._cache_lo = None
         self._cache_hi = None
@@ -49,6 +52,10 @@ class WorkCal:
     @property
     def work_hours_per_day(self) -> int:
         return self._day_end - self._day_start
+    
+    @property
+    def cal_shift(self) -> int:
+        return self._cal_shift
     
     def _compute_holiday_ordinals(self, year: int):
         return [ h.date_in_year(year).toordinal() for h in self._holidays ]
@@ -128,22 +135,55 @@ class WorkCal:
         return self._day_end_dt(self._prev_workday(dt.date()))
 
     def offset_work_hours(self, start: datetime, hours: float) -> datetime:
+        start -= self._shift_dt
         forward = hours >= 0
         current = self._snap_to_business(start, forward)
+        # Track the workday `current` belongs to. Normally that's `current.date()`,
+        # but when `day_end == 24` the day_end_dt of workday wd equals midnight of
+        # wd+1, so a backward-snapped `current` at that boundary has .date() = wd+1.
+        if not forward and self._day_end == 24 and current.time() == time(0):
+            wd = current.date() - timedelta(days=1)
+        else:
+            wd = current.date()
         remaining = abs(hours)
         while remaining > 0:
             if forward:
-                de = self._day_end_dt(current.date())
+                de = self._day_end_dt(wd)
                 avail = (de - current).total_seconds() / 3600
                 if remaining <= avail:
-                    return current + timedelta(hours=remaining)
+                    return current + timedelta(hours=remaining) + self._shift_dt
                 remaining -= avail
-                current = self._day_start_dt(self._next_workday(current.date()))
+                wd = self._next_workday(wd)
+                current = self._day_start_dt(wd)
             else:
-                ds = self._day_start_dt(current.date())
+                ds = self._day_start_dt(wd)
                 avail = (current - ds).total_seconds() / 3600
                 if remaining <= avail:
-                    return current - timedelta(hours=remaining)
+                    return current - timedelta(hours=remaining) + self._shift_dt
                 remaining -= avail
-                current = self._day_end_dt(self._prev_workday(current.date()))
-        return current
+                wd = self._prev_workday(wd)
+                current = self._day_end_dt(wd)
+        return current + self._shift_dt
+
+    def get_work_hours_between(self, start: datetime, end: datetime) -> float:
+        if start >= end:
+            return 0.0
+        start -= self._shift_dt
+        end -= self._shift_dt
+        total = 0.0
+        d = start.date()
+        end_date = end.date()
+        while d <= end_date:
+            if self.is_workday(d):
+                lo = max(start, self._day_start_dt(d))
+                hi = min(end, self._day_end_dt(d))
+                if hi > lo:
+                    total += (hi - lo).total_seconds() / 3600
+            d += timedelta(days=1)
+        return total
+
+    def avail_hours_before_weekend(self, start: datetime) -> float:
+        cal_date = (start - self._shift_dt).date()
+        end_cal_date = cal_date + timedelta(days=8 - cal_date.isoweekday())
+        end_real = datetime.combine(end_cal_date, time()) + self._shift_dt
+        return self.get_work_hours_between(start, end_real)

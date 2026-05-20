@@ -48,6 +48,7 @@ class WorkCal:
     day_start: int
     day_end: int
     holidays: tuple[Holiday, ...]
+    cal_shift: int
 
     # computed properties
     work_days_per_week: int
@@ -59,6 +60,7 @@ class WorkCal:
         day_start: int,
         day_end: int,
         holidays: list[Holiday],
+        cal_shift: int = 0,
     ) -> None: ...
 
     # operations
@@ -102,15 +104,20 @@ target month and offsets by the appropriate number of weeks.
 
 ### Construction
 
-`WorkCal(weekdays, day_start, day_end, holidays)`:
+`WorkCal(weekdays, day_start, day_end, holidays, cal_shift=0)`:
 
 - `weekdays: list[int]` — working weekdays, Python `date.weekday()`
   convention (Mon=0..Sun=6).
-- `day_start: int` — hour the business day begins, in `[0, 24]`.
-- `day_end: int` — hour the business day ends, in `[0, 24]`. `day_end=24`
-  denotes a business day that runs to the end of the calendar day (i.e., a
-  24-hour workday when paired with `day_start=0`).
+- `day_start: int` — hour the business day begins, in `[0, 24]`, measured
+  from the start of the calendar day (see _Calendar shift_ below).
+- `day_end: int` — hour the business day ends, in `[0, 24]`, measured from
+  the start of the calendar day. `day_end=24` denotes a business day that
+  runs to the end of the calendar day (i.e., a 24-hour workday when paired
+  with `day_start=0`).
 - `holidays: list[Holiday]` — holidays observed by this calendar.
+- `cal_shift: int` — optional integer hour offset that shifts the start of
+  every calendar day away from midnight. Defaults to `0`. See
+  _Calendar shift_ below.
 
 Both list arguments are **copied** at construction so that mutations to the
 caller's lists cannot affect the calendar's internal state.
@@ -124,11 +131,58 @@ there are no setters. Callers cannot mutate a `WorkCal` after it is built.
 - `day_start: int`
 - `day_end: int`
 - `holidays: tuple[Holiday, ...]`
+- `cal_shift: int`
 
 ### Computed properties
 
 - `work_days_per_week: int` — `len(weekdays)`.
 - `work_hours_per_day: int` — `day_end - day_start`.
+
+### Calendar shift
+
+`cal_shift` lets the calendar's day boundary live somewhere other than
+midnight. It is an integer number of hours by which the start of each
+calendar day is offset from real-clock midnight:
+
+- `cal_shift = 0` (the default) — calendar day boundaries coincide with
+  midnight.
+- `cal_shift < 0` — each calendar day starts *before* midnight, in the
+  previous real-clock day's evening.
+- `cal_shift > 0` — each calendar day starts *after* midnight, in the
+  real-clock morning.
+
+Concretely, the calendar day to which a real datetime `dt` belongs is
+
+```
+calendar_date(dt) = (dt - timedelta(hours=cal_shift)).date()
+```
+
+and the real datetime at the start of calendar date `cd` is
+
+```
+datetime.combine(cd, time()) + timedelta(hours=cal_shift)
+```
+
+`day_start` and `day_end` are measured from that shifted day-start, not
+from midnight, so `day_start=0, day_end=24` always denotes a 24-hour
+business day regardless of `cal_shift`.
+
+**Example.** A dyeing facility runs three 8-hour shifts: 23:00–07:00,
+07:00–15:00, 15:00–23:00. Its "Monday" begins at 23:00 on Sunday (real
+clock) and ends at 23:00 on Monday. That calendar is
+`WorkCal(weekdays=[0,1,2,3,4], day_start=0, day_end=24, holidays=[...],
+cal_shift=-1)`.
+
+### Effect on operations
+
+- `is_workday(d)` takes a *calendar* date — i.e., the date returned by
+  `calendar_date(...)`, not necessarily the real-clock date a wall-clock
+  observer would call it.
+- `offset_work_days` operates in calendar days; its inputs and outputs are
+  calendar dates.
+- `offset_work_hours`, `get_work_hours_between`, and
+  `avail_hours_before_weekend` take real datetimes and internally map them
+  to calendar time via `cal_shift`.
 
 ### Operations
 
@@ -175,9 +229,21 @@ when `start >= end` (the function does not produce signed results).
 
 #### `avail_hours_before_weekend(start) -> float`
 
-Returns the number of working hours between `start` and the start of the
-next contiguous run of non-working days (i.e., the end of the current work
-week from `start`'s perspective). If `start` is itself in non-working time
-it is snapped forward first, so the result reflects the work week that
-`start` enters into. Useful for asking "can this finish before the week is
-out?"
+Returns the number of working hours between `start` and the end of the ISO
+calendar week that contains `start`'s calendar date — i.e., the instant
+calendar Sunday rolls into calendar Monday. Equivalent to
+`get_work_hours_between(start, end_of_iso_week)`.
+
+`start` is **not** snapped. Any working hours falling between `start` and
+end-of-week are counted; any non-working hours in that range are not.
+Consequently:
+
+- On a Mon-Fri calendar, calling with a Saturday or Sunday `start` returns
+  `0`.
+- On a Mon-Fri calendar with a Wednesday holiday, calling at Monday morning
+  returns `4 * work_hours_per_day` (Mon + Tue + Thu + Fri).
+- On a 24/7 calendar (all seven weekdays working), the function is still
+  well-defined: it returns the working hours between `start` and the next
+  calendar-Monday boundary.
+
+Useful for asking "can this finish before the week is out?"
