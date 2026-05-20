@@ -3,7 +3,7 @@
 import re
 from typing import TYPE_CHECKING
 
-from ...support import HasID
+from swmtplanner.support import HasID
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

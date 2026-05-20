@@ -94,7 +94,9 @@ class GreigeRoll(RawMat):
     plant: str
     item_variant: str
     yarn_merge: str
-    size: RollSize
+
+    @property
+    def size(self) -> RollSize: ...  # computed from qty / product.roll_tgt_wt
 
     def split(self, lbs1: float, lbs2: float) -> tuple[GreigeRoll, GreigeRoll]: ...
     def combine(self, roll: GreigeRoll) -> GreigeRoll: ...
@@ -304,20 +306,31 @@ information inherited from `RawMat`:
   the end user only; not used by the planner for matching.
 - `yarn_merge: str` — identifier of the yarn merge the roll was knit from.
   Reported to the end user only; not used by the planner for matching.
-- `size: RollSize` — discrete size bucket, one of
+- `size: RollSize` — computed at construction from
+  `qty / product.roll_tgt_wt`. Discrete size bucket, one of
   `'partial' | 'half' | 'small' | 'full' | 'large'`. Used by the planner
-  for dye-cycle matching.
+  for dye-cycle matching. (Not a constructor parameter — see the
+  implementation for current threshold values.)
 
 Operations:
 
 - `split(lbs1: float, lbs2: float) -> tuple[GreigeRoll, GreigeRoll]` —
   splits a non-standard roll into two rolls of the given pound weights.
-  Used when a roll's weight does not match a standard `RollSize` bucket
-  and needs to be broken up before being assigned to a lot.
+  Both new rolls inherit `product`, `avail_date`, `plant`,
+  `item_variant`, and `yarn_merge` from this roll; their IDs are this
+  roll's ID suffixed with `'A'` and `'B'` respectively. Raises
+  `ValueError` if `lbs1 + lbs2` is not approximately equal to this
+  roll's `qty`.
 - `combine(roll: GreigeRoll) -> GreigeRoll` — combines this roll with
-  another non-standard roll to produce a single combined roll. Used to
-  build a usable lot member out of two pieces that on their own do not
-  fill a standard size bucket.
+  another non-standard roll into a single combined roll. The combined
+  roll's `id` is always the concatenation of the two source rolls' IDs
+  (this roll first). `item_variant` and `yarn_merge` are concatenated
+  only when the two source values differ; if both rolls share the same
+  `item_variant` (or `yarn_merge`), that single value is kept on the
+  combined roll. `qty` is the sum. `avail_date` is the later of the two
+  (with `None` treated as already-available). Raises `ValueError` if
+  the two rolls come from different plants or are instances of
+  different greige items.
 
 ## `dyelot/` - dye-cycle lot grouping
 
