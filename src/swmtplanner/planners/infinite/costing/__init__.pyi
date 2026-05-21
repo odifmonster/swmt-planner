@@ -6,7 +6,7 @@ from swmtplanner.planners.infinite.coordination import ScoringContext
 from swmtplanner.planners.infinite.state import Move, State
 
 __all__ = [
-    'CostWeights', 'CostBreakdown', 'Costing',
+    'CostWeights', 'CostBreakdown', 'PriorityContribution', 'Costing',
     'load_weights', 'weights_from_dict',
 ]
 
@@ -27,6 +27,13 @@ class CostWeights:
 
 
 @dataclass(frozen=True)
+class PriorityContribution:
+    week_idx: int
+    remaining_lbs: float
+    priority: float
+
+
+@dataclass(frozen=True)
 class CostBreakdown:
     lateness: float
     drainage: float
@@ -39,6 +46,11 @@ class CostBreakdown:
     priority: float
     level_loading: float
     old_machine: float
+    lateness_by_item: dict[str, float]
+    drainage_by_item: dict[str, float]
+    carrying_by_item: dict[str, float]
+    excess_by_item: dict[str, float]
+    priority_by_item: dict[str, PriorityContribution]
     @property
     def total(self) -> float: ...
 
@@ -51,6 +63,7 @@ class Costing:
     def score_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
     ) -> float: ...
+    def cost_breakdown(self, state: State) -> CostBreakdown: ...
     def cost_breakdown_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
     ) -> CostBreakdown: ...

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -46,13 +46,35 @@ class CostWeights:
 
 
 @dataclass(frozen=True)
+class PriorityContribution:
+    """Value type for `CostBreakdown.priority_by_item`. The enclosing
+    dict is keyed by `item_id`; at most one entry per item appears
+    because the candidate enumerator picks at most one regular order
+    per item per iteration, so each item has a unique higher-priority
+    counterpart. See DESIGN.md."""
+    week_idx: int                 # week (0..3) of the deferred regular order
+    remaining_lbs: float          # unfulfilled lbs of the order at evaluation time
+    priority: float               # weighted contribution: w.priority × remaining_lbs × 2^days_late(O, move)
+
+
+@dataclass(frozen=True)
 class CostBreakdown:
-    """Per-component weighted contributions for a single
-    `score_after_move` evaluation. The sum of the eleven fields equals
-    `Costing.score_after_move(state, move, ctx)`. Returned by
-    `Costing.cost_breakdown_after_move` and consumed by the verbose
-    iteration log (Phase 3)."""
-    # per-item demand contributions
+    """Per-component weighted contributions for a single state. The sum
+    of the eleven scalar fields equals `Costing.score_after_move(state,
+    move, ctx)` when produced by `cost_breakdown_after_move`, or
+    `Costing.score(state)` when produced by `cost_breakdown(state)`.
+
+    Returned by both `Costing.cost_breakdown(state)` (baseline; per-move
+    cross-cutting costs are 0 and `priority_by_item` is empty) and
+    `Costing.cost_breakdown_after_move(state, move, ctx)` (post-commit).
+
+    The `*_by_item` dicts hold *absolute* weighted per-item contributions
+    for the state the breakdown describes. Only items with a non-zero
+    contribution are present. The verbose loop computes per-item deltas
+    by subtracting baseline values from post-commit values; this layer
+    just exposes the absolute per-item attribution. See DESIGN.md's
+    "Verbose iteration log" section for the consumer side."""
+    # per-item demand contributions (weighted totals)
     lateness: float
     drainage: float
     carrying: float
@@ -66,6 +88,13 @@ class CostBreakdown:
     priority: float
     level_loading: float
     old_machine: float
+    # absolute per-item breakdowns (only non-zero contributions)
+    lateness_by_item: dict[str, float] = field(default_factory=dict)
+    drainage_by_item: dict[str, float] = field(default_factory=dict)
+    carrying_by_item: dict[str, float] = field(default_factory=dict)
+    excess_by_item: dict[str, float] = field(default_factory=dict)
+    # per-item priority breakdown — at most one PriorityContribution per item
+    priority_by_item: dict[str, PriorityContribution] = field(default_factory=dict)
 
     @property
     def total(self) -> float:
@@ -90,7 +119,13 @@ class Costing:
     per-machine portion computed against the hypothetical post-commit
     state, *plus* the move's cross-cutting contributions read off
     `ctx` (priority, level-loading, old-machine). Pure — does not
-    mutate `state`. `ctx` is required."""
+    mutate `state`. `ctx` is required.
+
+    `cost_breakdown(state)` and `cost_breakdown_after_move(state, move,
+    ctx)` mirror the two `score*` methods but return a `CostBreakdown`
+    record — eleven weighted scalars plus per-item dicts for the four
+    demand-side costs and for priority. Used by the verbose iteration
+    log; the hot scoring loop stays on the scalar `score*` methods."""
 
     def __init__(self, weights: CostWeights) -> None:
         self._weights = weights
@@ -166,61 +201,127 @@ class Costing:
         total += self._cross_cutting_cost(state, move, ctx)
         return total
 
+    def cost_breakdown(self, state: State) -> CostBreakdown:
+        """Baseline breakdown of `state` with no move applied. Total
+        equals `score(state)`. Per-move cross-cutting costs
+        (`priority`, `level_loading`, `old_machine`) are 0 and
+        `priority_by_item` is empty, because those costs only exist
+        relative to a candidate move. Used by the verbose iteration
+        log as the baseline against which `cost_breakdown_after_move`'s
+        per-item dicts are diffed. Pure — does not mutate `state`."""
+        w = self._weights
+        lateness_by_item: dict[str, float] = {}
+        drainage_by_item: dict[str, float] = {}
+        carrying_by_item: dict[str, float] = {}
+        excess_by_item: dict[str, float] = {}
+        lateness_q = drainage_q = carrying_q = excess_q = 0.0
+        for item_id, rls in state.rls_items.items():
+            l = rls.raw_view.lateness
+            d = rls.safety_view.drainage
+            c = rls.safety_view.carrying
+            e = rls.safety_view.excess
+            lateness_q += l
+            drainage_q += d
+            carrying_q += c
+            excess_q += e
+            self._record_demand_item(
+                item_id, l, d, c, e,
+                lateness_by_item, drainage_by_item,
+                carrying_by_item, excess_by_item,
+            )
+
+        tos_q = tob_q = fc_q = it_q = 0.0
+        for machine in state.machines.values():
+            stos, stob, sfc, sit = self._schedule_quantities_for(
+                machine.activities, machine.workcal,
+            )
+            tos_q += stos
+            tob_q += stob
+            fc_q += sfc
+            it_q += sit
+
+        return CostBreakdown(
+            lateness=w.lateness * lateness_q,
+            drainage=w.drainage * drainage_q,
+            carrying=w.carrying * carrying_q,
+            excess=w.excess * excess_q,
+            tape_out_single=w.tape_out_single * tos_q,
+            tape_out_both=w.tape_out_both * tob_q,
+            family_change=w.family_change * fc_q,
+            idle_time=w.idle_time * it_q,
+            priority=0.0,
+            level_loading=0.0,
+            old_machine=0.0,
+            lateness_by_item=lateness_by_item,
+            drainage_by_item=drainage_by_item,
+            carrying_by_item=carrying_by_item,
+            excess_by_item=excess_by_item,
+            priority_by_item={},
+        )
+
     def cost_breakdown_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
     ) -> CostBreakdown:
         """Same total as `score_after_move`, returned as one weighted
-        scalar per component. Pure — does not mutate `state`. Used by
-        the verbose iteration log; the hot loop sticks with the scalar
-        `score_after_move` because it avoids the `CostBreakdown`
-        allocation."""
-        # Demand: aggregate unweighted quantities across rls_items,
-        # using cost_if for items touched by move.plan and current
-        # views for the rest.
+        scalar per component plus absolute per-item dicts for the four
+        demand-side costs and for priority. Pure — does not mutate
+        `state`. Used by the verbose iteration log; the hot loop sticks
+        with the scalar `score_after_move` because it avoids the
+        `CostBreakdown` allocation and the per-item dict bookkeeping."""
+        w = self._weights
+
+        # Demand: per-item weighted contributions. cost_if for items
+        # touched by move.plan, current views for the rest.
         jobs_by_item: dict[str, list[Job]] = {}
         for a in move.plan:
             if isinstance(a, Job):
                 jobs_by_item.setdefault(a.item.id, []).append(a)
+        lateness_by_item: dict[str, float] = {}
+        drainage_by_item: dict[str, float] = {}
+        carrying_by_item: dict[str, float] = {}
+        excess_by_item: dict[str, float] = {}
         lateness_q = drainage_q = carrying_q = excess_q = 0.0
         for item_id, rls in state.rls_items.items():
             if item_id in jobs_by_item:
                 cc = rls.cost_if(jobs_by_item[item_id])
-                lateness_q += cc.lateness
-                drainage_q += cc.drainage
-                carrying_q += cc.carrying
-                excess_q += cc.excess
+                l = cc.lateness
+                d = cc.drainage
+                c = cc.carrying
+                e = cc.excess
             else:
-                lateness_q += rls.raw_view.lateness
-                drainage_q += rls.safety_view.drainage
-                carrying_q += rls.safety_view.carrying
-                excess_q += rls.safety_view.excess
+                l = rls.raw_view.lateness
+                d = rls.safety_view.drainage
+                c = rls.safety_view.carrying
+                e = rls.safety_view.excess
+            lateness_q += l
+            drainage_q += d
+            carrying_q += c
+            excess_q += e
+            self._record_demand_item(
+                item_id, l, d, c, e,
+                lateness_by_item, drainage_by_item,
+                carrying_by_item, excess_by_item,
+            )
 
-        # Schedule: aggregate unweighted counts / hours across
-        # machines, combining the affected machine's activities with
-        # the move's plan.
+        # Schedule: combine the affected machine's activities with the
+        # move's plan; use existing activities for the rest.
         tos_q = tob_q = fc_q = it_q = 0.0
         for machine_id, machine in state.machines.items():
             if machine_id == move.machine_id:
                 activities = list(machine.activities) + list(move.plan)
             else:
                 activities = machine.activities
-            for a in activities:
-                if isinstance(a, TapeOut):
-                    if a.bars == 'both':
-                        tob_q += 1
-                    else:
-                        tos_q += 1
-                elif isinstance(a, StyleChange):
-                    if a.is_family_change:
-                        fc_q += 1
-                elif isinstance(a, Idle):
-                    it_q += machine.workcal.get_work_hours_between(
-                        a.start, a.end,
-                    )
+            stos, stob, sfc, sit = self._schedule_quantities_for(
+                activities, machine.workcal,
+            )
+            tos_q += stos
+            tob_q += stob
+            fc_q += sfc
+            it_q += sit
 
         # Cross-cutting.
         move_machine = state.machines[move.machine_id]
-        priority_cost = self._priority_cost(move, ctx)
+        priority_cost, priority_by_item = self._priority_breakdown(move, ctx)
         dp_time = (
             move_machine.next_job_end
             if move.start_at == 'next_job_end'
@@ -234,7 +335,6 @@ class Costing:
             and not move_machine.is_new
         )
 
-        w = self._weights
         return CostBreakdown(
             lateness=w.lateness * lateness_q,
             drainage=w.drainage * drainage_q,
@@ -249,6 +349,11 @@ class Costing:
             old_machine=(
                 w.old_machine if old_machine_applies else 0.0
             ),
+            lateness_by_item=lateness_by_item,
+            drainage_by_item=drainage_by_item,
+            carrying_by_item=carrying_by_item,
+            excess_by_item=excess_by_item,
+            priority_by_item=priority_by_item,
         )
 
     # ---- helpers -------------------------------------------------------
@@ -324,7 +429,93 @@ class Costing:
 
         return self._weights.priority * lateness_lb_days
 
+    def _priority_breakdown(
+        self, move: Move, ctx: ScoringContext,
+    ) -> tuple[float, dict[str, PriorityContribution]]:
+        """Same computation as `_priority_cost`, plus a per-item dict
+        mapping each item with a higher-priority deferred regular order
+        to a `PriorityContribution` carrying its `week_idx`,
+        `remaining_lbs`, and weighted contribution. Each item appears
+        at most once: the candidate enumerator picks at most one
+        regular order per item per iteration, so each item's
+        higher-priority counterpart is unique. Used by the verbose
+        path; the hot loop stays on the scalar `_priority_cost`."""
+        move_key = OrderKey(
+            item_id=move.item.id, week_idx=move.week_idx,
+        )
+        move_rank = ctx.priorities.get(move_key)
+        if move_rank is None:
+            return 0.0, {}
+
+        other_dp = ctx.earliest_dp_excluding.get(
+            move.machine_id, ctx.earliest_dp_time,
+        )
+        one_day = timedelta(days=1)
+        w_priority = self._weights.priority
+
+        total = 0.0
+        by_item: dict[str, PriorityContribution] = {}
+        for key, rank in ctx.priorities.items():
+            if rank >= move_rank:
+                continue
+            order = ctx.regular_orders_by_key.get(key)
+            if order is None:
+                continue
+            fill_time = max(order.due_date + one_day, other_dp)
+            days_late = (fill_time - order.due_date) / one_day
+            contribution = w_priority * order.lbs * (2.0 ** days_late)
+            total += contribution
+            by_item[key.item_id] = PriorityContribution(
+                week_idx=order.week_idx,
+                remaining_lbs=order.lbs,
+                priority=contribution,
+            )
+        return total, by_item
+
     # ---- helpers -------------------------------------------------------
+
+    def _record_demand_item(
+        self, item_id: str,
+        lateness: float, drainage: float, carrying: float, excess: float,
+        lateness_by_item: dict[str, float],
+        drainage_by_item: dict[str, float],
+        carrying_by_item: dict[str, float],
+        excess_by_item: dict[str, float],
+    ) -> None:
+        """Append weighted per-item contributions to the four demand
+        dicts, skipping any whose weighted value is zero (so only items
+        with a non-zero contribution appear in the breakdown)."""
+        w = self._weights
+        if (v := w.lateness * lateness) != 0.0:
+            lateness_by_item[item_id] = v
+        if (v := w.drainage * drainage) != 0.0:
+            drainage_by_item[item_id] = v
+        if (v := w.carrying * carrying) != 0.0:
+            carrying_by_item[item_id] = v
+        if (v := w.excess * excess) != 0.0:
+            excess_by_item[item_id] = v
+
+    def _schedule_quantities_for(
+        self, activities, workcal: 'WorkCal',
+    ) -> tuple[float, float, float, float]:
+        """Unweighted (tape_out_single, tape_out_both, family_change,
+        idle_hours) counts/hours for a sequence of activities. Mirrors
+        `_schedule_penalty_for` but returns the four quantities
+        separately so the breakdown methods can apply the weights
+        themselves."""
+        tos_q = tob_q = fc_q = it_q = 0.0
+        for a in activities:
+            if isinstance(a, TapeOut):
+                if a.bars == 'both':
+                    tob_q += 1
+                else:
+                    tos_q += 1
+            elif isinstance(a, StyleChange):
+                if a.is_family_change:
+                    fc_q += 1
+            elif isinstance(a, Idle):
+                it_q += workcal.get_work_hours_between(a.start, a.end)
+        return tos_q, tob_q, fc_q, it_q
 
     def _weighted_demand(
         self, lateness: float, drainage: float,

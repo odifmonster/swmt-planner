@@ -7,10 +7,10 @@ from .candidates import (
     DecisionPoint,
     eligible_decision_points, enumerate_candidates,
 )
-from .plan import (
-    IterationLogRecord, PlanReport,
-    build_iteration_log_record, plan,
+from swmtplanner.planners.infinite.iterlog import (
+    IterationLogRecord, build_iteration_log_record,
 )
+from .plan import PlanReport, plan
 
 __all__ = [
     'DecisionPoint', 'RegularOrder', 'SafetyOrder',

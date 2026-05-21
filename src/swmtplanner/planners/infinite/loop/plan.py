@@ -2,12 +2,22 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from swmtplanner.demand.rlsitem import CostComponents
 
 from swmtplanner.planners.infinite.coordination import build_context
 from swmtplanner.planners.infinite.costing import CostBreakdown, Costing
+from swmtplanner.planners.infinite.iterlog import (
+    IterationLogRecord,
+    CostDetailRecord,
+    LatenessDetailRecord, DrainageDetailRecord,
+    CarryingDetailRecord, ExcessDetailRecord,
+    PriorityDetailRecord,
+    ScheduleDetailRecord,
+    IterLogAccumulators, IterLogCounters,
+    build_candidate_records, candidate_sort_key,
+)
 from swmtplanner.planners.infinite.state import Move, State
 
 from .candidates import enumerate_candidates
@@ -15,84 +25,6 @@ from .candidates import enumerate_candidates
 if TYPE_CHECKING:
     from swmtplanner.demand.order import RawOrder
     from swmtplanner.schedule import Activity, Job
-
-
-@dataclass(frozen=True)
-class IterationLogRecord:
-    """One row in the verbose iteration audit log (Phase 3). Each row
-    represents one scored candidate in one main-loop iteration —
-    either the committed move (`role == 'committed'`, `score_rank ==
-    0`) or one of the next-lowest-scoring rejected candidates
-    (`role == 'rejected'`, `score_rank` ∈ {1, 2, 3}). The eleven
-    cost-component fields are the same weighted contributions
-    `CostBreakdown` carries; `total_score` equals their sum and
-    matches `Costing.score_after_move(state, move, ctx)` for the
-    candidate."""
-    iteration_idx: int
-    role: Literal['committed', 'rejected']
-    score_rank: int
-    # candidate identity
-    item_id: str
-    target_type: Literal['regular', 'safety']
-    target_week: int | None
-    machine_id: str
-    machine_is_new: bool
-    start_at: Literal['next_job_end', 'next_runout']
-    idle_hours: float
-    # cost breakdown
-    total_score: float
-    lateness: float
-    drainage: float
-    carrying: float
-    excess: float
-    tape_out_single: float
-    tape_out_both: float
-    family_change: float
-    idle_time: float
-    priority: float
-    level_loading: float
-    old_machine: float
-
-
-def build_iteration_log_record(
-    iteration_idx: int,
-    rank: int,
-    move: Move,
-    breakdown: CostBreakdown,
-    state: State,
-) -> IterationLogRecord:
-    """Assemble one `IterationLogRecord` from a scored candidate.
-
-    `rank` is the candidate's position in the iteration's score
-    ordering (0 = lowest score = the committed move; 1, 2, 3 = the
-    next-lowest-scoring rejected candidates). `machine_is_new` is
-    read from `state.machines[move.machine_id]`, and `idle_hours`
-    converts `move.idle_for` to a float for the TSV."""
-    machine = state.machines[move.machine_id]
-    return IterationLogRecord(
-        iteration_idx=iteration_idx,
-        role='committed' if rank == 0 else 'rejected',
-        score_rank=rank,
-        item_id=move.item.id,
-        target_type='safety' if move.week_idx is None else 'regular',
-        target_week=move.week_idx,
-        machine_id=move.machine_id,
-        machine_is_new=machine.is_new,
-        start_at=move.start_at,
-        idle_hours=move.idle_for.total_seconds() / 3600.0,
-        total_score=breakdown.total,
-        lateness=breakdown.lateness,
-        drainage=breakdown.drainage,
-        carrying=breakdown.carrying,
-        excess=breakdown.excess,
-        tape_out_single=breakdown.tape_out_single,
-        tape_out_both=breakdown.tape_out_both,
-        family_change=breakdown.family_change,
-        idle_time=breakdown.idle_time,
-        priority=breakdown.priority,
-        level_loading=breakdown.level_loading,
-        old_machine=breakdown.old_machine,
-    )
 
 
 @dataclass
@@ -104,9 +36,11 @@ class PlanReport:
     also still live on the `Machine` instances inside `state` — this is
     a copy.
 
-    `iteration_log` is the Phase 3 verbose audit trail: a tuple of
-    `IterationLogRecord`s when `plan(..., verbose=True)` was called,
-    `None` otherwise."""
+    The eight `*_log` / `*_detail` tuples make up the Phase 3 verbose
+    audit trail. They are populated only when `plan(..., verbose=True)`
+    was called; all eight are `None` for a non-verbose run. Cross-table
+    joins use the integer ids on `iteration_log` (`cost_id`, `sched_id`)
+    and on `cost_detail` (the five `*_detail_id` FKs)."""
     schedules: dict[str, tuple['Activity', ...]]
     jobs_by_item: dict[str, tuple['Job', ...]]
     total_score: float
@@ -114,6 +48,22 @@ class PlanReport:
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple['RawOrder', ...]
     iteration_log: tuple[IterationLogRecord, ...] | None = None
+    cost_detail: tuple[CostDetailRecord, ...] | None = None
+    lateness_detail: tuple[LatenessDetailRecord, ...] | None = None
+    drainage_detail: tuple[DrainageDetailRecord, ...] | None = None
+    carrying_detail: tuple[CarryingDetailRecord, ...] | None = None
+    excess_detail: tuple[ExcessDetailRecord, ...] | None = None
+    priority_detail: tuple[PriorityDetailRecord, ...] | None = None
+    schedule_detail: tuple[ScheduleDetailRecord, ...] | None = None
+
+
+def _mk_counter():
+    ctr = 0
+    def func():
+        nonlocal ctr
+        ctr += 1
+        return ctr
+    return func
 
 
 def plan(
@@ -137,18 +87,40 @@ def plan(
     result.
 
     `verbose` opts into the Phase 3 iteration audit log. When True,
-    every candidate is scored with `Costing.cost_breakdown_after_move`,
-    the pool is sorted by total score, and the top 4 entries (or all
-    of them, if the pool has fewer than 4) become
-    `IterationLogRecord`s on `PlanReport.iteration_log`. With
-    `verbose=False` (the default) the breakdown method is never
-    called and `iteration_log` stays `None` — the hot loop is
-    untouched."""
+    every candidate is scored with `Costing.cost_breakdown_after_move`
+    and a two-level group-then-top-k rule selects up to 16 candidates
+    to log per iteration: candidates are grouped by item, items are
+    ranked by their lowest-scoring candidate (tie-broken by
+    `item_id`), the top 4 items are picked, and each of those items
+    contributes its top 4 lowest-scoring candidates (tie-broken by
+    `candidate_sort_key`). The committed move is always the
+    lowest-scoring candidate of the lowest-scoring item — it is the
+    very first row of the iteration block and the only one with
+    `role == 'committed'`. Each iteration also captures a baseline
+    `CostBreakdown` via `Costing.cost_breakdown(state)`, against
+    which the demand-side detail deltas are computed. With
+    `verbose=False` (the default) neither breakdown method is called
+    and all eight tuples stay `None` — the hot loop is untouched."""
     horizon = _compute_horizon(state)
 
     move_count = 0
-    iteration_log: list[IterationLogRecord] | None = (
-        [] if verbose else None
+    # Verbose: bundle the eight independent id counters (`_mk_counter`
+    # returns a fresh sequence-of-ints closure each call) and a single
+    # accumulator container that `build_candidate_records` mutates per
+    # candidate.
+    accumulators: IterLogAccumulators | None = (
+        IterLogAccumulators() if verbose else None
+    )
+    counters: IterLogCounters | None = (
+        IterLogCounters(
+            cost_id=_mk_counter(),
+            sched_id=_mk_counter(),
+            lateness_detail_id=_mk_counter(),
+            drainage_detail_id=_mk_counter(),
+            carrying_detail_id=_mk_counter(),
+            excess_detail_id=_mk_counter(),
+            priority_detail_id=_mk_counter(),
+        ) if verbose else None
     )
 
     while True:
@@ -173,25 +145,64 @@ def plan(
         ctx = build_context(state, candidates)
 
         if verbose:
-            # Verbose path: score every candidate with the full
-            # breakdown, sort ascending by total score, log the top 4
-            # (committed + up to 3 next-lowest rejected).
-            scored = sorted(
-                (
-                    (costing.cost_breakdown_after_move(state, m, ctx), m)
-                    for m in candidates
+            # Verbose path: capture the iteration's baseline once,
+            # score every candidate with the full breakdown, then
+            # apply the two-level group-then-top-k rule (top 4 items
+            # by best score; top 4 candidates per item) to pick up to
+            # 16 rows to log. See DESIGN.md "Verbose iteration log".
+            baseline = costing.cost_breakdown(state)
+            scored = [
+                (costing.cost_breakdown_after_move(state, m, ctx), m)
+                for m in candidates
+            ]
+            # Global ordering — drives the score_rank field, the
+            # committed-move pick, and the item-grouping insertion
+            # order. Ties broken deterministically by
+            # candidate_sort_key (item_id → machine_id → start_at
+            # with next_runout first).
+            scored_sorted = sorted(
+                scored,
+                key=lambda pair: candidate_sort_key(
+                    pair[0].total, pair[1],
                 ),
-                key=lambda pair: pair[0].total,
             )
-            for rank, (breakdown, move) in enumerate(scored[:4]):
-                iteration_log.append(build_iteration_log_record(
-                    iteration_idx=move_count,
-                    rank=rank,
-                    move=move,
-                    breakdown=breakdown,
-                    state=state,
-                ))
-            best_move = scored[0][1]
+            score_rank_by_id = {
+                id(m): i for i, (_, m) in enumerate(scored_sorted)
+            }
+            # Group by item, preserving the global order so each
+            # item's list is already in within-item rank order.
+            by_item: dict[
+                str, list[tuple[CostBreakdown, Move]]
+            ] = {}
+            for breakdown, move in scored_sorted:
+                by_item.setdefault(move.item.id, []).append(
+                    (breakdown, move),
+                )
+            # Rank items by their best (= first) candidate's score;
+            # tie-break by item_id ascending.
+            items_in_order = sorted(
+                by_item.items(),
+                key=lambda kv: (kv[1][0][0].total, kv[0]),
+            )
+            # Emit records for the top 4 items × top 4 candidates.
+            for item_id, item_candidates in items_in_order[:4]:
+                for isr, (breakdown, move) in enumerate(
+                    item_candidates[:4],
+                ):
+                    build_candidate_records(
+                        iteration_idx=move_count,
+                        score_rank=score_rank_by_id[id(move)],
+                        item_score_rank=isr,
+                        move=move,
+                        breakdown=breakdown,
+                        baseline=baseline,
+                        state=state,
+                        accumulators=accumulators,
+                        counters=counters,
+                    )
+            # The committed move is always the global lowest, which
+            # is also the top-ranked item's top-ranked candidate.
+            best_move = scored_sorted[0][1]
         else:
             # Hot path: scalar score only, pick the min.
             _, best_move = min(
@@ -203,7 +214,7 @@ def plan(
         move_count += 1
 
     print()
-    return _build_report(state, costing, iteration_log)
+    return _build_report(state, costing, accumulators)
 
 
 def _compute_horizon(state: State) -> datetime:
@@ -225,7 +236,7 @@ def _compute_horizon(state: State) -> datetime:
 def _build_report(
     state: State,
     costing: Costing,
-    iteration_log: list[IterationLogRecord] | None = None,
+    accumulators: IterLogAccumulators | None = None,
 ) -> PlanReport:
     """Build a `PlanReport` from the (post-loop) state. Snapshots the
     machines' activity tuples and the rls_items' job tuples; reads the
@@ -233,9 +244,9 @@ def _build_report(
     summarizes whatever remaining `safety_view.orders` still have unmet
     demand.
 
-    `iteration_log` is the per-iteration audit trail accumulated by
-    the verbose path. Pass `None` for the standard (non-verbose) run;
-    pass an accumulated list to attach it to the report as a tuple."""
+    `accumulators` is the verbose-path bundle of per-table lists. Pass
+    `None` for the standard (non-verbose) run; pass the populated
+    bundle to attach all eight verbose tuples to the report."""
     return PlanReport(
         schedules={
             m_id: m.activities for m_id, m in state.machines.items()
@@ -266,6 +277,35 @@ def _build_report(
             if order.late_lbs > 0
         ),
         iteration_log=(
-            tuple(iteration_log) if iteration_log is not None else None
+            tuple(accumulators.iteration_log)
+            if accumulators is not None else None
+        ),
+        cost_detail=(
+            tuple(accumulators.cost_detail)
+            if accumulators is not None else None
+        ),
+        lateness_detail=(
+            tuple(accumulators.lateness_detail)
+            if accumulators is not None else None
+        ),
+        drainage_detail=(
+            tuple(accumulators.drainage_detail)
+            if accumulators is not None else None
+        ),
+        carrying_detail=(
+            tuple(accumulators.carrying_detail)
+            if accumulators is not None else None
+        ),
+        excess_detail=(
+            tuple(accumulators.excess_detail)
+            if accumulators is not None else None
+        ),
+        priority_detail=(
+            tuple(accumulators.priority_detail)
+            if accumulators is not None else None
+        ),
+        schedule_detail=(
+            tuple(accumulators.schedule_detail)
+            if accumulators is not None else None
         ),
     )

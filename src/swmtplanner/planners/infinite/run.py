@@ -28,7 +28,9 @@ from .costing import (
     Costing, load_weights, weights_from_dict,
 )
 from .loop import plan
-from .report import write_plan_report_xlsx, write_iteration_log_tsv
+from .report import (
+    write_plan_report_xlsx, write_verbose_log_tsvs, write_dashboard_html,
+)
 from .state import State
 
 
@@ -192,18 +194,31 @@ def run(
     write_plan_report_xlsx(report, output_path)
 
     if verbose:
-        log_path = (
-            output_dir / f'iteration_log_{sd.strftime("%Y%m%d")}.tsv'
+        log_dir = (
+            output_dir / f'verbose_{sd.strftime("%Y%m%d")}'
         )
         idx = 1
-        while log_path.exists():
+        while log_dir.exists():
             idx += 1
-            log_path = (
+            log_dir = (
                 output_dir
-                / f'iteration_log_{sd.strftime("%Y%m%d")}_{idx}.tsv'
+                / f'verbose_{sd.strftime("%Y%m%d")}_{idx}'
             )
-        typer.echo(f'Writing verbose log to {log_path}')
-        write_iteration_log_tsv(report, log_path)
+        typer.echo(f'Writing verbose log to {log_dir}/')
+        write_verbose_log_tsvs(report, log_dir)
+
+        dashboard_path = (
+            output_dir / f'dashboard_{sd.strftime("%Y%m%d")}.html'
+        )
+        idx = 1
+        while dashboard_path.exists():
+            idx += 1
+            dashboard_path = (
+                output_dir
+                / f'dashboard_{sd.strftime("%Y%m%d")}_{idx}.html'
+            )
+        typer.echo(f'Writing dashboard to {dashboard_path}')
+        write_dashboard_html(report, dashboard_path)
 
     typer.echo('Done.')
 

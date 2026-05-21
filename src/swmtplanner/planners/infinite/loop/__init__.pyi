@@ -5,7 +5,15 @@ from typing import Literal
 from swmtplanner.schedule import Activity, Job
 from swmtplanner.demand.order import RawOrder
 from swmtplanner.demand.rlsitem import CostComponents
-from swmtplanner.planners.infinite.costing import CostBreakdown, Costing
+from swmtplanner.planners.infinite.costing import Costing
+from swmtplanner.planners.infinite.iterlog import (
+    IterationLogRecord, build_iteration_log_record,
+    CostDetailRecord,
+    LatenessDetailRecord, DrainageDetailRecord,
+    CarryingDetailRecord, ExcessDetailRecord,
+    PriorityDetailRecord,
+    ScheduleDetailRecord,
+)
 from swmtplanner.planners.infinite.state import Move, State
 from swmtplanner.planners.infinite.coordination import (
     RegularOrder, SafetyOrder, eligible_orders,
@@ -30,41 +38,6 @@ def eligible_decision_points(state: State) -> list[DecisionPoint]: ...
 def enumerate_candidates(state: State) -> list[Move]: ...
 
 
-@dataclass(frozen=True)
-class IterationLogRecord:
-    iteration_idx: int
-    role: Literal['committed', 'rejected']
-    score_rank: int
-    item_id: str
-    target_type: Literal['regular', 'safety']
-    target_week: int | None
-    machine_id: str
-    machine_is_new: bool
-    start_at: Literal['next_job_end', 'next_runout']
-    idle_hours: float
-    total_score: float
-    lateness: float
-    drainage: float
-    carrying: float
-    excess: float
-    tape_out_single: float
-    tape_out_both: float
-    family_change: float
-    idle_time: float
-    priority: float
-    level_loading: float
-    old_machine: float
-
-
-def build_iteration_log_record(
-    iteration_idx: int,
-    rank: int,
-    move: Move,
-    breakdown: CostBreakdown,
-    state: State,
-) -> IterationLogRecord: ...
-
-
 @dataclass
 class PlanReport:
     schedules: dict[str, tuple[Activity, ...]]
@@ -74,6 +47,13 @@ class PlanReport:
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple[RawOrder, ...]
     iteration_log: tuple[IterationLogRecord, ...] | None = ...
+    cost_detail: tuple[CostDetailRecord, ...] | None = ...
+    lateness_detail: tuple[LatenessDetailRecord, ...] | None = ...
+    drainage_detail: tuple[DrainageDetailRecord, ...] | None = ...
+    carrying_detail: tuple[CarryingDetailRecord, ...] | None = ...
+    excess_detail: tuple[ExcessDetailRecord, ...] | None = ...
+    priority_detail: tuple[PriorityDetailRecord, ...] | None = ...
+    schedule_detail: tuple[ScheduleDetailRecord, ...] | None = ...
 
 
 def plan(
