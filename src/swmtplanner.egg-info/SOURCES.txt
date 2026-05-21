@@ -48,6 +48,8 @@ src/swmtplanner/planners/__init__.pyi
 src/swmtplanner/planners/cli.py
 src/swmtplanner/planners/infinite/__init__.py
 src/swmtplanner/planners/infinite/__init__.pyi
+src/swmtplanner/planners/infinite/iterlog.py
+src/swmtplanner/planners/infinite/iterlog.pyi
 src/swmtplanner/planners/infinite/report.py
 src/swmtplanner/planners/infinite/report.pyi
 src/swmtplanner/planners/infinite/run.py
