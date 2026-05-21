@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from swmtplanner.support import HasID
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 
 _BEAMSET_SKU = re.compile(r'^(\d+)D (.+) (\d+)X(\d+)( S/L)?$')
@@ -74,7 +74,8 @@ class Greige(Product):
         top_bar_pct: float,
         bottom_bar: BeamSet,
         bottom_bar_pct: float,
-        roll_tgt_wt: float,
+        port_load_tgt: float,
+        standard_size: int,
         machine_rates: 'Mapping[str, float]',
     ) -> None:
         super().__init__(sku, safety_tgt)
@@ -84,7 +85,8 @@ class Greige(Product):
         self._top_bar_pct = top_bar_pct
         self._bottom_bar = bottom_bar
         self._bottom_bar_pct = bottom_bar_pct
-        self._roll_tgt_wt = roll_tgt_wt
+        self._port_load_tgt = port_load_tgt
+        self._standard_size = standard_size
         self._machine_rates = dict(machine_rates)
 
     @property
@@ -112,8 +114,12 @@ class Greige(Product):
         return self._bottom_bar_pct
 
     @property
-    def roll_tgt_wt(self) -> float:
-        return self._roll_tgt_wt
+    def port_load_tgt(self) -> float:
+        return self._port_load_tgt
+
+    @property
+    def standard_size(self) -> int:
+        return self._standard_size
 
     def can_run_on_machine(self, mchn_id: str) -> bool:
         return mchn_id in self._machine_rates
@@ -131,7 +137,8 @@ class Fabric(Product):
         greige_style: str,
         yld: float,
         color_shade: int,
-        jet_load_max: 'Mapping[str, float]',
+        omits_port: bool,
+        jets: 'Iterable[str]',
     ) -> None:
         m = _FABRIC_SKU.match(sku)
         if m is None:
@@ -143,7 +150,8 @@ class Fabric(Product):
         self._greige_style = greige_style
         self._yld = yld
         self._color_shade = color_shade
-        self._jet_load_max = dict(jet_load_max)
+        self._omits_port = omits_port
+        self._jets = frozenset(jets)
 
     @property
     def style(self) -> str:
@@ -169,8 +177,13 @@ class Fabric(Product):
     def color_shade(self) -> int:
         return self._color_shade
 
-    def can_run_on_jet(self, jet_id: str) -> bool:
-        return jet_id in self._jet_load_max
+    @property
+    def omits_port(self) -> bool:
+        return self._omits_port
 
-    def load_max_on_jet(self, jet_id: str) -> float:
-        return self._jet_load_max[jet_id]
+    @property
+    def jets(self) -> 'frozenset[str]':
+        return self._jets
+
+    def can_run_on_jet(self, jet_id: str) -> bool:
+        return jet_id in self._jets

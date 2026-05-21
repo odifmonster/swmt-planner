@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from ...support import HasID
 
@@ -80,10 +80,18 @@ class Greige(Product):
         top_bar_pct: float,
         bottom_bar: BeamSet,
         bottom_bar_pct: float,
-        roll_tgt_wt: float,
+        port_load_tgt: float,
+        standard_size: int,
         machine_rates: Mapping[str, float],
     ) -> None:
         """Build a Greige product.
+
+        `port_load_tgt` is the per-port target weight (lbs) when loading
+        this greige into a dye jet; it is a property of the greige style
+        itself. `standard_size` is the number of ports a newly-knit roll
+        of this style is sized to fill (typically 1 or 2), so the
+        knitting-stage target roll weight is `port_load_tgt *
+        standard_size`.
 
         `machine_rates` maps knitting-machine ID to the production rate
         (lb/hr) of this style on that machine. A machine ID present in the
@@ -117,8 +125,12 @@ class Greige(Product):
         """Percent of the bottom-bar beam set consumed per pound of greige produced."""
         ...
     @property
-    def roll_tgt_wt(self) -> float:
-        """Target weight per roll of this greige item, in pounds."""
+    def port_load_tgt(self) -> float:
+        """Per-port target weight in pounds when loading this greige into a dye jet."""
+        ...
+    @property
+    def standard_size(self) -> int:
+        """Ports a newly-knit roll of this style is sized to fill (typically 1 or 2)."""
         ...
     def can_run_on_machine(self, mchn_id: str) -> bool:
         """Whether the knitting machine with the given ID can run this style."""
@@ -147,16 +159,22 @@ class Fabric(Product):
         greige_style: str,
         yld: float,
         color_shade: int,
-        jet_load_max: Mapping[str, float],
+        omits_port: bool,
+        jets: Iterable[str],
     ) -> None:
         """Build a Fabric product.
 
         Raises `ValueError` if `sku` does not match the Fabric SKU format.
-        `jet_load_max` maps jet ID to the maximum pounds that can be loaded
-        into that jet's ports to produce this item. A jet ID present in the
-        mapping means the jet can run this item. The mapping is copied at
-        construction; mutations to the caller's mapping cannot affect this
-        Fabric's state.
+
+        `omits_port` is `True` for the small set of items that leave one
+        port empty on the dye jet during a cycle (so a lot of size `n`
+        occupies `2n - 1` ports instead of `2n`).
+
+        `jets` is an iterable of jet IDs that can run this item; it is
+        materialized into an internal `frozenset` at construction, so
+        mutations to the caller's iterable after construction cannot
+        affect this Fabric's state. The per-port load target lives on
+        the greige (`Greige.port_load_tgt`), not the fabric.
         """
         ...
     @property
@@ -183,13 +201,14 @@ class Fabric(Product):
     def color_shade(self) -> int:
         """Color shade rating, an integer in [0, 3]."""
         ...
+    @property
+    def omits_port(self) -> bool:
+        """True if this item leaves one port empty per cycle (lot uses 2n-1 ports)."""
+        ...
+    @property
+    def jets(self) -> frozenset[str]:
+        """The set of jet IDs that can run this item."""
+        ...
     def can_run_on_jet(self, jet_id: str) -> bool:
         """Whether the dye jet with the given ID can run this item."""
-        ...
-    def load_max_on_jet(self, jet_id: str) -> float:
-        """Maximum pounds loadable into the named jet's ports to produce this item.
-
-        Raises `KeyError` if `jet_id` is not a compatible jet; check
-        `can_run_on_jet` first.
-        """
         ...

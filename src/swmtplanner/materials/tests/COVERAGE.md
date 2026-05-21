@@ -32,7 +32,8 @@ SKU parsing.
 
 1. **construction works as expected** — every attribute (`id`,
    `safety_tgt`, `family`, `gauge`, `top_bar`, `top_bar_pct`, `bottom_bar`,
-   `bottom_bar_pct`, `roll_tgt_wt`) matches its constructor input
+   `bottom_bar_pct`, `port_load_tgt`, `standard_size`) matches its
+   constructor input
 2. **`can_run_on_machine` reflects the `machine_rates` mapping**
     - returns `True` for IDs present in `machine_rates`
     - returns `False` for IDs not in `machine_rates`
@@ -50,7 +51,8 @@ remaining attributes are passed in.
 1. **construction works as expected** — basic SKU
    `"FF <style>-<5-digit color>-<width>"`; verify every attribute
    (`id`, `safety_tgt`, `style`, `dye_formula`, `width`, `greige_style`,
-   `yld`, `color_shade`)
+   `yld`, `color_shade`, `omits_port`, `jets`). Also verify the
+   `omits_port=True` path stores the flag correctly.
 2. **SKU parsing handles styles with dashes**
     - single-token style (e.g., `"FF 1234-12345-58.0"`)
     - style containing one dash (e.g., `"FF 1234-AB-12345-58.0"`)
@@ -62,13 +64,12 @@ remaining attributes are passed in.
     - color field that is not exactly 5 digits (e.g.,
       `"FF 1234-NAVY-58.0"`, `"FF 1234-9999-58.0"`)
     - missing width
-4. **`can_run_on_jet` and `load_max_on_jet` reflect the `jet_load_max`
-   mapping**
-    - `can_run_on_jet` returns `True` for IDs in the mapping, `False`
-      otherwise
-    - `load_max_on_jet` returns the value supplied in `jet_load_max`
-5. **`jet_load_max` is copied at construction** — mutating the caller's
-   mapping after construction does not affect the `Fabric`
+4. **`can_run_on_jet` reflects the `jets` set**, and the `jets`
+   property exposes a `frozenset` of the supplied IDs (duplicates
+   collapsed)
+5. **input `jets` iterable is isolated at construction** — mutating
+   the caller's iterable after construction does not affect the
+   `Fabric`
 
 ## Section 2: rawmat
 
@@ -90,10 +91,10 @@ only currently-defined subclass.
     - `qty = 120` → `'large'`
 3. **`size` bucket boundaries** — verify the strict/inclusive cutoffs in
    `_compute_roll_size` (for `roll_tgt_wt = 100`):
-    - `qty = 39.99` → `'partial'`, `qty = 40` → `'half'`
-    - `qty = 59.99` → `'half'`, `qty = 60` → `'small'`
-    - `qty = 94.99` → `'small'`, `qty = 95` → `'full'`
-    - `qty = 105` → `'full'`, `qty = 105.01` → `'large'`
+    - `qty = 47.99` → `'partial'`, `qty = 48` → `'half'`
+    - `qty = 51.99` → `'half'`, `qty = 52` → `'small'`
+    - `qty = 97.99` → `'small'`, `qty = 98` → `'full'`
+    - `qty = 102` → `'full'`, `qty = 102.01` → `'large'`
 
 ### 2.2 split
 
@@ -107,7 +108,7 @@ only currently-defined subclass.
    `roll_tgt_wt = 100`, verify every listed split scenario:
     - split half (`qty = 50`) into `25 + 25`: both rolls are `'partial'`
     - split small (`qty = 70`) into `35 + 35`: both rolls are `'partial'`
-    - split small (`qty = 90`) into `55 + 35`: one `'half'` and one
+    - split small (`qty = 90`) into `50 + 40`: one `'half'` and one
       `'partial'`
     - split full (`qty = 100`) into `50 + 50`: both rolls are `'half'`
     - split full (`qty = 100`) into `30 + 70`: one `'partial'` and one
@@ -140,3 +141,18 @@ only currently-defined subclass.
     - half (`qty = 50`) + small (`qty = 80`) → `'large'` (130)
     - small (`qty = 70`) + partial (`qty = 30`) → `'full'` (100)
     - small (`qty = 70`) + small (`qty = 80`) → `'large'` (150)
+
+### 2.4 new_arrival (class method)
+
+1. **attributes are populated correctly** — given plant `'FS'`, a Greige
+   with `roll_tgt_wt = 100`, and a `receive_date`, the returned
+   `GreigeRoll` has `product` set as supplied, `qty == 100` (target
+   weight, so `size == 'full'`), `avail_date == receive_date`,
+   `plant == 'FS'`, and `item_variant == yarn_merge == NEW_ROLL_PLACEHOLDER`
+2. **`id` begins with the plant prefix** — calls with plant `'FS'`
+   produce ids starting with `'FS'`; calls with `'WF'` produce ids
+   starting with `'WF'`
+3. **successive calls return distinct ids** — two consecutive calls with
+   the same plant return different ids
+4. **counters are independent across plants** — interleaving `'FS'` and
+   `'WF'` calls does not cause id collisions between the two plants

@@ -1,5 +1,16 @@
 from abc import abstractmethod
-from typing import Protocol, Hashable
+from typing import Protocol, Hashable, Callable
+
+
+def get_int_id_counter() -> Callable[[], int]:
+    """Get a function for creating auto-incremented int ids."""
+    ...
+
+
+def get_str_id_counter(prefix: str, padding: int = 5) -> Callable[[], str]:
+    """Get a function for creating string ids using a padded int and a prefix."""
+    ...
+
 
 class HasID[T: Hashable](Protocol):
     """Simple protocol for defining custom IDs on objects. Classes

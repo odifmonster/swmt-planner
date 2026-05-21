@@ -3,20 +3,33 @@
 import math
 from typing import TYPE_CHECKING, Literal
 
-from swmtplanner.support import HasID
+from swmtplanner.support import HasID, get_str_id_counter
 from .product import Product, Greige
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import date
 
 
 RollSize = Literal['partial', 'half', 'small', 'full', 'large']
 
 
-SIZE_PARTIAL_MAX = 0.4
-SIZE_HALF_MAX = 0.6
-SIZE_SMALL_MAX = 0.95
-SIZE_FULL_MAX = 1.05
+SIZE_PARTIAL_MAX = 0.48
+SIZE_HALF_MAX = 0.52
+SIZE_SMALL_MAX = 0.98
+SIZE_FULL_MAX = 1.02
+
+
+NEW_ROLL_PLACEHOLDER = 'TBD'
+
+
+_ROLL_ID_COUNTERS: 'dict[str, Callable[[], str]]' = {}
+
+
+def _next_roll_id(plant: str) -> str:
+    if plant not in _ROLL_ID_COUNTERS:
+        _ROLL_ID_COUNTERS[plant] = get_str_id_counter(plant)
+    return _ROLL_ID_COUNTERS[plant]()
 
 
 def _compute_roll_size(qty: float, tgt: float) -> RollSize:
@@ -89,7 +102,24 @@ class GreigeRoll(RawMat):
         self._plant = plant
         self._item_variant = item_variant
         self._yarn_merge = yarn_merge
-        self._size = _compute_roll_size(qty, product.roll_tgt_wt)
+        self._size = _compute_roll_size(qty, 2 * product.port_load_tgt)
+
+    @classmethod
+    def new_arrival(
+        cls,
+        plant: str,
+        product: Greige,
+        receive_date: 'date',
+    ) -> 'GreigeRoll':
+        return cls(
+            _next_roll_id(plant),
+            product,
+            product.port_load_tgt * product.standard_size,
+            receive_date,
+            plant,
+            NEW_ROLL_PLACEHOLDER,
+            NEW_ROLL_PLACEHOLDER,
+        )
 
     @property
     def product(self) -> Greige:

@@ -4,13 +4,23 @@ import unittest
 from datetime import date
 
 from swmtplanner.materials.product import BeamSet, Greige
-from swmtplanner.materials import GreigeRoll
+from swmtplanner.materials import GreigeRoll, NEW_ROLL_PLACEHOLDER
 
 
-def _make_greige(sku: str = 'STYLE-A', roll_tgt_wt: float = 100.0) -> Greige:
+def _make_greige(
+    sku: str = 'STYLE-A',
+    port_load_tgt: float = 50.0,
+    standard_size: int = 2,
+) -> Greige:
+    # Default port_load_tgt=50, standard_size=2 → size buckets are computed
+    # against 2 * port_load_tgt = 100, matching the previous roll_tgt_wt=100
+    # reference so existing qty values still land in the expected buckets.
     top = BeamSet('150D MICRO 50X4', 0.0)
     bottom = BeamSet('100D POLY 60X8 S/L', 0.0)
-    return Greige(sku, 0.0, 'fam', 28, top, 0.4, bottom, 0.6, roll_tgt_wt, {})
+    return Greige(
+        sku, 0.0, 'fam', 28, top, 0.4, bottom, 0.6,
+        port_load_tgt, standard_size, {},
+    )
 
 
 class GreigeRollInstantiationTests(unittest.TestCase):
@@ -68,46 +78,46 @@ class GreigeRollInstantiationTests(unittest.TestCase):
         self.assertEqual(r.size, 'large')
 
     def test_size_boundary_partial_half(self):
-        """2.1.3: 39.99 -> 'partial', 40 -> 'half'"""
+        """2.1.3: 47.99 -> 'partial', 48 -> 'half'"""
         self.assertEqual(
-            GreigeRoll('R', self.greige, 39.99, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 47.99, None, 'FS', '', '').size,
             'partial',
         )
         self.assertEqual(
-            GreigeRoll('R', self.greige, 40.0, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 48.0, None, 'FS', '', '').size,
             'half',
         )
 
     def test_size_boundary_half_small(self):
-        """2.1.3: 59.99 -> 'half', 60 -> 'small'"""
+        """2.1.3: 51.99 -> 'half', 52 -> 'small'"""
         self.assertEqual(
-            GreigeRoll('R', self.greige, 59.99, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 51.99, None, 'FS', '', '').size,
             'half',
         )
         self.assertEqual(
-            GreigeRoll('R', self.greige, 60.0, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 52.0, None, 'FS', '', '').size,
             'small',
         )
 
     def test_size_boundary_small_full(self):
-        """2.1.3: 94.99 -> 'small', 95 -> 'full'"""
+        """2.1.3: 97.99 -> 'small', 98 -> 'full'"""
         self.assertEqual(
-            GreigeRoll('R', self.greige, 94.99, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 97.99, None, 'FS', '', '').size,
             'small',
         )
         self.assertEqual(
-            GreigeRoll('R', self.greige, 95.0, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 98.0, None, 'FS', '', '').size,
             'full',
         )
 
     def test_size_boundary_full_large(self):
-        """2.1.3: 105 -> 'full', 105.01 -> 'large'"""
+        """2.1.3: 102 -> 'full', 102.01 -> 'large'"""
         self.assertEqual(
-            GreigeRoll('R', self.greige, 105.0, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 102.0, None, 'FS', '', '').size,
             'full',
         )
         self.assertEqual(
-            GreigeRoll('R', self.greige, 105.01, None, 'FS', '', '').size,
+            GreigeRoll('R', self.greige, 102.01, None, 'FS', '', '').size,
             'large',
         )
 
@@ -152,8 +162,8 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(b.size, 'partial')
 
     def test_split_small_into_half_and_partial(self):
-        """2.2.3: small (90) -> 55 + 35 produces 'half' and 'partial'"""
-        a, b = self._roll(90.0).split(55.0, 35.0)
+        """2.2.3: small (90) -> 50 + 40 produces 'half' and 'partial'"""
+        a, b = self._roll(90.0).split(50.0, 40.0)
         self.assertEqual(a.size, 'half')
         self.assertEqual(b.size, 'partial')
 
@@ -285,6 +295,51 @@ class CombineTests(unittest.TestCase):
         r1 = self._roll(70.0, 'F1')
         r2 = self._roll(80.0, 'F2')
         self.assertEqual(r1.combine(r2).size, 'large')
+
+
+class NewArrivalTests(unittest.TestCase):
+    """Covers section 2.4 of COVERAGE.md."""
+
+    def setUp(self):
+        self.greige = _make_greige()  # defaults give 2 * port_load_tgt = 100
+
+    def test_attributes_populated(self):
+        """2.4.1: attributes are populated correctly"""
+        d = date(2026, 7, 1)
+        r = GreigeRoll.new_arrival('FS', self.greige, d)
+        self.assertIs(r.product, self.greige)
+        self.assertEqual(r.qty, 100.0)
+        self.assertEqual(r.size, 'full')
+        self.assertEqual(r.avail_date, d)
+        self.assertEqual(r.plant, 'FS')
+        self.assertEqual(r.item_variant, NEW_ROLL_PLACEHOLDER)
+        self.assertEqual(r.yarn_merge, NEW_ROLL_PLACEHOLDER)
+
+    def test_id_starts_with_plant_prefix(self):
+        """2.4.2: id begins with the plant prefix"""
+        d = date(2026, 7, 1)
+        fs_roll = GreigeRoll.new_arrival('FS', self.greige, d)
+        wf_roll = GreigeRoll.new_arrival('WF', self.greige, d)
+        self.assertTrue(fs_roll.id.startswith('FS'))
+        self.assertTrue(wf_roll.id.startswith('WF'))
+
+    def test_successive_calls_return_distinct_ids(self):
+        """2.4.3: two consecutive calls with the same plant return different ids"""
+        d = date(2026, 7, 1)
+        r1 = GreigeRoll.new_arrival('FS', self.greige, d)
+        r2 = GreigeRoll.new_arrival('FS', self.greige, d)
+        self.assertNotEqual(r1.id, r2.id)
+
+    def test_counters_independent_across_plants(self):
+        """2.4.4: FS and WF counters do not collide"""
+        d = date(2026, 7, 1)
+        fs_ids = {GreigeRoll.new_arrival('FS', self.greige, d).id for _ in range(3)}
+        wf_ids = {GreigeRoll.new_arrival('WF', self.greige, d).id for _ in range(3)}
+        # No id appears in both sets — distinct prefixes guarantee disjoint sets
+        self.assertEqual(fs_ids & wf_ids, set())
+        # Each plant produced unique ids
+        self.assertEqual(len(fs_ids), 3)
+        self.assertEqual(len(wf_ids), 3)
 
 
 if __name__ == '__main__':
