@@ -4,7 +4,7 @@ import math
 from typing import TYPE_CHECKING, Literal
 
 from swmtplanner.support import HasID, get_str_id_counter
-from .product import Product, Greige
+from ..product import Product, Greige
 
 if TYPE_CHECKING:
     from collections.abc import Callable

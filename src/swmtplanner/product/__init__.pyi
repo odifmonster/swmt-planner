@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Mapping
 
-from ...support import HasID
+from ..support import HasID
 
 
 __all__ = ['Product', 'BeamSet', 'Greige', 'Fabric']

@@ -2,7 +2,7 @@
 
 import unittest
 
-from swmtplanner.materials.product import BeamSet, Greige, Fabric
+from swmtplanner.product import BeamSet, Greige, Fabric
 
 
 class BeamSetTests(unittest.TestCase):

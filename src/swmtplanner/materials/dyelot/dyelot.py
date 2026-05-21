@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..product import Fabric
+from ...product import Fabric
 from ..rawmat import GreigeRoll
 
 if TYPE_CHECKING:

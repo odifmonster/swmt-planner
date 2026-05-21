@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import date
 
-from ..product import Fabric
+from ...product import Fabric
 from ..rawmat import GreigeRoll
 
 

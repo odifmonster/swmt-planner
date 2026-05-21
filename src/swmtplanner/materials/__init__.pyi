@@ -2,12 +2,11 @@ from datetime import date
 from typing import Literal
 
 from ..support import HasID
-from . import product as product
+from ..product import Product, Greige
 from . import dyelot as dyelot
-from .product import Product, Greige
 
 
-__all__ = ['product', 'dyelot', 'RawMat', 'GreigeRoll', 'RollSize',
+__all__ = ['dyelot', 'RawMat', 'GreigeRoll', 'RollSize',
            'NEW_ROLL_PLACEHOLDER']
 
 

@@ -14,19 +14,26 @@ lamination. A full planning run produces schedules for all four stages.
 
 ## Submodules
 
-### `materials/` - finished product and raw material data
+### `product/` - product BOMs
 
-This submodule defines data structures for all the relevant products in the
-supply chain, as well as hold logic for identifying what raw materials are available
-when, and how to convert from raw to finished goods at each step. It will have `product/`
-and `inventory/` submodules for defining product BOMs and available raw materials
-respectively.
-
-It also defines an abstract `Product` class used to generalize shared concepts in
+This submodule defines an abstract `Product` class used to generalize shared concepts in
+[`materials/`](#materials---raw-material-data-and-inventory-processing) (the rules
+regarding raw material consumption),
 [`schedule/`](#schedule---work-centers-and-schedule-activities) (what a job produces
-or consumes) and [`demand/`](#demand---tracking-order-fulfillment-and-inventory-levels)
-(what an order is asking for), so those submodules can reason about goods without
-needing to know the specifics of each production stage.
+or consumes), and
+[`demand/`](#demand---tracking-order-fulfillment-and-inventory-levels) (what an order
+is asking for), so those submodules can reason about goods without needing to know the
+specifics of each production stage. The `Product` subclasses will define the specific
+properties of the goods consumed and produced at each step of the supply chain.
+
+### `materials/` - raw material data and inventory processing
+
+This submodule defines data structures for physical materials being consumed throughout
+the supply chain, as well as holds logic for identifying what raw materials are
+available when, and how to convert from raw to finished goods at each step. It will
+have an `inventory/` submodule for handling functions related to raw goods selection
+and consumption. It will also define an abstract `RawMat` class to represent some
+discrete physical quantity of raw goods.
 
 ### `demand/` - tracking order fulfillment and inventory levels
 
@@ -53,8 +60,8 @@ calculations specific to its work center.
 
 ### `planning/` - main planning algorithms
 
-This submodule contains the algorithms that consume `materials/`, `demand/`, and
-`schedule/` to produce a full set of work-center schedules. It is structured into
+This submodule contains the algorithms that consume `product/`, `materials/`,
+`demand/`, and `schedule/` to produce a full set of work-center schedules. It is structured into
 one submodule per production stage:
 
 - `planning/warping/`

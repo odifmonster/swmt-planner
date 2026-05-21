@@ -2,101 +2,33 @@
 
 These tests target the `swmtplanner.materials` submodule.
 
-## Section 1: product/
-
-Since `Product` carries no stage-specific data on its own, these tests focus
-on its concrete subclasses `BeamSet`, `Greige`, and `Fabric`.
-
-### 1.1 BeamSet
-
-A `BeamSet` is built from its SKU plus a safety target; all other attributes
-are parsed from the SKU.
-
-1. **construction works as expected** — basic SKU with no split-lease
-   suffix (e.g., `"150D MICRO 50X4"`); verify `id`, `safety_tgt`, and every
-   derived attribute
-2. **SKU parsing covers every form**
-    - basic `<denier>D <yarn> <ends>X<beams>` (no `S/L`): `is_split` is
-      `False`
-    - with `" S/L"` suffix: `is_split` is `True` and the other fields are
-      unaffected
-    - multi-word yarn description (e.g., `"100D FOO BAR 60X8"`):
-      `yarn_desc` captures `"FOO BAR"` and the trailing dimensions still
-      parse correctly
-3. **invalid SKU raises `ValueError`** — e.g., `"not a valid sku"`
-
-### 1.2 Greige
-
-`Greige` takes all of its attributes as constructor inputs; there is no
-SKU parsing.
-
-1. **construction works as expected** — every attribute (`id`,
-   `safety_tgt`, `family`, `gauge`, `top_bar`, `top_bar_pct`, `bottom_bar`,
-   `bottom_bar_pct`, `port_load_tgt`, `standard_size`) matches its
-   constructor input
-2. **`can_run_on_machine` reflects the `machine_rates` mapping**
-    - returns `True` for IDs present in `machine_rates`
-    - returns `False` for IDs not in `machine_rates`
-3. **`rate_on_machine` returns the rate for compatible machines** —
-   matches the value supplied in `machine_rates`
-4. **`machine_rates` is copied at construction** — mutating the caller's
-   mapping after construction does not affect `can_run_on_machine` or
-   `rate_on_machine`
-
-### 1.3 Fabric
-
-`Fabric`'s `style`, `dye_formula`, and `width` are parsed from the SKU; the
-remaining attributes are passed in.
-
-1. **construction works as expected** — basic SKU
-   `"FF <style>-<5-digit color>-<width>"`; verify every attribute
-   (`id`, `safety_tgt`, `style`, `dye_formula`, `width`, `greige_style`,
-   `yld`, `color_shade`, `omits_port`, `jets`). Also verify the
-   `omits_port=True` path stores the flag correctly.
-2. **SKU parsing handles styles with dashes**
-    - single-token style (e.g., `"FF 1234-12345-58.0"`)
-    - style containing one dash (e.g., `"FF 1234-AB-12345-58.0"`)
-    - style containing multiple dashes (e.g., `"FF A-B-C-99999-57"`)
-    - `dye_formula` is always the 5-digit field; `width` is always the
-      final field
-3. **invalid SKU raises `ValueError`**
-    - malformed prefix (missing `"FF "`)
-    - color field that is not exactly 5 digits (e.g.,
-      `"FF 1234-NAVY-58.0"`, `"FF 1234-9999-58.0"`)
-    - missing width
-4. **`can_run_on_jet` reflects the `jets` set**, and the `jets`
-   property exposes a `frozenset` of the supplied IDs (duplicates
-   collapsed)
-5. **input `jets` iterable is isolated at construction** — mutating
-   the caller's iterable after construction does not affect the
-   `Fabric`
-
-## Section 2: rawmat
+## Section 1: rawmat
 
 `RawMat` itself is conceptually abstract; tests target `GreigeRoll` as its
 only currently-defined subclass.
 
-### 2.1 GreigeRoll instantiation
+### 1.1 GreigeRoll instantiation
 
 1. **construction works as expected** — every attribute (`id`, `product`,
    `qty`, `plant`, `item_variant`, `yarn_merge`) matches its constructor
    input, for both `avail_date=None` (already in inventory) and a
    non-`None` future date
-2. **`size` is computed from `qty / product.roll_tgt_wt`** — for a Greige
-   with `roll_tgt_wt = 100`, verify each `RollSize` bucket:
+2. **`size` is computed from `qty / (2 * product.port_load_tgt)`** — for
+   a Greige with `2 * port_load_tgt = 100` (i.e., `port_load_tgt = 50`,
+   `standard_size = 2`), verify each `RollSize` bucket:
     - `qty = 30` → `'partial'`
     - `qty = 50` → `'half'`
     - `qty = 80` → `'small'`
     - `qty = 100` → `'full'`
     - `qty = 120` → `'large'`
 3. **`size` bucket boundaries** — verify the strict/inclusive cutoffs in
-   `_compute_roll_size` (for `roll_tgt_wt = 100`):
+   `_compute_roll_size` (for `2 * port_load_tgt = 100`):
     - `qty = 47.99` → `'partial'`, `qty = 48` → `'half'`
     - `qty = 51.99` → `'half'`, `qty = 52` → `'small'`
     - `qty = 97.99` → `'small'`, `qty = 98` → `'full'`
     - `qty = 102` → `'full'`, `qty = 102.01` → `'large'`
 
-### 2.2 split
+### 1.2 split
 
 1. **invalid split weights raise `ValueError`**
     - `lbs1 + lbs2 < self.qty`
@@ -105,7 +37,7 @@ only currently-defined subclass.
    with `id = "FS001"`, splitting produces rolls with `id = "FS001A"` and
    `id = "FS001B"`
 3. **computed sizes of the resulting rolls** — for a `Greige` with
-   `roll_tgt_wt = 100`, verify every listed split scenario:
+   `2 * port_load_tgt = 100`, verify every listed split scenario:
     - split half (`qty = 50`) into `25 + 25`: both rolls are `'partial'`
     - split small (`qty = 70`) into `35 + 35`: both rolls are `'partial'`
     - split small (`qty = 90`) into `50 + 40`: one `'half'` and one
@@ -119,7 +51,7 @@ only currently-defined subclass.
     - split large (`qty = 130`) into `30 + 100`: one `'partial'` and one
       `'full'`
 
-### 2.3 combine
+### 1.3 combine
 
 1. **invalid combinations raise `ValueError`**
     - rolls from different plants
@@ -133,7 +65,7 @@ only currently-defined subclass.
       `yarn_merge`), the combined roll concatenates them (this roll
       first)
 3. **computed size of the combined roll** — for a `Greige` with
-   `roll_tgt_wt = 100`, verify every listed combine scenario:
+   `2 * port_load_tgt = 100`, verify every listed combine scenario:
     - partial (`qty = 30`) + partial (`qty = 20`) → `'half'` (50)
     - partial (`qty = 35`) + partial (`qty = 35`) → `'small'` (70)
     - partial (`qty = 30`) + half (`qty = 50`) → `'small'` (80)
@@ -142,13 +74,14 @@ only currently-defined subclass.
     - small (`qty = 70`) + partial (`qty = 30`) → `'full'` (100)
     - small (`qty = 70`) + small (`qty = 80`) → `'large'` (150)
 
-### 2.4 new_arrival (class method)
+### 1.4 new_arrival (class method)
 
 1. **attributes are populated correctly** — given plant `'FS'`, a Greige
-   with `roll_tgt_wt = 100`, and a `receive_date`, the returned
-   `GreigeRoll` has `product` set as supplied, `qty == 100` (target
-   weight, so `size == 'full'`), `avail_date == receive_date`,
-   `plant == 'FS'`, and `item_variant == yarn_merge == NEW_ROLL_PLACEHOLDER`
+   with `port_load_tgt = 50, standard_size = 2`, and a `receive_date`,
+   the returned `GreigeRoll` has `product` set as supplied, `qty == 100`
+   (knitting target = `port_load_tgt * standard_size`, so
+   `size == 'full'`), `avail_date == receive_date`, `plant == 'FS'`,
+   and `item_variant == yarn_merge == NEW_ROLL_PLACEHOLDER`
 2. **`id` begins with the plant prefix** — calls with plant `'FS'`
    produce ids starting with `'FS'`; calls with `'WF'` produce ids
    starting with `'WF'`
