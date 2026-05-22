@@ -3,8 +3,9 @@
 import math
 from typing import TYPE_CHECKING, Literal
 
-from swmtplanner.support import HasID, get_str_id_counter
-from ..product import Product, Greige
+from swmtplanner.support import get_str_id_counter
+from ...product import Greige
+from .rawmat import RawMat
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,37 +54,6 @@ def _later_avail(a: 'date | None', b: 'date | None') -> 'date | None':
     if b is None:
         return a
     return max(a, b)
-
-
-class RawMat(HasID[str]):
-
-    def __init__(
-        self,
-        id_: str,
-        product: Product,
-        qty: float,
-        avail_date: 'date | None',
-    ) -> None:
-        self._id = id_
-        self._product = product
-        self._qty = qty
-        self._avail_date = avail_date
-
-    @property
-    def id(self) -> str:
-        return self._id
-
-    @property
-    def product(self) -> Product:
-        return self._product
-
-    @property
-    def qty(self) -> float:
-        return self._qty
-
-    @property
-    def avail_date(self) -> 'date | None':
-        return self._avail_date
 
 
 class GreigeRoll(RawMat):
