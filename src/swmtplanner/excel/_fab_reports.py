@@ -188,11 +188,13 @@ def _pa_dmnd_report(writer):
 
     for lam, grp in stock_df.groupby('lam_item'):
         lam_items.append(lam)
-        max_cols = ['plant', 'ply1_item', 'pa_item', 'ph_raw', 'ply1_on_hand']
+        max_cols = [('plant', 'string'), ('ply1_item', 'string'),
+                    ('pa_item', 'string'), ('ph_raw', 'float'),
+                    ('ply1_on_hand', 'float')]
         pull = int(max(grp['pull']))
 
-        for col in max_cols:
-            lam_data[col].append(max(grp[col]))
+        for col, dtype in max_cols:
+            lam_data[col].append(max(grp[col].astype(dtype)))
 
         sch_total = max(grp['sch_past_due'])
         rls_total = sum(grp['rls_past_due']) - max(grp['lam_on_hand']) - max(grp['lam_cc'])
@@ -241,7 +243,7 @@ def _pa_dmnd_report(writer):
         ply1_data1['sched_day'].append(min(grp['sched_day']))
 
     ply1_df1 = pd.DataFrame(data=ply1_data1)
-    join_plts = lambda a: "/".join([str(int(x)) for x in list(a)])
+    join_plts = lambda a: "/".join([str(int(float(x))) for x in list(a)])
 
     ply1_df2 = ply1_df1.groupby('ply1_item').agg(
         plant = pd.NamedAgg('plant', join_plts),

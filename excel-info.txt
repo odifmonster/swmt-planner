@@ -11,8 +11,9 @@
 FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
 ONE_DRIVE = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply"
-WORKBOOK = "PA plant orders against Lam demand 20260518 lam plant date.xlsx"
-OUTPUT = "output_20260518.xlsx"
+ONE_DRIVE_ORDERS = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply/PA Weekly Order Planning"
+WORKBOOK = "PA plant orders against Lam demand 20260526 lam plant date.xlsx"
+OUTPUT = "output_20260526.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
@@ -62,7 +63,7 @@ pa_inventory:
     start_row=4
 
 pa_floor_mos:
-    folder=$FOLDER
+    folder=$ONE_DRIVE_ORDERS
     workbook=$WORKBOOK
     sheet="1427"
     col_names="Item\nType", Warehouse, Customer, Owner, Roll, Lot, Item, ...
@@ -71,7 +72,7 @@ pa_floor_mos:
     start_row=4
 
 adaptive1_orders:
-    folder=$FOLDER
+    folder=$ONE_DRIVE_ORDERS
     workbook=$WORKBOOK
     sheet="Orders in Dye"
     col_names=job, dyelot, machine, start, end, item1, item2, panels, qty, "double?", Customer
@@ -101,7 +102,7 @@ wf_release:
     end_row=35
 
 lam_ship_dates:
-    folder=$FOLDER
+    folder=$ONE_DRIVE_ORDERS
     workbook=$WORKBOOK
     sheet="Lam Release"
     col_names="Stock Item", "Ply1 Item", "Ship Day", "Schedule Day"
@@ -116,14 +117,14 @@ lam_release:
         "RLS+0", "RLS+1", "RLS+2", "RLS+3", "RLS+4", "RLS+5", "RLS+6", "RLS+7", "RLS+8", "Schedule Day"
 
 pa_reqs:
-    folder=$FOLDER
+    folder=$ONE_DRIVE_ORDERS
     workbook=$WORKBOOK
     sheet="Fab shortage Lam An"
     col_names="PA Item", "Ply1 Item", "Plant", "FAB req'd past due", $req_wks, "In transit", "PA Fin", ...
         "Inspection", "Frame", "Dye Orders"
 
 pa_714:
-    folder=$FOLDER
+    folder=$ONE_DRIVE_ORDERS
     workbook=$WORKBOOK
     sheet=714
     col_names="Sales Rep", Item, "Order Type", "Line Width", "Dye Order", "DO Qty", ...
@@ -152,6 +153,11 @@ pa_audit:
 pa_greige_assigns:
     folder=$REPORTS
     workbook="greige_assigns"
+    sheet=Placeholder
+
+pa_mo_to_jet:
+    folder=$REPORTS
+    workbook="jets"
     sheet=Placeholder
 
 pa_seconds:

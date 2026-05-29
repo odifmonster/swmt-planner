@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import typer, pandas as pd, numpy as np, datetime as dt, os, re
+import typer, pandas as pd, datetime as dt, os
 from pathlib import Path
 from typing import Annotated
 from enum import Enum
@@ -10,6 +10,7 @@ from ._updates import _grg_trans_file, _grg_style_file, _dyes_file, _pa_items_fi
     df_cols_as_str
 from ._fab_reports import _load_pa_floor_mos, _pa_dmnd_report, _pa_process_report, \
     _pa_priority_mos_report, _pa_rework_report, _load_dye_orders1, _load_dye_orders2
+from ._audit_report import _audit_summary
 
 _INFO_OUT_HELP = 'Path to the new file to generate'
 _InfoOutAnno = Annotated[Path, typer.Option(help=_INFO_OUT_HELP,
@@ -252,305 +253,6 @@ def _greige_reqs(writer):
     grg_reqs = pd.DataFrame(data=grg_data, index=idx)
 
     grg_reqs.to_excel(writer, sheet_name='greige_reqs', float_format='%.2f')
-
-def _audit_summary(date: dt.datetime, writer):
-    fpath1, _ = INFO_MAP['pa_audit']
-    fpath1 += f'_{date.strftime('%Y%m%d')}.tsv'
-    
-    audit = pd.read_csv(fpath1, dtype={'Lot': 'string', 'Grade Code': 'string', 'Grade Desc': 'string',
-                                       'Defect Code': 'string', 'Cust No.': 'string', 'Cust Name': 'string',
-                                       'WIP Roll': 'string'},
-                        sep='\t')
-    drop_rows = audit[audit['Stock Item'].isna() | audit['Lot'].isna() | audit['Roll ID'].isna()].index
-    audit = audit.drop(drop_rows, axis=0)
-
-    fpath2, _ = INFO_MAP['pa_greige_assigns']
-    fpath2 += f'_{date.strftime('%Y%m%d')}.tsv'
-
-    greige = pd.read_csv(fpath2, dtype='string', sep='\t')
-    drop_rows = greige[greige['Greige Roll'].isna()].index
-    greige = greige.drop(drop_rows, axis=0)
-
-    greige_by_lot = greige.groupby('Lot').agg(
-        greige_item=pd.NamedAgg('Greige Item', 'max'),
-        greige_rolls=pd.NamedAgg('Greige Roll', lambda x: ', '.join(list(x)))
-    )
-
-    cust_by_lot = audit.groupby('Lot').agg(
-        cust_no=pd.NamedAgg('Cust No.', 'max'),
-        cust_name=pd.NamedAgg('Cust Name', 'max')
-    )
-
-    sop_to_widths = audit[~audit['SOP'].isna()].groupby('SOP').agg(
-        slit=pd.NamedAgg('Slit Instruction', 'max')
-    )
-
-    def _get_sop_widths(slit):
-        num1 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
-        if not num1:
-            return -1, -1, -1
-        slit = slit[num1.end(0):]
-        num1 = num1.group(0)
-        txt1 = re.match(r'[^0-9]*', slit)
-        if txt1.group(0) == slit:
-            return num1, '', num1
-        slit = slit[txt1.end(0):]
-        num2 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
-        if not num2:
-            raise RuntimeError('what happened')
-        slit = slit[num2.end(0):]
-        num2 = num2.group(0)
-        txt2 = re.match(r'[^0-9]*', slit)
-        num3 = '0'
-        if txt2.group(0) != slit:
-            slit = slit[txt2.end(0):]
-            num3 = re.match(r'[0-9]+(\.[0-9]+)?', slit)
-            if not num3:
-                raise RuntimeError('what happened')
-            num3 = num3.group(0)
-        
-        x = float(num1)
-        y = float(num2)
-        z = float(num3)
-        if x * y > 250:
-            fin1 = num1
-            fin2 = num2
-            wip_width = x + y + z
-        else:
-            fin1 = num1
-            fin2 = ''
-            wip_width = x * y + z
-        if int(wip_width) == wip_width:
-            wip_width = str(int(wip_width))
-        else:
-            wip_width = str(wip_width)
-        return fin1, fin2, wip_width
-    
-    sop_to_widths['Fin Width 1'], sop_to_widths['Fin Width 2'], sop_to_widths['WIP Width'] = \
-        zip(*sop_to_widths['slit'].map(_get_sop_widths))
-    sop_to_widths = sop_to_widths.astype('string')
-
-    def _split_raw_dt_val(raw):
-        raw = int(raw)
-        val3 = raw % 100
-        val2 = int((raw % 10000 - val3) / 100)
-        val1 = int((raw - val2*100 - val3) / 10000)
-        return val1, val2, val3
-    
-    def _get_timestamp(row):
-        y, m, d = _split_raw_dt_val(row['Date'])
-        hour, minute, sec = _split_raw_dt_val(row['Time'])
-        return dt.datetime(y, m, d, hour=hour, minute=minute, second=sec)
-    
-    def _get_fin1(row):
-        sop = row['SOP']
-        if pd.isna(sop):
-            return row['Stock Item']
-        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'Fin Width 1']
-    
-    def _get_fin2(row):
-        sop = row['SOP']
-        if pd.isna(sop):
-            return row['Stock Item']
-        width = sop_to_widths.loc[sop, 'Fin Width 2']
-        if pd.isna(width):
-            return ''
-        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'Fin Width 2']
-    
-    def _get_wip_item(row):
-        sop = row['SOP']
-        if pd.isna(sop):
-            return row['Stock Item']
-        return row['Stock Item'] + '-' + sop_to_widths.loc[sop, 'WIP Width']
-    
-    audit['Timestamp'] = audit[['Date', 'Time']].agg(_get_timestamp, axis=1)
-    audit['Fin Item 1'] = audit.agg(_get_fin1, axis=1)
-    audit['Fin Item 2'] = audit.agg(_get_fin2, axis=1)
-    audit['WIP Item'] = audit.agg(_get_wip_item, axis=1)
-
-    def _get_roll_type(row):
-        if row['Lot'] not in row['Roll ID'] or row['Lot'] == '0':
-            return 'FIN'
-        if len(row['Roll ID']) == 10:
-            return 'LOT'
-        if len(row['Roll ID']) == 12:
-            return 'DOFF'
-        if len(row['Roll ID']) == 13:
-            return 'PANEL'
-        return 'ROLL'
-
-    def _get_doff(row):
-        if row['Roll Type'] in ('FIN', 'LOT'):
-            return np.nan
-        return int(row['Roll ID'][10:12])
-    
-    def _get_panel(row):
-        if row['Roll Type'] in ('FIN', 'LOT', 'DOFF'):
-            return np.nan
-        return row['Roll ID'][12]
-    
-    def _get_insp_roll(row):
-        if row['Roll Type'] == 'ROLL':
-            return int(row['Roll ID'][-2:])
-        return np.nan
-    
-    def _convert_grade(desc: str):
-        if pd.isna(desc):
-            return ''
-        last = desc.split()[-1]
-        rem_last = desc[:-1*len(last)]
-        strip_last = rem_last.rstrip()
-        return strip_last
-    
-    audit['Roll Type'] = audit[['Roll ID', 'Lot']].agg(_get_roll_type, axis=1)
-
-    fin_df = audit[audit['Roll Type'] == 'FIN']
-    fin_wip_df = fin_df[~(fin_df['WIP Roll'].isna() | (fin_df['WIP Roll'] == 'N'))]
-    fin_to_wip = {}
-    for i in fin_wip_df.index:
-        fin = fin_wip_df.loc[i, 'Roll ID']
-        wip = fin_wip_df.loc[i, 'WIP Roll']
-        if fin not in fin_to_wip:
-            fin_to_wip[fin] = wip
-    
-    n = len(fin_df)
-    count = 0
-    print('Updating finished roll grades and defects...')
-    for i in fin_df.index:
-        print(f'roll {count+1} out of {n}', end='\r')
-        roll = fin_df.loc[i, 'Roll ID']
-        if roll in fin_to_wip:
-            wip_rows = audit[audit['Roll ID'] == fin_to_wip[roll]]
-            if len(wip_rows) > 0:
-                last_idx = max(wip_rows.index)
-                audit.at[i, 'Grade Code'] = audit.loc[last_idx, 'Grade Code']
-                audit.at[i, 'Grade Desc'] = audit.loc[last_idx, 'Grade Desc']
-                audit.at[i, 'Defect Code'] = audit.loc[last_idx, 'Defect Code']
-                audit.at[i, 'Defect Desc'] = audit.loc[last_idx, 'Defect Desc']
-        count += 1
-    print()
-
-    audit['Doff'] = audit[['Roll Type', 'Roll ID']].agg(_get_doff, axis=1)
-    audit['Panel'] = audit[['Roll Type', 'Roll ID']].agg(_get_panel, axis=1)
-    audit['Insp Roll'] = audit[['Roll Type', 'Roll ID']].agg(_get_insp_roll, axis=1)
-    audit['Grade Desc'] = audit['Grade Desc'].apply(_convert_grade)
-
-    def _get_add_qty(row):
-        if row['Trans Desc'] in ('PHYSICAL ADJUSTMENT', 'ADJUST UP', 'REPORT PRODUCTION'):
-            return row['Quantity']
-        if row['Trans Desc'] in ('ADJUST DOWN', 'REPORT CONSUMPTION'):
-            return row['Quantity'] * -1
-        return np.nan
-    
-    audit['AddQty'] = audit[['Quantity', 'Trans Desc']].agg(_get_add_qty, axis=1)
-
-    idx = []
-    roll_data = {
-        'kind': [], 'mo': [], 'item': [], 'mkt_sgmt': [], 'customer': [], 'yds': [],
-        'processed_yds': [], 'code': [], 'timestamp': [], 'grade_code': [], 'grade_desc': [],
-        'defect_code': [], 'defect_desc': [], 'greige_item': [], 'greige_rolls': []
-    }
-
-    roll_lst = audit['Roll Type'] + '-' + audit['Roll ID']
-    n_rolls = len(roll_lst.unique())
-    count = 0
-    print('Compiling roll data...')
-    for key, grp in audit.groupby(['Roll Type', 'Roll ID']):
-        kind, roll = key
-        print(f'roll {count+1} of {n_rolls}', end='\r')
-        count += 1
-        if kind == 'LOT': continue
-            
-        first = list(grp.index)[0]
-
-        if kind == 'FIN':
-            init_opts = grp[grp['Trans Desc'] == 'REPORT PRODUCTION']
-            if len(init_opts) == 0: continue
-
-        idx.append(roll)
-        max_yds = max(grp['Quantity'])
-        amts = {}
-        
-        init_rows_added = grp[(grp['Quantity'] == max_yds) & ~pd.isna(grp['AddQty'])]
-        init_rows = grp[grp['Quantity'] == max_yds]
-        first = list(init_rows.index)[0]
-        init_code = audit.loc[first, 'Quality']
-
-        if len(init_rows_added) == 0:
-            if kind == 'FIN':
-                amts[init_code] = max_yds
-            else:
-                amts[init_code] = { 'add': max_yds, 'rem': 0 }
-
-        for i in grp.index:
-            if pd.isna(audit.loc[i, 'AddQty']): continue
-            add_qty = audit.loc[i, 'AddQty']
-            code = audit.loc[i, 'Quality']
-            trans = audit.loc[i, 'Trans Desc']
-            
-            if code not in amts:
-                if kind == 'FIN':
-                    amts[code] = 0
-                else:
-                    amts[code] = { 'add': 0, 'rem': 0 }
-
-            if kind == 'FIN':
-                amts[code] += add_qty
-            else:
-                if add_qty < 0:
-                    amts[code]['rem'] += add_qty*-1
-                else:
-                    amts[code]['add'] += add_qty
-
-        roll_data['kind'].append(kind)
-        pairs = [('mo', 'Lot'), ('item', 'Fin Item 1'), ('mkt_sgmt', 'Mkt Segment'),
-                 ('grade_code', 'Grade Code'), ('grade_desc', 'Grade Desc'), ('defect_code', 'Defect Code'),
-                 ('defect_desc', 'Defect Desc')]
-        for col1, col2 in pairs:
-            roll_data[col1].append(audit.loc[first, col2])
-
-        mo = audit.loc[first, 'Lot']
-        if mo not in greige_by_lot.index:
-            roll_data['greige_item'].append('')
-            roll_data['greige_rolls'].append('')
-        else:
-            roll_data['greige_item'].append(greige_by_lot.loc[mo, 'greige_item'])
-            roll_data['greige_rolls'].append(greige_by_lot.loc[mo, 'greige_rolls'])
-        
-        if mo not in cust_by_lot.index:
-            roll_data['customer'].append('')
-        else:
-            roll_data['customer'].append(cust_by_lot.loc[mo, 'cust_name'])
-
-        if kind != 'FIN':
-            code = init_code
-        else:
-            code = max(amts.items(), key=lambda x: x[1])[0]
-
-        if kind == 'FIN':
-            qty = amts[code]
-            processed = 0
-        else:
-            qty = amts[code]['add']
-            processed = amts[code]['rem']
-
-        roll_data['yds'].append(qty)
-        roll_data['processed_yds'].append(processed)
-        roll_data['code'].append(code)
-        roll_data['timestamp'].append(max(grp['Timestamp']))
-    print()
-
-    by_roll = pd.DataFrame(data=roll_data, index=idx)
-
-    for i in by_roll.index:
-        minval = by_roll.loc[i, 'processed_yds'] - 2
-        maxval = minval + 4
-        if minval <= by_roll.loc[i, 'yds'] * 2 <= maxval:
-            by_roll.loc[i, 'processed_yds'] = by_roll.loc[i, 'yds']
-        elif by_roll.loc[i, 'yds'] < minval:
-            by_roll.loc[i, 'yds'] = by_roll.loc[i, 'processed_yds']
-    
-    by_roll.to_excel(writer, sheet_name='audit_raw', index_label='id')
     
 class _ReportName(str, Enum):
     pa_dmnd = 'pa_dmnd'
@@ -608,7 +310,15 @@ def generate_report(name: _ReportNameAnno, infopath: _InfoPathAnno,
             case _ReportName.pa_dmnd:
                 _pa_dmnd_report(writer)
             case _ReportName.pa_audit_sum:
-                _audit_summary(start, writer)
+                suffix = f'_{start.strftime('%Y%m%d')}.tsv'
+                fpath1, _ = INFO_MAP['pa_audit']
+                fpath2, _ = INFO_MAP['pa_greige_assigns']
+                fpath3, _ = INFO_MAP['pa_mo_to_jet']
+
+                fpath1 += suffix
+                fpath2 += suffix
+                fpath3 += suffix
+                _audit_summary(writer, fpath1, fpath2, fpath3)
             case _ReportName.greige_demand:
                 _greige_reqs(writer)
             case _ReportName.pa_dye_orders:
