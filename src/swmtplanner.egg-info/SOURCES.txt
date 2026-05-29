@@ -10,6 +10,7 @@ src/swmtplanner.egg-info/requires.txt
 src/swmtplanner.egg-info/top_level.txt
 src/swmtplanner/excel/__init__.py
 src/swmtplanner/excel/__init__.pyi
+src/swmtplanner/excel/_audit_report.py
 src/swmtplanner/excel/_fab_reports.py
 src/swmtplanner/excel/_updates.py
 src/swmtplanner/excel/cli.py
