@@ -37,6 +37,7 @@ class _RollData(TypedDict):
     lot: str
     source: str
     item: str
+    create_date: dt.datetime | None
     movements: dict[str, _RollMoves]
 
 
@@ -139,6 +140,17 @@ def _process_audit(audit: pd.DataFrame) -> pd.DataFrame:
     return audit
 
 
+def _creation_date(audit: pd.DataFrame, roll: str, kind: str) -> dt.datetime | None:
+    subgrp = audit[audit['Roll ID'] == roll]
+
+    if kind in ('LOT', 'FIN'):
+        init_rows = subgrp[subgrp['Trans Desc'] == 'REPORT PRODUCTION']
+    else:
+        init_rows = subgrp[(subgrp['Trans Desc'] == 'PHYSICAL ADJUSTMENT') & (subgrp['Quantity'] > 0)]
+    
+    return min(init_rows['Timestamp'], default=None)
+
+
 def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
     rolls = []
     n = len(audit['Roll ID'].unique())
@@ -149,24 +161,16 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
         lot = max(lots) if len(lots) > 0 else 'NONE'
         
         wip_ids = grp[~pd.isna(grp['WIP Roll'])]['WIP Roll']
-        wip_id = max(wip_ids) if len(wip_ids) > 0 else roll
+        wip_id = ''
+        if len(wip_ids) > 0:
+            wip_id = max(wip_ids)
+        elif len(roll) > 9:
+            wip_id = roll
 
         parsed = re.match(_WIP_ROLL_ID, wip_id)
         doff = None if parsed is None else parsed.group(2)
         panel = None if parsed is None else parsed.group(3)
         roll_idx = None if parsed is None else parsed.group(4)
-
-        item = max(grp['WIP Item'])
-        if not panel is None:
-            fin1 = max(grp['Fin Item 1'])
-            fin2 = max(grp['Fin Item 2'])
-            fin3 = max(grp['Fin Item 3'])
-            if panel == 'B' and len(fin2) > 0:
-                item = fin2
-            elif panel == 'C' and len(fin3) > 0:
-                item = fin3
-            else:
-                item = fin1
 
         source, kind = '', 'LOT'
         if wip_id != roll:
@@ -177,6 +181,19 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
             source, kind = lot, 'PANEL'
         elif doff:
             source, kind = lot, 'DOFF'
+
+
+        item = max(grp['WIP Item'])
+        if kind not in ('LOT', 'DOFF'):
+            fin1 = max(grp['Fin Item 1'])
+            fin2 = max(grp['Fin Item 2'])
+            fin3 = max(grp['Fin Item 3'])
+            if panel == 'B' and len(fin2) > 0:
+                item = fin2
+            elif panel == 'C' and len(fin3) > 0:
+                item = fin3
+            else:
+                item = fin1
         
         rolls.append({
             'id': roll,
@@ -184,6 +201,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
             'lot': lot,
             'source': source,
             'item': item,
+            'create_date': _creation_date(audit, roll, kind),
             'movements': {}
         })
 
@@ -219,8 +237,8 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
     roll_rows = []
     row_cols = [
         'id', 'kind', 'lot', 'source',
-        'item', 'mkt_segment',
-        'created', 'last_transact',
+        'item', 'mkt_segment', 'created',
+        'first_transact', 'last_transact',
         'loc', 'qual', 'qty',
         'grade_code', 'grade_desc',
         'defect_code', 'defect_desc'
@@ -231,9 +249,9 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
         for loc in x.keys():
             qty = max([ x[loc][q]['qty'] for q in x[loc].keys() ])
             if round(qty) >= 0:
-                create_date = min([ x[loc][q]['date1'] for q in x[loc].keys() ])
+                first_date = min([ x[loc][q]['date1'] for q in x[loc].keys() ])
             else:
-                create_date = np.nan
+                first_date = np.nan
                 
             for qual in x[loc].keys():
                 copies = [
@@ -244,7 +262,8 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
                 ]
                 roll_rows.append({ col: roll_data[col] for col in copies })
                 cur = roll_rows[-1]
-                cur['created'] = create_date
+                cur['created'] = np.nan if roll_data['create_date'] is None else roll_data['create_date']
+                cur['first_transact'] = first_date
                 cur['last_transact'] = x[loc][qual]['date2']
                 cur['loc'] = loc
                 cur['qual'] = qual
@@ -272,7 +291,9 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         ]
 
         max_qty = max(grp['qty'])
-        if round(max_qty) <= 0: continue
+        if round(max_qty) <= 0 : continue
+        created = min(grp[~grp['created'].isna()]['created'], default=np.nan)
+        if pd.isna(created): continue
 
         max_qty_rows = grp[grp['qty'] == max_qty]
 
@@ -282,7 +303,7 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         for col in copies:
             cur[col] = max(grp[~grp[col].isna()][col], default='')
 
-        cur['created'] = min(grp[~grp['created'].isna()]['created'], default=np.nan)
+        cur['created'] = created
         cur['last_transact'] = max(grp['last_transact'])
         cur['loc'] = max(max_qty_rows['loc'])
         cur['qual'] = max(max_qty_rows['qual'])
