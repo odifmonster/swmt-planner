@@ -311,7 +311,7 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         ]
 
         max_qty = max(grp['qty'])
-        if round(max_qty) <= 0 : continue
+        if round(max_qty) <= 0: continue
         created = min(grp[~grp['created'].isna()]['created'], default=np.nan)
         if pd.isna(created): continue
 
