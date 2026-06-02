@@ -4,7 +4,7 @@ from typing import TypedDict, Literal, Any
 import pandas as pd, datetime as dt, numpy as np, re
 
 
-_NON_STR_COLS = ('Trans ID', 'Date', 'Time', 'Quantity')
+_NON_STR_COLS = ('Trans ID', 'Date', 'Time', 'Quantity') # columns in audit trail not to interpret as strings
 
 def _as_group(pattern: str):
     return '(' + pattern + ')'
@@ -15,33 +15,36 @@ _NUMBER = r'[0-9]+\.[0-9]+|[0-9]+'
 _TEXT_REQ = r'[^0-9]+'
 _TEXT_OPT = r'[^0-9]*'
 
-_SLIT_INSTR = (
+_SLIT_INSTR = ( # pattern matching slit instruction
     _as_group(_NUMBER) + _TEXT_REQ + _as_opt(_as_group(_NUMBER))
     + _TEXT_OPT + _as_opt(_as_group(_NUMBER))
 )
-_WIP_ROLL_ID = r'([0-9]{10})([0-9]{2})?([A-Z])?([0-9]{2})?'
+_WIP_ROLL_ID = r'([0-9]{10})([0-9]{2})?([A-Z])?([0-9]{2})?' # pattern matching doff/panel/roll info in wip roll ids
 
 
 class _RollMove(TypedDict):
+    """Represents a roll's status in some location under some quality code"""
     qty: float
     date1: dt.datetime | Any
     date2: dt.datetime | Any
 
 
-_RollMoves = dict[Literal['A', 'B', 'C'], _RollMove]
+_RollMoves = dict[Literal['A', 'B', 'C'], _RollMove] # maps quality codes to roll "moves"
 
     
 class _RollData(TypedDict):
+    """Represents all data on a single roll ID"""
     id: str
     kind: Literal['LOT', 'DOFF', 'PANEL', 'ROLL', 'FIN']
     lot: str
-    source: str
+    source: str # the parent roll that produced this roll (if applicable)
     item: str
     create_date: dt.datetime | None
-    movements: dict[str, _RollMoves]
+    movements: dict[str, _RollMoves] # map of locations to roll moves
 
 
 def _load_audit_file(fpath: str):
+    """read in audit table"""
     audit_cols = []
     with open(fpath, encoding='utf-8-sig') as infile:
         header = infile.readline().strip()
@@ -55,6 +58,7 @@ def _load_audit_file(fpath: str):
 
 
 def _decode_dt(val):
+    """Split compound date/time value into its components"""
     x3 = val % 100
     val = (val - x3) // 100
     x2 = val % 100
@@ -64,12 +68,14 @@ def _decode_dt(val):
 
 
 def _get_timestamp(row):
+    """Convert Date and Time columns into dt.datetime object"""
     y, m, d = _decode_dt(row['Date'])
     hr, minute, sec = _decode_dt(row['Time'])
     return dt.datetime(year=y, month=m, day=d, hour=hr, minute=minute, second=sec)
 
 
 def _add_qty(row):
+    """Get "added" quantity based on quantity and transaction"""
     if row['Trans Desc'] in ('ADJUST DOWN', 'REPORT CONSUMPTION', 'TRANSFER OUT'):
         return row['Quantity'] * -1
     if row['Trans Desc'] == 'INVOICE':
@@ -78,12 +84,14 @@ def _add_qty(row):
 
 
 def _get_num_val(x):
+    """Convert strings to numbers maintaining int/float information"""
     if '.' in x:
         return float(x)
     return int(x)
 
 
 def _parse_sop_width(sop: str):
+    """Parse finished and WIP item width from slit instructions"""
     parsed = re.match(_SLIT_INSTR, sop)
     num1 = _get_num_val(parsed.group(1))
     num2 = 1 if parsed.group(2) is None else _get_num_val(parsed.group(2))
@@ -99,6 +107,7 @@ def _parse_sop_width(sop: str):
 
 
 def _fmt_item_width(item: str, width: int | float):
+    """Combine stock item with width to get full product SKU"""
     if width == 0:
         return ''
     if int(width) == width:
@@ -107,6 +116,7 @@ def _fmt_item_width(item: str, width: int | float):
 
 
 def _get_items(row):
+    """Get WIP and fin item SKUs"""
     if pd.isna(row['Slit Instruction']):
         return row['Stock Item'], row['Stock Item'], '', ''
     fin1_wd, fin2_wd, fin3_wd, wip_wd = _parse_sop_width(row['Slit Instruction'])
@@ -118,6 +128,7 @@ def _get_items(row):
 
 
 def _fmt_grade_desc(desc):
+    """Remove quality code from grade description"""
     if pd.isna(desc):
         return ''
     last = desc.split()[-1]
@@ -126,6 +137,7 @@ def _fmt_grade_desc(desc):
 
 
 def _process_audit(audit: pd.DataFrame) -> pd.DataFrame:
+    """Perform additional formatting on raw audit table"""
     audit = audit.replace({'WIP Roll': {'N': np.nan}})
     audit['AddQty'] = audit[['Trans Desc', 'Quantity']].agg(_add_qty, axis=1)
     audit['Timestamp'] = audit[['Date', 'Time']].agg(_get_timestamp, axis=1)
@@ -141,6 +153,7 @@ def _process_audit(audit: pd.DataFrame) -> pd.DataFrame:
 
 
 def _creation_date(audit: pd.DataFrame, roll: str, kind: str) -> dt.datetime | None:
+    """Extract creation date from audit trail for a roll (if present)"""
     subgrp = audit[audit['Roll ID'] == roll]
 
     if kind in ('LOT', 'FIN'):
@@ -152,38 +165,40 @@ def _creation_date(audit: pd.DataFrame, roll: str, kind: str) -> dt.datetime | N
 
 
 def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
+    """Extract per-roll data from audit"""
     rolls = []
     n = len(audit['Roll ID'].unique())
-    count = 0
+    count = 0 # for printing current progress through table
 
     for roll, grp in audit.groupby('Roll ID'):
-        lots = grp[~pd.isna(grp['Lot'])]['Lot']
-        lot = max(lots) if len(lots) > 0 else 'NONE'
+        lots = grp[~pd.isna(grp['Lot'])]['Lot'] # filter NA values from "Lot" column
+        lot = max(lots) if len(lots) > 0 else 'NONE' # convert Series to single value (default to NONE if MO was not recorded)
         
-        wip_ids = grp[~pd.isna(grp['WIP Roll'])]['WIP Roll']
+        wip_ids = grp[~pd.isna(grp['WIP Roll'])]['WIP Roll'] # filter NA values from WIP Roll column
         wip_id = ''
         if len(wip_ids) > 0:
             wip_id = max(wip_ids)
         elif len(roll) > 9:
+            # only finished (packed) rolls will have a WIP roll associated, otherwise the roll itself is a WIP roll
             wip_id = roll
 
-        parsed = re.match(_WIP_ROLL_ID, wip_id)
+        parsed = re.match(_WIP_ROLL_ID, wip_id) # parse lot, doff, panel, and inspection roll information if available
         doff = None if parsed is None else parsed.group(2)
         panel = None if parsed is None else parsed.group(3)
         roll_idx = None if parsed is None else parsed.group(4)
 
         source, kind = '', 'LOT'
-        if wip_id != roll:
+        if wip_id != roll: # roll ID is only different from WIP roll ID if it is finished/packed
             source, kind = wip_id, 'FIN'
-        elif roll_idx:
+        elif roll_idx: # only inspected rolls get a roll index
             source, kind = roll[:-2], 'ROLL'
-        elif panel:
+        elif panel: # only framed rolls have a panel letter
             source, kind = lot, 'PANEL'
-        elif doff:
+        elif doff: # this really shouldn't happen but sometimes they make mistakes
             source, kind = lot, 'DOFF'
 
 
-        item = max(grp['WIP Item'])
+        item = max(grp['WIP Item']) # use WIP item for non-framed lots, finished items otherwise
         if kind not in ('LOT', 'DOFF'):
             fin1 = max(grp['Fin Item 1'])
             fin2 = max(grp['Fin Item 2'])
@@ -192,7 +207,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
                 item = fin2
             elif panel == 'C' and len(fin3) > 0:
                 item = fin3
-            else:
+            else: # use panel info to get correct finished item, default to first panel width if unknown
                 item = fin1
         
         rolls.append({
@@ -210,6 +225,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
             'Mkt Segment'
         ]
         for col in other_info_cols:
+            # format new column name, filter out NA values, convert Series to single value with max
             tgt_col = '_'.join([ x.lower() for x in col.split() ])
             non_na = grp[~grp[col].isna()][col]
             rolls[-1][tgt_col] = max(non_na, default='')
@@ -217,6 +233,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
         cur = rolls[-1]['movements']
 
         for key, subgrp in grp.groupby(['Loc 1', 'Quality']):
+            # track "movements" by location and quality
             loc, qual = key
             if loc not in cur:
                 cur[loc] = {}
@@ -234,6 +251,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
 
 
 def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
+    """Extract upgrade/downgrade trail from per-roll data (not currently used in end product)"""
     roll_rows = []
     row_cols = [
         'id', 'kind', 'lot', 'source',
@@ -247,10 +265,12 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
     for roll_data in data:
         x = roll_data['movements']
         for loc in x.keys():
+            # max positive quantity under some quality code gives the final quality of the roll
             qty = max([ x[loc][q]['qty'] for q in x[loc].keys() ])
             if round(qty) >= 0:
                 first_date = min([ x[loc][q]['date1'] for q in x[loc].keys() ])
             else:
+                # if initial quantity was not captured, we don't have the first transaction on this roll
                 first_date = np.nan
                 
             for qual in x[loc].keys():
