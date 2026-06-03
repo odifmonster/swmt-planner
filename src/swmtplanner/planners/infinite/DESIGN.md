@@ -249,7 +249,7 @@ Move
   machine_id: str
   item: Greige
   lbs: float
-  start_at: Literal['next_job_end', 'next_runout']
+  start_at: Literal['schedule_tail', 'next_runout']
   idle_for: timedelta
   week_idx: int | None    # which order this move addresses; None for safety (Phase 2)
   plan: list[Activity]    # cached output of machine.plan_production
@@ -319,12 +319,13 @@ IterationLogRecord                              # one row of iteration_log.tsv; 
   target_week: int | None                       # week_idx for regular orders; None for safety
   machine_id: str
   machine_is_new: bool                          # convenience flag; reads from state.machines[machine_id].is_new
-  start_at: Literal['next_job_end', 'next_runout']
+  start_at: Literal['schedule_tail', 'next_runout']
   idle_hours: float                             # move.idle_for converted to hours
   # summary + foreign keys into the detail tables
   total_score: float                            # equals cost_detail[cost_id].total
-  cost_id: int                                  # foreign key into PlanReport.cost_detail (one row per scored candidate)
-  sched_id: int                                 # foreign key into PlanReport.schedule_detail (one row per Activity in move.plan)
+  cost_id: int                                  # forward FK into PlanReport.cost_detail (one row per scored candidate)
+  move_id: int                                  # this row's canonical identity as a "move" — always equal to cost_id. The join target for schedule_detail.move_id; see the cost_id/move_id distinction below.
+  sched_id: int                                 # forward FK into PlanReport.schedule_detail (one row per Activity in move.plan)
 
 CostDetailRecord                                # one row of cost_detail.tsv; one record per scored candidate
   cost_id: int                                  # primary key; auto-incremented across the verbose run
@@ -369,7 +370,8 @@ PriorityDetailRecord                            # one row of priority_detail.tsv
 
 ScheduleDetailRecord                            # one row of schedule_detail.tsv; one record per Activity in a candidate's move.plan
   sched_id: int                                 # groups all rows from one candidate's plan
-  activity_id: int                              # primary key within schedule_detail; auto-incremented across the verbose run
+  activity_id: str                              # the underlying Activity's stable id (e.g. "JOB00001"); shared with the workbook's `schedule` sheet so the dashboard can drill from a scheduled activity into its schedule_detail row
+  move_id: int                                  # FK back to the move that produced this Activity — joins to iteration_log.move_id. Numerically equal to the candidate's cost_id, but the column name is a deliberate semantic distinction: cost_id (on iteration_log) is "forward, into cost_detail"; move_id (on iteration_log and schedule_detail) is the move's canonical identity, joined on across tables to follow an activity back to the move that scheduled it. Same integer, different join direction.
   machine_id: str
   start: datetime
   end: datetime
@@ -416,7 +418,7 @@ are ordered by `item_id`. When two candidates score equal — used to
 compute both `score_rank` (across the pool) and `item_score_rank`
 (within an item) — the order is by `item_id`, then `machine_id`,
 then decision point with `next_runout` ordered before
-`next_job_end`.
+`schedule_tail`.
 
 The seven companion detail tuples on `PlanReport` are populated in
 lockstep with `iteration_log`. At the start of each iteration the
@@ -441,29 +443,59 @@ using the baseline, emits in addition to the candidate's
   alongside the *absolute* weighted contribution (no baseline to
   subtract from);
 - one `ScheduleDetailRecord` per `Activity` in `move.plan`,
-  grouped by `sched_id`.
+  grouped by `sched_id`. Each row also carries `move_id` (the
+  candidate's `cost_id` stored inline as the "backward" FK to
+  `iteration_log`, so the dashboard can jump from a single
+  activity straight to the move that scheduled it), and
+  `activity_id` is the underlying `Activity`'s stable id rather
+  than a fresh counter (the same value that appears on the
+  workbook's `schedule` sheet).
 
-In practice the move only touches `move.item.id`'s jobs and
-on_hand, so the four demand-side delta dicts have at most one entry
-each — that item, and only when the cost actually changes. The
-priority dict can have many entries, one per item with a deferred
-higher-priority regular order — each item appears at most once,
-since the candidate enumerator picks at most one regular order per
-item per iteration, so its higher-priority counterpart is unique.
+In practice the four demand-side delta dicts have at most two
+entries each. In `start_at == 'schedule_tail'` mode the move only
+touches `move.item.id`'s jobs, so at most one entry. In `start_at
+== 'next_runout'` mode the plan also includes `Job`s of the
+machine's *current* item (the run-up before the changeover), so a
+second item's demand-side costs can shift as well — at most one
+entry for the run-up item plus one for the move's target item.
+Either way, items whose cost doesn't actually change are dropped
+from the dict.
+
+The priority dict can have many entries, one per item with a
+deferred higher-priority regular order — each item appears at
+most once, since the candidate enumerator picks at most one
+regular order per item per iteration, so its higher-priority
+counterpart is unique.
 The per-item attribution exposes *which* urgent orders are being
 passed over and how much unfulfilled demand each carries, which is
 exactly the diagnostic an operator needs when an urgent order
 doesn't get committed.
 
-Cross-table links are auto-incremented integer ids — `cost_id`,
-`sched_id`, `activity_id`, and the five `*_detail_id` counters —
-each owned by the loop and starting at 1 at the beginning of the
-verbose run. A `*_detail_id` is omitted (`None` on the
-`CostDetailRecord`, blank cell in the TSV) when the corresponding
-cost would have no contributing rows (no non-zero deltas for the
-four demand-side costs; no higher-priority skipped orders for
-priority), and the matching detail table emits no rows for that
-candidate.
+Cross-table links use auto-incremented integer ids — `cost_id`,
+`sched_id`, and the five `*_detail_id` counters — each owned by
+the loop and starting at 1 at the beginning of the verbose run.
+A `*_detail_id` is omitted (`None` on the `CostDetailRecord`,
+blank cell in the TSV) when the corresponding cost would have no
+contributing rows (no non-zero deltas for the four demand-side
+costs; no higher-priority skipped orders for priority), and the
+matching detail table emits no rows for that candidate.
+
+Two cross-table keys on `schedule_detail.tsv` are *not* fresh
+counters. `activity_id` is the underlying `Activity`'s stable id
+(e.g. `JOB00001`), shared with the workbook's `schedule` sheet so
+the dashboard can drill from a scheduled activity into the
+corresponding `schedule_detail` row. `move_id` is the candidate's
+`cost_id`, so a `schedule_detail` row joins back to
+`iteration_log.move_id` in one hop. The same `move_id` column
+appears on `iteration_log.tsv` (always equal to that row's
+`cost_id`) — the dual column lets the dashboard treat `move_id`
+as the canonical "move" identity that's joined on across tables.
+The column-name distinction from `cost_id` is deliberate:
+`iteration_log.cost_id` is the "forward" FK into the weighted
+breakdown in `cost_detail`; the shared `move_id` column is the
+"backward" join that an operator follows from a scheduled
+activity back to the move that scheduled it. Same integer
+namespace, different read directions.
 
 With `verbose=False` (the default), all eight tuples are `None`,
 `Costing.cost_breakdown` is never called, and the loop skips the
@@ -481,9 +513,10 @@ becomes one `Move` with derived `lbs`, `start_at`, and `idle_for`.
 Every machine has up to two natural points in time at which new
 production could begin:
 
-- **`next_job_end`** — the schedule tail (`current_status.as_of`).
-  Starts production sooner but pays the full changeover preamble
-  (`TapeOut` + `BeamLoad`s + `StyleChange` as needed).
+- **`schedule_tail`** — the activity-schedule tail
+  (`current_status.as_of`). Starts production sooner but pays the
+  full changeover preamble (`TapeOut` + `BeamLoad`s + `StyleChange`
+  as needed).
 - **`next_runout`** — the forward-extrapolated time at which the
   current item's beam(s) would exhaust if the machine kept running.
   Waits out the current beam but avoids the `TapeOut` for the
@@ -521,9 +554,10 @@ right-edge boundary on which decision points are eligible. A
 candidate is in the window iff its `decision_point <= window_end`.
 Decisions beyond the window are skipped for this iteration.
 
-When committing a move whose `Job`(s) span a long time, the machine's
-new `next_job_end` is typically pushed past `window_end`, so that
-machine drops out of the candidate pool until the window catches up.
+When committing a move whose activities span a long time, the
+machine's new `schedule_tail` is typically pushed past
+`window_end`, so that machine drops out of the candidate pool until
+the window catches up.
 This naturally distributes high-volume items across multiple machines
 without any explicit "split this order across machines" enumerator:
 once machine A takes a big chunk, the next iteration's candidates are
@@ -783,15 +817,15 @@ level_loading_cost(move) = machine.workcal.get_work_hours_between(
 ) × w.level_loading
 ```
 
-where `dp_time(move)` is `state.machines[move.machine_id].next_job_end`
-when `move.start_at == 'next_job_end'` and `.next_runout` otherwise —
+where `dp_time(move)` is `state.machines[move.machine_id].schedule_tail`
+when `move.start_at == 'schedule_tail'` and `.next_runout` otherwise —
 the time the move's decision point falls at, *before* any carrying-
 avoidance idle. The delta is measured in **work hours** so a weekend
 gap between two DPs doesn't manufacture a level-loading difference
 where there's no production difference to speak of.
 
 The earliest DP in the candidate pool naturally pays zero. As soon as
-a commit pushes that machine's `next_job_end` past the others, the
+a commit pushes that machine's `schedule_tail` past the others, the
 remaining machines become the earliest and inherit the zero-cost slot
 — so the level-loading penalty produces "spread work across machines"
 behavior without any explicit "distribute" enumerator.
@@ -979,9 +1013,11 @@ resolved `start_date`. Four sheets:
   reports when the order will finish filling (the latest contributing
   chunk's arrival time), even if some demand remains unmet.
 
-When `--verbose` is set, an additional set of TSV files is written
-in a `verbose_<YYYYMMDD>/` subdirectory next to the workbook — see
-"Verbose iteration log" below.
+When `--verbose` is set, the CLI emits two extra outputs alongside
+the workbook: a `verbose_<YYYYMMDD>/` subdirectory of TSV tables
+(see "Verbose iteration log" below) and a single self-contained
+`dashboard_<YYYYMMDD>.html` file (see "Dashboard HTML" below) that
+embeds the same data with foreign-key drill-down navigation.
 
 See `report.py` for the per-sheet layouts.
 
@@ -1005,7 +1041,7 @@ candidate's full activity plan.
 | `carrying_detail.tsv`  | One row per (candidate, item) with a non-zero carrying delta vs the iteration's baseline | `cost_detail.carrying_detail_id` |
 | `excess_detail.tsv`    | One row per (candidate, item) with a non-zero excess delta vs the iteration's baseline   | `cost_detail.excess_detail_id`   |
 | `priority_detail.tsv`  | One row per (candidate, item) with at least one higher-priority regular order being skipped by this move | `cost_detail.priority_detail_id` |
-| `schedule_detail.tsv`  | One row per Activity in `move.plan`                    | `sched_id`                             |
+| `schedule_detail.tsv`  | One row per Activity in `move.plan`                    | `sched_id`, or `move_id` (joins directly to `iteration_log.move_id`) |
 
 For each main-loop iteration the CLI records up to 16 candidates —
 grouped by item, with the top 4 items (ranked by their
@@ -1037,11 +1073,12 @@ and inspecting the candidate's full activity plan by joining
 | `target_week`     | int \| blank | Week index (0–3) for a regular order; blank cell for a safety order.                           |
 | `machine_id`      | str          | The move's machine.                                                                            |
 | `machine_is_new`  | bool         | `state.machines[machine_id].is_new` — useful for explaining the `old_machine` cost.            |
-| `start_at`        | str          | `next_job_end` or `next_runout`.                                                               |
+| `start_at`        | str          | `schedule_tail` or `next_runout`.                                                              |
 | `idle_hours`      | float        | `move.idle_for` expressed in hours (carrying-avoidance idle).                                  |
 | `total_score`     | float        | The candidate's `score_after_move(state, move, ctx)`; equals `cost_detail[cost_id].total`.     |
-| `cost_id`         | int          | Foreign key into `cost_detail.tsv`.                                                            |
-| `sched_id`        | int          | Foreign key into `schedule_detail.tsv`.                                                        |
+| `cost_id`         | int          | Forward FK into `cost_detail.tsv` — the move's weighted breakdown.                             |
+| `move_id`         | int          | This row's canonical identity as a "move" — always equal to `cost_id`. The join target for `schedule_detail.move_id` (lets the dashboard go "backward" from a scheduled activity into this iteration_log row). |
+| `sched_id`        | int          | Forward FK into `schedule_detail.tsv` — the move's activity plan.                              |
 
 #### `cost_detail.tsv` columns (in order)
 
@@ -1077,14 +1114,14 @@ and inspecting the candidate's full activity plan by joining
 `drainage_detail.tsv`, `carrying_detail.tsv`, and
 `excess_detail.tsv` use the analogous `<cost>_detail_id` and
 `<cost>_delta` column names. Rows are emitted only for items with
-a non-zero delta in the corresponding cost — in practice the move
-only changes its target item's demand-side costs, so each detail
-group typically has at most one row (and is omitted entirely when
-the candidate would not move that cost). A candidate whose only
-effect is on, say, drainage will produce a single row in
-`drainage_detail.tsv` and no rows in the other three demand-detail
-tables (with the matching `*_detail_id` cells in `cost_detail.tsv`
-left blank).
+a non-zero delta in the corresponding cost — in practice that's
+at most two items per candidate (the move's target item, plus
+the machine's current item when the candidate's `start_at ==
+'next_runout'` and the run-up phase emits `Job`s of the current
+item before the changeover). A candidate that moves only one cost
+component will produce rows in just one of the four demand-detail
+tables; the other three `*_detail_id` cells on the matching
+`cost_detail.tsv` row are blank.
 
 #### `priority_detail.tsv` columns (in order)
 
@@ -1121,7 +1158,8 @@ produces no row.
 | Column         | Type     | Notes                                                                                          |
 |---|---|---|
 | `sched_id`     | int      | Groups all rows from one candidate's `move.plan`.                                              |
-| `activity_id`  | int      | Primary key within `schedule_detail.tsv`; unique across the run.                               |
+| `activity_id`  | str      | The underlying `Activity`'s stable id (e.g. `JOB00001`). Matches the workbook's `schedule` sheet so the dashboard can drill from a scheduled activity into its `schedule_detail` row. Not auto-incremented. |
+| `move_id`      | int      | FK back to the move that scheduled this activity — joins to `iteration_log.move_id`. Numerically equal to the candidate's `cost_id`. The column name is deliberately distinct from `cost_id`: `iteration_log.cost_id` is the "forward" FK into `cost_detail`; the shared `move_id` column on `iteration_log` and `schedule_detail` is the "backward" FK that follows an activity back to its move. Same integer values, different read directions. |
 | `machine_id`   | str      | The candidate's machine.                                                                       |
 | `start`        | datetime | Activity start.                                                                                |
 | `end`          | datetime | Activity end.                                                                                  |
@@ -1139,13 +1177,28 @@ row is therefore the very first row of each iteration block.
 The companion tables are emitted in `cost_id` / `sched_id` order —
 i.e., parallel to the candidate sequence in `iteration_log.tsv`, so
 each TSV reads top-to-bottom in the same chronological direction.
-The auto-incremented counters (`cost_id`, `sched_id`, `activity_id`,
-and the five `*_detail_id`s) restart at 1 at the beginning of each
-verbose run and are independent of one another — `cost_id` and
-`sched_id` happen to be 1:1 with candidates today, but the
-identifiers are kept separate so future shape changes (e.g.,
-sharing schedule details across candidates) don't require a schema
-migration. Cross-file joins are by integer id only.
+The auto-incremented counters (`cost_id`, `sched_id`, and the five
+`*_detail_id`s) restart at 1 at the beginning of each verbose run
+and are independent of one another — `cost_id` and `sched_id`
+happen to be 1:1 with candidates today, but the identifiers are
+kept separate so future shape changes (e.g., sharing schedule
+details across candidates) don't require a schema migration.
+
+On `schedule_detail.tsv`, `activity_id` is *not* an auto-incremented
+counter — it's the underlying `Activity`'s stable id (e.g.
+`JOB00001`), so it joins directly to the same column on the
+workbook's `schedule` sheet. `move_id` is the candidate's `cost_id`
+stored inline so a single `schedule_detail` row joins back to
+`iteration_log.move_id` in one hop (`iteration_log` also carries
+a `move_id` column, always equal to that row's `cost_id`, so the
+join is on a shared column name). The column-name distinction
+from `cost_id` is deliberate: `iteration_log.cost_id` is the
+"forward" FK from a logged candidate into `cost_detail`; the
+shared `move_id` column is the "backward" join that an operator
+follows from an activity back to the move (the `iteration_log`
+row) that scheduled it. Same integer values, different read
+directions. Cross-file joins on every other table key are by
+integer id only.
 
 #### Internal flow
 
@@ -1164,6 +1217,104 @@ CLI converts each tuple into the corresponding TSV. With
 `cost_breakdown_after_move`, and all eight `PlanReport` detail
 tuples stay `None` — the verbose path adds work only when
 explicitly requested.
+
+### Dashboard HTML
+
+When `--verbose` is set, alongside the `verbose_<YYYYMMDD>/`
+subdirectory the CLI also writes a single self-contained HTML
+dashboard at `<output_dir>/dashboard_<YYYYMMDD>.html`. The
+dashboard embeds the same eight tables the TSVs hold plus a hard-
+coded "Machine schedule" view of the committed plan, all backed by
+inline JavaScript — no external assets, no server, just open the
+file in a browser. Filename suffix collision (`_2`, `_3`, …) uses
+the same scheme as the workbook and the verbose subdirectory.
+
+The dashboard exists for *interactive* drill-down. The TSVs are
+the source of truth and the tool-of-choice when an operator wants
+to script or pivot; the dashboard is what an operator with a
+laptop and a question reaches for first.
+
+#### Pages
+
+| Page              | Source                                  | Notes                                                                                  |
+|---|---|---|
+| Overview          | (schema diagram)                        | Lists every table and its foreign-key edges; click a table name to jump in.            |
+| Machine schedule  | `report.schedules`                      | Committed schedule, grouped by machine, chronological within each machine. Each `activity_id` is a link into `Schedule Detail`. |
+| Iteration Log     | `iteration_log.tsv`                     | Headline log. `cost_id` and `sched_id` cells link to the matching detail tables.       |
+| Cost Detail       | `cost_detail.tsv`                       | Per-candidate weighted breakdown. Each `*_detail_id` cell links to its detail table.   |
+| Schedule Detail   | `schedule_detail.tsv`                   | One row per activity on a logged candidate's `move.plan`. `move_id` links back to the row in `Iteration Log` for the move that scheduled this activity. |
+| Lateness Detail   | `lateness_detail.tsv`                   | Per-item lateness deltas vs the iteration's baseline.                                  |
+| Drainage Detail   | `drainage_detail.tsv`                   | Per-item drainage deltas.                                                              |
+| Carrying Detail   | `carrying_detail.tsv`                   | Per-item carrying deltas.                                                              |
+| Excess Detail     | `excess_detail.tsv`                     | Per-item excess deltas.                                                                |
+| Priority Detail   | `priority_detail.tsv`                   | Per-item absolute priority attribution (which higher-priority orders the move skipped).|
+
+#### Drill-down paths
+
+The dashboard's main value is letting an operator chase a question
+across tables. Three canonical paths:
+
+- **"Why is this activity on the schedule?"** — Start on
+  **Machine schedule**, click the `activity_id` of the activity
+  in question. The corresponding `Schedule Detail` row opens; its
+  `move_id` cell links to the move's row in `Iteration Log` (the
+  "backward" FK — same integer as `iteration_log.cost_id`, but
+  named for the operator's mental model of "follow this back to
+  the move that scheduled the activity"). From there, `cost_id`
+  goes "forward" into the move's weighted breakdown in
+  `Cost Detail`. This is the *new* path enabled by the `move_id`
+  column and the shared `activity_id` between the workbook's
+  schedule sheet and `schedule_detail`.
+- **"Why was this move committed instead of the alternatives?"**
+  — Start on **Iteration Log**, find the committed row for the
+  iteration of interest (`role == 'committed'`), and read across
+  to its `cost_id`. Click that to see the full weighted
+  breakdown; from there the five `*_detail_id` cells go to the
+  per-cost detail tables (per-item demand-cost deltas; per-item
+  priority attribution).
+- **"Which urgent orders did this move skip?"** — From the
+  committed Iteration Log row, follow `cost_id` to `Cost Detail`,
+  then `priority_detail_id` to `Priority Detail`. Each row shows
+  one higher-priority deferred regular order, with its `week_idx`,
+  `remaining_lbs`, and weighted contribution.
+
+Every row in every table also supports a checkbox selector with
+"show only these" / "view linked rows in <target>" actions in a
+floating selection bar, so the operator can subset to any group
+they care about — e.g. all activities on one machine, all rejected
+candidates for one item, all skipped orders of a given week.
+
+#### Machine schedule page
+
+This is the only page in the dashboard that does *not* mirror one
+of the eight verbose-log TSVs. It's built directly from
+`report.schedules` (the same data source the workbook's `schedule`
+sheet uses), one row per `Activity` across all machines, grouped
+by `machine_id` and chronological within each machine. Each row's
+`activity_id` cell is rendered as a link into `Schedule Detail`
+filtered to that one activity's row.
+
+This page is the only entry point into Schedule Detail that
+guarantees coverage of the *committed* plan: not every committed
+move's logged-candidate row will survive the top-16 selection in
+later iterations, but the committed Activities themselves are
+always part of `report.schedules`. From the activity, `move_id` on
+the `Schedule Detail` row jumps "backward" to the committed row in
+`Iteration Log` (which *is* always logged, because the committed
+move is `score_rank == 0` — always inside the top-16).
+
+#### Implementation notes
+
+- **Self-contained.** All CSS and JavaScript are inlined; the file
+  works offline, can be emailed, and renders identically across
+  modern browsers.
+- **Single-source-of-truth payload.** The HTML embeds the eight
+  tables via the same `<dataframe>.to_csv(sep='\t')`
+  serialization the verbose TSVs use, so a cell rendered in the
+  dashboard matches the corresponding TSV cell byte-for-byte.
+- **No row cap.** The dashboard handles arbitrarily large logs
+  via client-side pagination (the embedded JS does the filtering
+  and rendering); the HTML stays a single file.
 
 ### Why a config file (with overrides)
 
@@ -1301,13 +1452,18 @@ under the CLI section for the file layout.
   baseline.{cost}_by_item`), one row per non-zero entry in
   `after_move.priority_by_item` for the priority detail table
   (absolute values, no subtraction), and one `ScheduleDetailRecord`
-  per `Activity` in `move.plan`. Cross-table ids (`cost_id`,
-  `sched_id`, `activity_id`, and the five `*_detail_id`s) are
-  auto-incremented integer counters owned by the loop; a
-  `*_detail_id` is `None` when the corresponding cost has no
-  contributing rows (no non-zero deltas for the demand-side costs;
-  no higher-priority skipped orders for priority). The committed
-  move is always the first record of the iteration's batch.
+  per `Activity` in `move.plan`. Each `ScheduleDetailRecord`
+  carries the underlying `Activity.id` as `activity_id` (matching
+  the workbook's `schedule` sheet) and the candidate's `cost_id`
+  stored inline as `move_id` — the "backward" FK to
+  `iteration_log` that lets the dashboard jump from a scheduled
+  activity to the move that produced it. Cross-table ids (`cost_id`,
+  `sched_id`, and the five `*_detail_id`s) are auto-incremented
+  integer counters owned by the loop; a `*_detail_id` is `None`
+  when the corresponding cost has no contributing rows (no
+  non-zero deltas for the demand-side costs; no higher-priority
+  skipped orders for priority). The committed move is always the
+  first record of the iteration's batch.
 - Extend `PlanReport` with eight `tuple[..., ...] | None` fields:
   `iteration_log`, `cost_detail`, `lateness_detail`,
   `drainage_detail`, `carrying_detail`, `excess_detail`,
@@ -1316,7 +1472,10 @@ under the CLI section for the file layout.
 - Add `--verbose` / `-v` to the CLI; when set, the CLI calls
   `plan(..., verbose=True)` and writes one TSV per `PlanReport`
   detail tuple into `<output_dir>/verbose_<YYYYMMDD>/` next to the
-  XLSX.
+  XLSX, plus a single self-contained
+  `<output_dir>/dashboard_<YYYYMMDD>.html` (see "Dashboard HTML"
+  under the CLI section) that embeds the same eight tables and a
+  "Machine schedule" view for foreign-key drill-down navigation.
 
 Delivers: an audit trail that turns "the greedy committed X" into
 "the greedy committed X because its lateness was Y vs the next

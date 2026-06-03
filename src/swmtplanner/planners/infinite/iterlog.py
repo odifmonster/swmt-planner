@@ -11,12 +11,24 @@ candidate emits one row in `iteration_log` and `cost_detail` plus
 zero-or-more rows in each detail table (zero when the corresponding
 cost has no contributing items).
 
-Cross-table joins are by integer id only — `cost_id`, `sched_id`,
-`activity_id`, and the five `*_detail_id`s. Each id is an
-auto-incremented counter owned by the loop, starting at 1 at the
-beginning of a verbose run. A `*_detail_id` on `CostDetailRecord` is
-`None` when its detail group has no rows (no non-zero deltas for the
-demand-side costs; no higher-priority skipped orders for priority).
+Cross-table joins use a mix of auto-incremented counters and
+denormalized identity columns. `cost_id`, `sched_id`, and the five
+`*_detail_id`s are auto-incremented counters owned by the loop,
+each starting at 1 at the beginning of a verbose run. A
+`*_detail_id` on `CostDetailRecord` is `None` when its detail
+group has no rows (no non-zero deltas for the demand-side costs;
+no higher-priority skipped orders for priority).
+
+Two cross-table keys are *not* fresh counters. `activity_id` on
+`ScheduleDetailRecord` is the underlying `Activity`'s stable id
+(e.g. `"JOB00001"`), shared with the workbook's `schedule` sheet
+so the dashboard can drill from a scheduled activity into its
+schedule_detail row. `move_id` appears on both
+`IterationLogRecord` and `ScheduleDetailRecord` and always equals
+the row's (or the row's candidate's) `cost_id` — the shared
+column name is the "backward" join that follows an activity back
+to the move that scheduled it, distinct from `cost_id`'s
+"forward" role as the FK into `cost_detail`.
 
 The four demand-side detail tables (`LatenessDetailRecord`,
 `DrainageDetailRecord`, `CarryingDetailRecord`, `ExcessDetailRecord`)
@@ -73,7 +85,14 @@ class IterationLogRecord:
     on `cost_id`); the candidate's activity plan lives in
     `ScheduleDetailRecord`s (joined on `sched_id`). Both ids are
     allocated by the loop from independent auto-incrementing
-    counters."""
+    counters.
+
+    `move_id` is always equal to `cost_id`; it exists as the join
+    target for `schedule_detail.move_id` so the dashboard can follow
+    a scheduled activity backward to the move that scheduled it
+    (same integer value as `cost_id`, distinct column name so the
+    operator's mental model of "forward into cost_detail" vs
+    "backward to the iteration_log row" stays clear)."""
     iteration_idx: int
     role: Literal['committed', 'rejected']
     score_rank: int
@@ -88,8 +107,9 @@ class IterationLogRecord:
     idle_hours: float
     # summary + foreign keys into the detail tables
     total_score: float
-    cost_id: int
-    sched_id: int
+    cost_id: int                   # forward FK into cost_detail
+    move_id: int                   # this row's canonical "move" identity; always equal to cost_id
+    sched_id: int                  # forward FK into schedule_detail (1:many on this id)
 
 
 def build_iteration_log_record(
@@ -113,10 +133,12 @@ def build_iteration_log_record(
 
     `total_score` is the candidate's score; `cost_id` and `sched_id`
     are the foreign keys into the cost and schedule detail tables —
-    both allocated by the caller via independent counters.
-    `machine_is_new` is read from `state.machines[move.machine_id]`,
-    and `idle_hours` converts `move.idle_for` to a float for the
-    TSV."""
+    both allocated by the caller via independent counters. `move_id`
+    on the produced record always equals `cost_id` — it's the
+    canonical "move" identity that `ScheduleDetailRecord.move_id`
+    joins on. `machine_is_new` is read from
+    `state.machines[move.machine_id]`, and `idle_hours` converts
+    `move.idle_for` to a float for the TSV."""
     machine = state.machines[move.machine_id]
     return IterationLogRecord(
         iteration_idx=iteration_idx,
@@ -135,6 +157,7 @@ def build_iteration_log_record(
         idle_hours=move.idle_for.total_seconds() / 3600.0,
         total_score=total_score,
         cost_id=cost_id,
+        move_id=cost_id,           # canonical "move" identity; always == cost_id
         sched_id=sched_id,
     )
 
@@ -248,13 +271,21 @@ class PriorityDetailRecord:
 class ScheduleDetailRecord:
     """One row of `schedule_detail.tsv`; one record per `Activity` in a
     candidate's `move.plan`. Rows from the same candidate share a
-    `sched_id`; `activity_id` is unique across the run.
+    `sched_id`.
+
+    `activity_id` is the underlying `Activity.id` string (e.g.
+    `"JOB00001"`) — *not* a fresh counter — so it joins directly to
+    the same column on the workbook's `schedule` sheet. `move_id`
+    is the candidate's `cost_id` stored inline, joining back to
+    `iteration_log.move_id`; see the module docstring for the
+    cost_id/move_id semantic distinction.
 
     `description` is a human-readable rendering of the activity and
     its key fields — formatting details are owned by the CLI's TSV
     writer."""
     sched_id: int                  # groups all rows from one candidate's move.plan
-    activity_id: int               # primary key within schedule_detail.tsv; unique across the run
+    activity_id: str               # the Activity's stable id (e.g. "JOB00001"); shared with the workbook's schedule sheet
+    move_id: int                   # FK back to iteration_log.move_id; always equal to the candidate's cost_id
     machine_id: str
     start: datetime
     end: datetime
@@ -321,11 +352,15 @@ def build_candidate_records(
     are 0. See `IterationLogRecord` for the full ordering semantics.
 
     Allocates fresh ids from `counters`: `cost_id` and `sched_id` per
-    candidate, `activity_id` per emitted `ScheduleDetailRecord`, and
-    a `*_detail_id` for each demand-cost delta group or priority
-    group that has at least one contributing row. Groups with no
-    contributing rows leave their `*_detail_id` on the
-    `CostDetailRecord` as `None`.
+    candidate, and a `*_detail_id` for each demand-cost delta group
+    or priority group that has at least one contributing row.
+    `ScheduleDetailRecord.activity_id` is the underlying `Activity.id`
+    string (not a fresh counter), and `move_id` on both the
+    `IterationLogRecord` and each `ScheduleDetailRecord` is the
+    candidate's `cost_id` (stored inline as the canonical "move"
+    identity, not allocated separately). Groups with no contributing
+    rows leave their `*_detail_id` on the `CostDetailRecord` as
+    `None`.
 
     Demand-side detail rows are `(after - baseline)` weighted per-item
     deltas, with zero-delta items dropped. Priority detail rows are
@@ -406,6 +441,7 @@ def build_candidate_records(
         accumulators.schedule_detail.append(ScheduleDetailRecord(
             sched_id=sched_id,
             activity_id=a.id,
+            move_id=cost_id,     # canonical "move" identity; always == cost_id
             machine_id=move.machine_id,
             start=a.start,
             end=a.end,

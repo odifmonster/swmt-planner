@@ -32,6 +32,7 @@ class IterationLogRecord:
     idle_hours: float
     total_score: float
     cost_id: int
+    move_id: int
     sched_id: int
 
 
@@ -109,7 +110,8 @@ class PriorityDetailRecord:
 @dataclass(frozen=True)
 class ScheduleDetailRecord:
     sched_id: int
-    activity_id: int
+    activity_id: str
+    move_id: int
     machine_id: str
     start: datetime
     end: datetime
