@@ -156,7 +156,6 @@ def iteration_log_dataframe(report: 'PlanReport') -> pd.DataFrame:
             'idle_hours': r.idle_hours,
             'total_score': r.total_score,
             'cost_id': r.cost_id,
-            'move_id': r.move_id,
             'sched_id': r.sched_id,
         }
         for r in report.iteration_log
@@ -165,7 +164,7 @@ def iteration_log_dataframe(report: 'PlanReport') -> pd.DataFrame:
         'iteration', 'role', 'score_rank', 'item_score_rank',
         'item_id', 'target_type', 'target_week',
         'machine_id', 'machine_is_new', 'start_at', 'idle_hours',
-        'total_score', 'cost_id', 'move_id', 'sched_id',
+        'total_score', 'cost_id', 'sched_id',
     ])
     # Mixed int/None across rows gets promoted to float by pandas; the
     # spec wants regular-row cells to read as plain integers and safety
@@ -352,7 +351,6 @@ def schedule_detail_dataframe(report: 'PlanReport') -> pd.DataFrame:
         {
             'sched_id': r.sched_id,
             'activity_id': r.activity_id,
-            'move_id': r.move_id,
             'machine_id': r.machine_id,
             'start': r.start,
             'end': r.end,
@@ -361,7 +359,7 @@ def schedule_detail_dataframe(report: 'PlanReport') -> pd.DataFrame:
         for r in report.schedule_detail
     ]
     return pd.DataFrame(rows, columns=[
-        'sched_id', 'activity_id', 'move_id', 'machine_id',
+        'sched_id', 'activity_id', 'machine_id',
         'start', 'end', 'description',
     ])
 
@@ -520,13 +518,6 @@ def write_dashboard_html(
             'verbose=True?'
         )
     table_builders = [
-        # Machine schedule isn't a verbose-log TSV — it's the committed
-        # plan, sourced from `report.schedules` via `schedule_dataframe`
-        # with the MultiIndex flattened. Including it gives the
-        # dashboard a Machine schedule page whose `activity_id` cells
-        # link into `schedule_detail` (a "Why is this activity on the
-        # schedule?" entry point); see DESIGN.md's Dashboard section.
-        ('machine_schedule', lambda r: schedule_dataframe(r).reset_index()),
         ('iteration_log', iteration_log_dataframe),
         ('cost_detail', cost_detail_dataframe),
         ('schedule_detail', schedule_detail_dataframe),
@@ -567,25 +558,9 @@ def _table_payload(df: pd.DataFrame) -> dict:
 
 
 _DASHBOARD_SCHEMA = {
-    'machine_schedule': {
-        'title': 'Machine schedule',
-        # No PK styling: every row is uniquely identified by its
-        # activity_id, but the activity_id column is more useful as
-        # an FK link into Schedule Detail (the dashboard's "click
-        # an activity to see its scheduled-row record" entry point).
-        'pk': None,
-        'fks': [
-            {'col': 'activity_id', 'table': 'schedule_detail', 'pk': 'activity_id'},
-        ],
-    },
     'iteration_log': {
         'title': 'Iteration Log',
-        # move_id is the canonical "move" identity for an iteration_log
-        # row (always equal to cost_id). It's also the join target for
-        # schedule_detail.move_id, so the dashboard can drill backward
-        # from a scheduled activity into the iteration_log row that
-        # scheduled it.
-        'pk': 'move_id',
+        'pk': None,
         'fks': [
             {'col': 'cost_id', 'table': 'cost_detail', 'pk': 'cost_id'},
             {'col': 'sched_id', 'table': 'schedule_detail', 'pk': 'sched_id'},
@@ -602,14 +577,7 @@ _DASHBOARD_SCHEMA = {
             {'col': 'priority_detail_id', 'table': 'priority_detail', 'pk': 'priority_detail_id'},
         ],
     },
-    'schedule_detail': {
-        'title': 'Schedule Detail',
-        'pk': 'sched_id',
-        'fks': [
-            # Backward FK: follow an activity to the move that scheduled it.
-            {'col': 'move_id', 'table': 'iteration_log', 'pk': 'move_id'},
-        ],
-    },
+    'schedule_detail': {'title': 'Schedule Detail', 'pk': 'sched_id', 'fks': []},
     'lateness_detail': {'title': 'Lateness Detail', 'pk': 'lateness_detail_id', 'fks': []},
     'drainage_detail': {'title': 'Drainage Detail', 'pk': 'drainage_detail_id', 'fks': []},
     'carrying_detail': {'title': 'Carrying Detail', 'pk': 'carrying_detail_id', 'fks': []},
@@ -665,10 +633,6 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
   .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: auto; max-height: calc(100vh - 200px); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   thead th { position: sticky; top: 0; background: #f1f4f8; border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; font-weight: 600; white-space: nowrap; z-index: 1; }
-  thead tr.col-filters th { top: 30px; background: #f8fafc; padding: 3px 6px; font-weight: normal; border-bottom: 1px solid var(--border); }
-  thead tr.col-filters th input.cf { width: 100%; min-width: 40px; padding: 2px 5px; border: 1px solid #d0d6dd; border-radius: 3px; font-size: 11px; font-family: inherit; box-sizing: border-box; }
-  thead tr.col-filters th input.cf:focus { outline: none; border-color: var(--link); }
-  thead tr.col-filters th.cb { background: #f8fafc; }
   thead th.pk { color: var(--pk); }
   thead th.fk { color: var(--link); }
   tbody td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
@@ -794,7 +758,7 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
   // ---------- Sidebar ----------
   const navEl = document.getElementById("nav");
   function renderNav(active) {
-    const order = ["machine_schedule", "iteration_log", "cost_detail", "schedule_detail", "lateness_detail", "drainage_detail", "carrying_detail", "excess_detail", "priority_detail"];
+    const order = ["iteration_log", "cost_detail", "schedule_detail", "lateness_detail", "drainage_detail", "carrying_detail", "excess_detail", "priority_detail"];
     const parts = ['<h2>Tables</h2>'];
     parts.push('<a href="#/home" class="' + (active && active.kind === "home" ? "active" : "") + '">Overview</a>');
     for (const t of order) {
@@ -853,13 +817,7 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
     const pk = SCHEMA[tableName].pk;
     const selSet = ensureSelection(tableName);
 
-    const state = {
-      page: 0,
-      query: "",
-      colFilters: {},     // {colName: filterText}
-      focusCol: null,     // which col-filter input (if any) had focus before re-render
-      focusPos: 0,        // caret position to restore
-    };
+    const state = { page: 0, query: "" };
     const main = document.getElementById("main");
 
     function renderBody() {
@@ -868,19 +826,6 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
       if (q) {
         visible = baseIndices.filter(i => allRows[i].some(cell => cell != null && String(cell).toLowerCase().includes(q)));
       }
-      // Per-column filters (AND-combined with each other and with q).
-      const colFilterEntries = Object.entries(state.colFilters)
-        .filter(([, txt]) => txt && txt.length > 0);
-      for (const [col, txt] of colFilterEntries) {
-        const ci = COLINDEX[tableName][col];
-        if (ci === undefined) continue;
-        const lower = txt.toLowerCase();
-        visible = visible.filter(i => {
-          const v = allRows[i][ci];
-          return v != null && String(v).toLowerCase().includes(lower);
-        });
-      }
-      const anyFilterActive = q || colFilterEntries.length > 0;
       const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
       if (state.page >= totalPages) state.page = totalPages - 1;
       if (state.page < 0) state.page = 0;
@@ -890,24 +835,14 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
       const allOnPageSelected = sliceIdx.length > 0 && sliceIdx.every(i => selSet.has(i));
       const someOnPageSelected = sliceIdx.some(i => selSet.has(i));
 
-      const head = '<thead>' +
-        '<tr>' +
+      const head = '<thead><tr>' +
         '<th class="cb"><input type="checkbox" id="hcb"' + (allOnPageSelected ? ' checked' : '') + (someOnPageSelected && !allOnPageSelected ? ' data-indeterminate="1"' : '') + ' title="Select all on this page"></th>' +
         cols.map(c => {
           let cls = "";
           if (c === pk) cls = "pk";
           else if (fkByCol[c]) cls = "fk";
           return '<th class="' + cls + '">' + escapeHtml(c) + "</th>";
-        }).join("") +
-        '</tr>' +
-        '<tr class="col-filters">' +
-        '<th class="cb"></th>' +
-        cols.map((c, i) => {
-          const v = state.colFilters[c] || "";
-          return '<th><input type="text" class="cf" data-col="' + escapeHtml(c) + '" data-ci="' + i + '" value="' + escapeHtml(v) + '" title="Filter ' + escapeHtml(c) + '… (substring, case-insensitive)"></th>';
-        }).join("") +
-        '</tr>' +
-        '</thead>';
+        }).join("") + "</tr></thead>";
 
       let body = "";
       if (sliceIdx.length === 0) {
@@ -932,7 +867,7 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
       const tableHtml = '<div class="table-wrap"><table>' + head + body + "</table></div>";
       const pagerInfo = visible.length === 0
         ? '0 rows'
-        : (start + 1) + '–' + Math.min(start + PAGE_SIZE, visible.length) + ' of ' + visible.length.toLocaleString() + (anyFilterActive ? ' (filtered from ' + baseIndices.length.toLocaleString() + ')' : '');
+        : (start + 1) + '–' + Math.min(start + PAGE_SIZE, visible.length) + ' of ' + visible.length.toLocaleString() + (q ? ' (filtered from ' + baseIndices.length.toLocaleString() + ')' : '');
 
       let filterNote = '';
       if (filterIndices) {
@@ -986,33 +921,6 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
           if (cb.checked) selSet.add(ri); else selSet.delete(ri);
           renderBody();
         });
-      }
-
-      // Per-column filter inputs.
-      for (const inp of main.querySelectorAll("input.cf")) {
-        inp.addEventListener("input", () => {
-          const col = inp.dataset.col;
-          if (inp.value) state.colFilters[col] = inp.value;
-          else delete state.colFilters[col];
-          state.page = 0;
-          state.focusCol = col;
-          state.focusPos = inp.selectionStart;
-          renderBody();
-        });
-      }
-      // Restore focus + caret position to the col-filter input the user
-      // was typing in, so the re-render doesn't drop the cursor.
-      if (state.focusCol != null) {
-        const wanted = state.focusCol;
-        state.focusCol = null;
-        for (const inp of main.querySelectorAll("input.cf")) {
-          if (inp.dataset.col === wanted) {
-            inp.focus();
-            const pos = Math.min(state.focusPos != null ? state.focusPos : inp.value.length, inp.value.length);
-            inp.setSelectionRange(pos, pos);
-            break;
-          }
-        }
       }
     }
     renderBody();
@@ -1079,7 +987,7 @@ _DASHBOARD_TEMPLATE = r"""<!doctype html>
     const main = document.getElementById("main");
     const parts = [];
     parts.push('<div class="view-header"><h2>Overview</h2><div class="meta">Click any foreign-key value to drill into the linked records.</div></div>');
-    const order = ["machine_schedule", "iteration_log", "cost_detail", "schedule_detail", "lateness_detail", "drainage_detail", "carrying_detail", "excess_detail", "priority_detail"];
+    const order = ["iteration_log", "cost_detail", "schedule_detail", "lateness_detail", "drainage_detail", "carrying_detail", "excess_detail", "priority_detail"];
     for (const t of order) {
       const s = SCHEMA[t];
       const fkList = s.fks.length
