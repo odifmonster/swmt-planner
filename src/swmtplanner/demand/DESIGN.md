@@ -32,17 +32,19 @@ differ enough that combining them would obscure rather than clarify.
 - `weekly_demand` — 4 `WeeklyDemand` records (one per week, fixed horizon).
 
 Jobs are added via `register_jobs(jobs)`. The list form exists because the
-schedule layer's `plan_production` can emit multiple `Job`s from one
-decision — beam exhaustion mid-production splits a single logical run into
-back-to-back `Job`s separated by a `BeamLoad`, and `'next_runout'` mode
-prepends `Job`s of the current item ahead of the new one. The scheduler
-groups emitted `Job`s by `job.item` and registers each batch with its
-`RlsItem`.
+schedule layer's `plan_production` can emit two `Job`s from one decision:
+in `'next_runout'` mode the call yields a run-up `Job` of the current item
+(its whole rolls before changeover) ahead of the new item's `Job`. A single
+`Job` may itself span multiple `BeamLoad`s — rolls completed across the
+beam-swap sequence all land on the same `Job` — so a beam exhaustion no
+longer splits a run into separate jobs. The scheduler groups emitted `Job`s
+by `job.item` and registers each batch with its `RlsItem`.
 
 Jobs are append-only — never removed — but may be added in non-chronological
-order. The internal job list is kept sorted by `job.end`, with new jobs
-inserted in the correct position (e.g. via `bisect.insort`). `recompute` can
-iterate the list directly without sorting.
+order. The internal job list is kept sorted by each job's final
+`roll.completion_time`, with new jobs inserted in the correct position (e.g.
+via `bisect.insort`). `recompute` flattens the jobs' `rolls` into a single
+stream and walks it in `completion_time` order.
 
 ## Core objects
 
@@ -71,7 +73,7 @@ RawOrder(Order)
                                  # i.e., when the order became whole,
                                  # or (when recompute ends with
                                  # `remaining_lbs > 0`) the time of
-                                 # the last job that made progress on
+                                 # the last roll that made progress on
                                  # it. `None` when nothing was
                                  # allocated to the order at all.
   # Allocation logic still lives on RawView; `recompute` writes all
@@ -94,7 +96,7 @@ FulfillmentView (abstract)
 RlsItem (HasID)
   start_date, greige, on_hand_lbs, lead_time
   weekly_demand: list[WeeklyDemand]  # length 4
-  jobs: list[Job]                    # kept sorted by job.end on insert
+  jobs: list[Job]                    # kept sorted by final roll.completion_time on insert
   safety_view: SafetyAwareView
   raw_view: RawView
   register_jobs(jobs)
@@ -105,8 +107,8 @@ CostComponents                       # plain named record returned by cost_if
   lateness, drainage, carrying, excess
 ```
 
-`register_jobs` inserts each job into `self.jobs` (in `job.end`-sorted
-order) then re-runs both views' `recompute` once after the batch.
+`register_jobs` inserts each job into `self.jobs` (sorted by each job's
+final `roll.completion_time`) then re-runs both views' `recompute` once after the batch.
 `cost_if(jobs)` runs both views with `self.jobs + jobs` against fresh order
 arrays without binding the results — gives a price-out without state change.
 This is the supported way to "test" a placement; we do not expose
@@ -120,7 +122,9 @@ for `cost_if([])`.
 
 Build a FIFO stream of lb chunks by availability time:
 ```
-[(start_date, on_hand_lbs)] + [(job.end, job.lbs) for job in jobs sorted by end]
+[(start_date, on_hand_lbs)] + [(roll.completion_time, roll.lbs)
+                               for job in jobs for roll in job.rolls,
+                               sorted by completion_time]
 ```
 
 Walk weeks 0..3 in order. For each week, pull from the stream until the week's
@@ -141,7 +145,7 @@ per-order late-reporting attributes:
   the chunks that contributed to `allocated_lbs`. When the order is
   fully filled, this is the moment it became whole; when recompute
   ends with `remaining_lbs > 0`, it's the time the last contributing
-  job made progress on it (so the scheduler can still report a
+  roll made progress on it (so the scheduler can still report a
   meaningful "filled by" date even for orders with unmet demand).
   Stays `None` for orders with `allocated_lbs == 0`.
 
@@ -150,11 +154,11 @@ view ignores excess and carrying — it only cares about lateness.
 
 ## Allocation — Safety-aware view
 
-Process jobs in `job.end` ascending order. Treat `on_hand` as a pseudo-job at
+Process rolls in `completion_time` ascending order. Treat `on_hand` as a pseudo-roll at
 `t = start_date` and feed it through the same rule.
 
-For each job, let `O` = the earliest order whose `due_date >= job.end`
-(the nearest on-time order). The job's lbs are distributed by this priority:
+For each roll, let `O` = the earliest order whose `due_date >= roll.completion_time`
+(the nearest on-time order). The roll's lbs are distributed by this priority:
 
 1. **Cumulative unfilled demand across orders `0..O`**, filling earliest week
    first. If earlier orders are unfilled, the job pays them down *late* before
@@ -164,17 +168,17 @@ For each job, let `O` = the earliest order whose `due_date >= job.end`
 3. **Later on-time orders** — orders after `O`, in week order.
 4. **Excess** — any remainder.
 
-If a job is late to all 4 orders (no `O` exists), bucket 1 spans all four
+If a roll is late to all 4 orders (no `O` exists), bucket 1 spans all four
 orders (earliest-first), and bucket 3 is empty.
 
 ## Safety pool dynamics
 
 `safety_pool(t)` is a step function:
 
-- **Increases** at `t = job.end` when bucket 2 receives lbs (jobs filling the
-  pool toward target).
-- **Increases** at `t = job.end` when bucket 1 receives lbs that fill a
-  *late* order — those lbs effectively refund the safety drained earlier to
+- **Increases** at `t = roll.completion_time` when bucket 2 receives lbs (rolls
+  filling the pool toward target).
+- **Increases** at `t = roll.completion_time` when bucket 1 receives lbs that fill
+  a *late* order — those lbs effectively refund the safety drained earlier to
   cover that order.
 - **Decreases** at `t = order.due_date` by the order's on-time gap
   (`week.qty_lbs - on_time_job_lbs_assigned_to_this_order`). This is reality
@@ -219,8 +223,8 @@ conceptually.
 **`carrying`** — linear lb-day quantity. Per lb-day past `lead_time` for lbs
 sitting in bucket 3 before their target order's due date.
 
-For `X` lbs assigned to a later on-time order with due date `D` from a job
-ending at `T`, the contribution is:
+For `X` lbs assigned to a later on-time order with due date `D` from a roll
+completing at `T`, the contribution is:
 ```
 X * max(0, (D - T) - lead_time)
 ```
@@ -251,7 +255,7 @@ even though reality would limp through on safety."
 
 Derived from the two views and the job list:
 
-- `scheduled_lbs` — sum of `job.lbs` for `self.jobs`.
+- `scheduled_lbs` — sum of `job.total_lbs` for `self.jobs`.
 - `total_demand_lbs` — sum of `week.qty_lbs` over the 4 weeks.
 - `excess_lbs` — `max(0, scheduled_lbs - total_demand_lbs)`. Useful as a
   fast scalar; the safety view's `excess` cost component is the authoritative

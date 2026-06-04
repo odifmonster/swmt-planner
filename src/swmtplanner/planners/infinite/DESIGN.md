@@ -198,7 +198,7 @@ post-loop final score in `PlanReport.total_score`).
 `score_after_move` is the loop's hot path. It computes what `score`
 would return if `move` were committed, without actually mutating
 anything — built on `RlsItem.cost_if(jobs)` for the demand-side
-contributions, on inspecting `move.plan` for the schedule-side
+contributions, on inspecting `move.plan.activities` for the schedule-side
 changeover contributions, and on the `ctx` lookups for the cross-
 cutting contributions.
 
@@ -249,10 +249,10 @@ Move
   machine_id: str
   item: Greige
   lbs: float
-  start_at: Literal['next_job_end', 'next_runout']
+  start_at: Literal['schedule_tail', 'next_runout']
   idle_for: timedelta
   week_idx: int | None    # which order this move addresses; None for safety (Phase 2)
-  plan: list[Activity]    # cached output of machine.plan_production
+  plan: ProductionPlan    # cached output of machine.plan_production
 
 plan(state, costing) -> PlanReport
 ```
@@ -298,7 +298,7 @@ PlanReport
   # which orders ship late and when they finish filling
   late_orders: tuple[RawOrder, ...]
   # per-iteration audit trail (populated only when plan(..., verbose=True);
-  # all eight are None when verbose=False)
+  # all ten are None when verbose=False)
   iteration_log:    tuple[IterationLogRecord, ...]   | None
   cost_detail:      tuple[CostDetailRecord, ...]     | None
   lateness_detail:  tuple[LatenessDetailRecord, ...] | None
@@ -307,6 +307,8 @@ PlanReport
   excess_detail:    tuple[ExcessDetailRecord, ...]   | None
   priority_detail:  tuple[PriorityDetailRecord, ...] | None
   schedule_detail:  tuple[ScheduleDetailRecord, ...] | None
+  job_detail:       tuple[JobDetailRecord, ...]      | None
+  roll_detail:      tuple[RollDetailRecord, ...]     | None
 
 IterationLogRecord                              # one row of iteration_log.tsv; one record per (iteration, scored candidate)
   iteration_idx: int                            # 0-indexed main-loop iteration
@@ -319,15 +321,14 @@ IterationLogRecord                              # one row of iteration_log.tsv; 
   target_week: int | None                       # week_idx for regular orders; None for safety
   machine_id: str
   machine_is_new: bool                          # convenience flag; reads from state.machines[machine_id].is_new
-  start_at: Literal['next_job_end', 'next_runout']
+  start_at: Literal['schedule_tail', 'next_runout']
   idle_hours: float                             # move.idle_for converted to hours
   # summary + foreign keys into the detail tables
-  total_score: float                            # equals cost_detail[cost_id].total
-  cost_id: int                                  # foreign key into PlanReport.cost_detail (one row per scored candidate)
-  sched_id: int                                 # foreign key into PlanReport.schedule_detail (one row per Activity in move.plan)
+  total_score: float                            # equals cost_detail[move_id].total
+  move_id: int                                  # this candidate's id; foreign key into cost_detail, schedule_detail, and job_detail (one row / group per scored candidate)
 
 CostDetailRecord                                # one row of cost_detail.tsv; one record per scored candidate
-  cost_id: int                                  # primary key; auto-incremented across the verbose run
+  move_id: int                                  # primary key; matches iteration_log.move_id
   # weighted scalars (same numeric values as the CostBreakdown totals)
   lateness, drainage, carrying, excess: float
   tape_out_single, tape_out_both, family_change, idle_time: float
@@ -367,13 +368,27 @@ PriorityDetailRecord                            # one row of priority_detail.tsv
   remaining_lbs: float                          # unfulfilled lbs of the deferred order at the time of evaluation (O.remaining_lbs)
   priority: float                               # absolute weighted contribution: w.priority × remaining_lbs × 2^days_late(O, move); not a delta — baseline has no priority cost
 
-ScheduleDetailRecord                            # one row of schedule_detail.tsv; one record per Activity in a candidate's move.plan
-  sched_id: int                                 # groups all rows from one candidate's plan
+ScheduleDetailRecord                            # one row of schedule_detail.tsv; one record per Activity in a candidate's move.plan.activities
+  move_id: int                                  # groups all rows from one candidate's plan.activities
   activity_id: int                              # primary key within schedule_detail; auto-incremented across the verbose run
   machine_id: str
   start: datetime
   end: datetime
-  description: str                              # human-readable rendering of the activity and its key fields (e.g. "Job item=ABC lbs=1400", "TapeOut both", "StyleChange ABC→XYZ family_change=True")
+  description: str                              # human-readable rendering of the activity and its key fields (e.g. "Knit item=ABC lbs=1400", "TapeOut both", "StyleChange ABC→XYZ family_change=True")
+
+JobDetailRecord                                 # one row of job_detail.tsv; one record per Job in a candidate's move.plan.jobs
+  move_id: int                                  # foreign key into iteration_log; groups all jobs from one candidate (a move yields 1 or 2 jobs)
+  job_id: str                                   # the Job's own id (Job is HasID); groups this job's roll_detail rows
+  item_id: str                                  # job.item.id
+  total_rolls: int                              # job.total_rolls
+  total_lbs: float                              # job.total_lbs
+
+RollDetailRecord                                # one row of roll_detail.tsv; one record per Roll in a candidate's job
+  move_id: int                                  # foreign key into iteration_log
+  job_id: str                                   # foreign key into job_detail (the owning Job)
+  roll_idx: int                                 # 0-based index of the roll within job.rolls
+  lbs: float                                    # roll.lbs
+  completion_time: datetime                     # roll.completion_time
 ```
 
 The full schedules also remain on the `Machine` instances inside
@@ -416,9 +431,9 @@ are ordered by `item_id`. When two candidates score equal — used to
 compute both `score_rank` (across the pool) and `item_score_rank`
 (within an item) — the order is by `item_id`, then `machine_id`,
 then decision point with `next_runout` ordered before
-`next_job_end`.
+`schedule_tail`.
 
-The seven companion detail tuples on `PlanReport` are populated in
+The nine companion detail tuples on `PlanReport` are populated in
 lockstep with `iteration_log`. At the start of each iteration the
 loop captures a baseline `CostBreakdown` via
 `Costing.cost_breakdown(state)`; for each scored candidate it then
@@ -440,12 +455,18 @@ using the baseline, emits in addition to the candidate's
   carries the deferred order's `week_idx` and `remaining_lbs`
   alongside the *absolute* weighted contribution (no baseline to
   subtract from);
-- one `ScheduleDetailRecord` per `Activity` in `move.plan`,
-  grouped by `sched_id`.
+- one `ScheduleDetailRecord` per `Activity` in `move.plan.activities`,
+  grouped by `move_id`;
+- one `JobDetailRecord` per `Job` in `move.plan.jobs` (1 or 2 per
+  candidate), grouped by `move_id`;
+- one `RollDetailRecord` per `Roll` in each job's `rolls`, grouped
+  by `job_id` (and carrying `move_id`).
 
-In practice the move only touches `move.item.id`'s jobs and
-on_hand, so the four demand-side delta dicts have at most one entry
-each — that item, and only when the cost actually changes. The
+In practice the move touches the jobs and on_hand of at most two items:
+`move.item` and `machine.current_status.current_item`, so the four
+demand-side delta dicts have at most two entries each — that item,
+and the previous running item if `move.start_at == 'next_runout'`, and
+only if the demand-side costs on those items actually change. The
 priority dict can have many entries, one per item with a deferred
 higher-priority regular order — each item appears at most once,
 since the candidate enumerator picks at most one regular order per
@@ -455,17 +476,19 @@ passed over and how much unfulfilled demand each carries, which is
 exactly the diagnostic an operator needs when an urgent order
 doesn't get committed.
 
-Cross-table links are auto-incremented integer ids — `cost_id`,
-`sched_id`, `activity_id`, and the five `*_detail_id` counters —
-each owned by the loop and starting at 1 at the beginning of the
-verbose run. A `*_detail_id` is omitted (`None` on the
+Cross-table links are ids owned by the loop. `move_id` (the scored
+candidate), `activity_id`, and the five `*_detail_id` counters are
+auto-incremented integers, each starting at 1 at the beginning of
+the verbose run; `job_id` is the `Job`'s own id (`Job.id`), reused
+as the `job_detail`→`roll_detail` link rather than a loop counter.
+A `*_detail_id` is omitted (`None` on the
 `CostDetailRecord`, blank cell in the TSV) when the corresponding
 cost would have no contributing rows (no non-zero deltas for the
 four demand-side costs; no higher-priority skipped orders for
 priority), and the matching detail table emits no rows for that
 candidate.
 
-With `verbose=False` (the default), all eight tuples are `None`,
+With `verbose=False` (the default), all ten tuples are `None`,
 `Costing.cost_breakdown` is never called, and the loop skips the
 breakdown path entirely — the verbose mode is strictly opt-in.
 
@@ -481,7 +504,7 @@ becomes one `Move` with derived `lbs`, `start_at`, and `idle_for`.
 Every machine has up to two natural points in time at which new
 production could begin:
 
-- **`next_job_end`** — the schedule tail (`current_status.as_of`).
+- **`schedule_tail`** — the schedule tail (`current_status.as_of`).
   Starts production sooner but pays the full changeover preamble
   (`TapeOut` + `BeamLoad`s + `StyleChange` as needed).
 - **`next_runout`** — the forward-extrapolated time at which the
@@ -522,7 +545,7 @@ candidate is in the window iff its `decision_point <= window_end`.
 Decisions beyond the window are skipped for this iteration.
 
 When committing a move whose `Job`(s) span a long time, the machine's
-new `next_job_end` is typically pushed past `window_end`, so that
+new `schedule_tail` is typically pushed past `window_end`, so that
 machine drops out of the candidate pool until the window catches up.
 This naturally distributes high-volume items across multiple machines
 without any explicit "split this order across machines" enumerator:
@@ -783,15 +806,15 @@ level_loading_cost(move) = machine.workcal.get_work_hours_between(
 ) × w.level_loading
 ```
 
-where `dp_time(move)` is `state.machines[move.machine_id].next_job_end`
-when `move.start_at == 'next_job_end'` and `.next_runout` otherwise —
+where `dp_time(move)` is `state.machines[move.machine_id].schedule_tail`
+when `move.start_at == 'schedule_tail'` and `.next_runout` otherwise —
 the time the move's decision point falls at, *before* any carrying-
 avoidance idle. The delta is measured in **work hours** so a weekend
 gap between two DPs doesn't manufacture a level-loading difference
 where there's no production difference to speak of.
 
 The earliest DP in the candidate pool naturally pays zero. As soon as
-a commit pushes that machine's `next_job_end` past the others, the
+a commit pushes that machine's `schedule_tail` past the others, the
 remaining machines become the earliest and inherit the zero-cost slot
 — so the level-loading penalty produces "spread work across machines"
 behavior without any explicit "distribute" enumerator.
@@ -970,8 +993,9 @@ resolved `start_date`. Four sheets:
 
 - `schedule` — multi-indexed by `(machine, activity_id)`, every
   activity across all machines.
-- `production` — multi-indexed by `(item, activity_id)`, every
-  committed `Job`.
+- `production` — multi-indexed by `(item, job_id)`, one row per
+  committed `Job`: its `total_rolls`, `total_lbs`, and `completion`
+  (when the job finishes — its last roll's `completion_time`).
 - `unmet_demand` — flat `(item, week_idx, unmet_lbs)`, one row per
   `safety_view.orders` entry with `remaining_lbs > 0`.
 - `late_orders` — flat `(item, week_idx, late_lbs, late_fill_date)`,
@@ -988,24 +1012,26 @@ See `report.py` for the per-sheet layouts.
 ### Verbose iteration log
 
 The `--verbose` flag turns on a per-iteration audit log written as
-eight TSV files in a `<output_dir>/verbose_<YYYYMMDD>/`
+ten TSV files in a `<output_dir>/verbose_<YYYYMMDD>/`
 subdirectory next to the workbook. The files form a small joinable
 schema: the headline `iteration_log.tsv` holds one row per scored
-candidate, and each row carries integer foreign keys into companion
-tables that store the full weighted cost breakdown, per-item
-demand-cost deltas, per-item priority-cost attribution, and the
-candidate's full activity plan.
+candidate keyed by `move_id`, which joins to companion tables that
+store the full weighted cost breakdown, per-item demand-cost deltas,
+per-item priority-cost attribution, the candidate's full activity
+plan, and the production it generates (jobs and their rolls).
 
 | File                   | Grain                                                  | Joined to iteration_log via            |
 |---|---|---|
-| `iteration_log.tsv`    | One row per scored candidate                           | (primary)                              |
-| `cost_detail.tsv`      | One row per scored candidate                           | `cost_id`                              |
+| `iteration_log.tsv`    | One row per scored candidate                           | (primary key: `move_id`)               |
+| `cost_detail.tsv`      | One row per scored candidate                           | `move_id`                              |
 | `lateness_detail.tsv`  | One row per (candidate, item) with a non-zero lateness delta vs the iteration's baseline | `cost_detail.lateness_detail_id` |
 | `drainage_detail.tsv`  | One row per (candidate, item) with a non-zero drainage delta vs the iteration's baseline | `cost_detail.drainage_detail_id` |
 | `carrying_detail.tsv`  | One row per (candidate, item) with a non-zero carrying delta vs the iteration's baseline | `cost_detail.carrying_detail_id` |
 | `excess_detail.tsv`    | One row per (candidate, item) with a non-zero excess delta vs the iteration's baseline   | `cost_detail.excess_detail_id`   |
 | `priority_detail.tsv`  | One row per (candidate, item) with at least one higher-priority regular order being skipped by this move | `cost_detail.priority_detail_id` |
-| `schedule_detail.tsv`  | One row per Activity in `move.plan`                    | `sched_id`                             |
+| `schedule_detail.tsv`  | One row per Activity in `move.plan.activities`         | `move_id`                              |
+| `job_detail.tsv`       | One row per `Job` in `move.plan.jobs`                  | `move_id`                              |
+| `roll_detail.tsv`      | One row per `Roll` in a job's `rolls`                  | `job_detail.job_id` (and `move_id`)    |
 
 For each main-loop iteration the CLI records up to 16 candidates —
 grouped by item, with the top 4 items (ranked by their
@@ -1015,14 +1041,16 @@ row of the first item. Operators understand *why* the planner chose
 a particular move by reading `iteration_log.tsv` (committed row
 next to its same-item siblings and runner-up items), expanding any
 row into its weighted cost breakdown by joining `cost_detail.tsv`
-on `cost_id`, drilling into per-item *deltas* for any of the four demand-side
+on `move_id`, drilling into per-item *deltas* for any of the four demand-side
 costs (how each affected item's contribution would change from the
 iteration's baseline) by joining the appropriate `*_detail.tsv` on
 the matching `*_detail_id`, drilling into the *absolute* per-item
 attribution of priority cost (which urgent orders this move would
 defer) by joining `priority_detail.tsv` on `priority_detail_id`,
 and inspecting the candidate's full activity plan by joining
-`schedule_detail.tsv` on `sched_id`.
+`schedule_detail.tsv` on `move_id`, and its production output by
+joining `job_detail.tsv` on `move_id` and `roll_detail.tsv` on
+`job_id`.
 
 #### `iteration_log.tsv` columns (in order)
 
@@ -1037,17 +1065,16 @@ and inspecting the candidate's full activity plan by joining
 | `target_week`     | int \| blank | Week index (0–3) for a regular order; blank cell for a safety order.                           |
 | `machine_id`      | str          | The move's machine.                                                                            |
 | `machine_is_new`  | bool         | `state.machines[machine_id].is_new` — useful for explaining the `old_machine` cost.            |
-| `start_at`        | str          | `next_job_end` or `next_runout`.                                                               |
+| `start_at`        | str          | `schedule_tail` or `next_runout`.                                                               |
 | `idle_hours`      | float        | `move.idle_for` expressed in hours (carrying-avoidance idle).                                  |
-| `total_score`     | float        | The candidate's `score_after_move(state, move, ctx)`; equals `cost_detail[cost_id].total`.     |
-| `cost_id`         | int          | Foreign key into `cost_detail.tsv`.                                                            |
-| `sched_id`        | int          | Foreign key into `schedule_detail.tsv`.                                                        |
+| `total_score`     | float        | The candidate's `score_after_move(state, move, ctx)`; equals `cost_detail[move_id].total`.     |
+| `move_id`         | int          | This candidate's id; foreign key into `cost_detail.tsv`, `schedule_detail.tsv`, and `job_detail.tsv`. |
 
 #### `cost_detail.tsv` columns (in order)
 
 | Column                | Type         | Notes                                                                                          |
 |---|---|---|
-| `cost_id`             | int          | Primary key; matches `iteration_log.cost_id`.                                                  |
+| `move_id`             | int          | Primary key; matches `iteration_log.move_id`.                                                  |
 | `lateness`            | float        | Weighted total: `w.lateness × sum_i raw_view_i.lateness` for the post-commit state.            |
 | `drainage`            | float        | Weighted total from per-item `safety_view.drainage` (summed).                                  |
 | `carrying`            | float        | Weighted total from per-item `safety_view.carrying` (summed).                                  |
@@ -1120,12 +1147,32 @@ produces no row.
 
 | Column         | Type     | Notes                                                                                          |
 |---|---|---|
-| `sched_id`     | int      | Groups all rows from one candidate's `move.plan`.                                              |
+| `move_id`      | int      | Groups all rows from one candidate's `move.plan.activities`.                                   |
 | `activity_id`  | int      | Primary key within `schedule_detail.tsv`; unique across the run.                               |
 | `machine_id`   | str      | The candidate's machine.                                                                       |
 | `start`        | datetime | Activity start.                                                                                |
 | `end`          | datetime | Activity end.                                                                                  |
-| `description`  | str      | Human-readable rendering of the activity and its key fields (e.g. `"Job item=ABC lbs=1400"`, `"TapeOut both"`, `"StyleChange ABC→XYZ family_change=True"`). |
+| `description`  | str      | Human-readable rendering of the activity and its key fields (e.g. `"Knit item=ABC lbs=1400"`, `"TapeOut both"`, `"StyleChange ABC→XYZ family_change=True"`). |
+
+#### `job_detail.tsv` columns (in order)
+
+| Column         | Type     | Notes                                                                                          |
+|---|---|---|
+| `move_id`      | int      | Foreign key into `iteration_log.tsv`; groups all jobs from one candidate (a move yields 1 or 2 jobs). |
+| `job_id`       | str      | The `Job`'s own id (`Job.id`); groups this job's `roll_detail` rows.                            |
+| `item_id`      | str      | `job.item.id`.                                                                                 |
+| `total_rolls`  | int      | `job.total_rolls`.                                                                             |
+| `total_lbs`    | float    | `job.total_lbs`.                                                                               |
+
+#### `roll_detail.tsv` columns (in order)
+
+| Column            | Type     | Notes                                                                                          |
+|---|---|---|
+| `move_id`         | int      | Foreign key into `iteration_log.tsv`.                                                          |
+| `job_id`          | str      | Foreign key into `job_detail.tsv` (the owning `Job`).                                          |
+| `roll_idx`        | int      | 0-based index of the roll within `job.rolls`.                                                  |
+| `lbs`             | float    | `roll.lbs`.                                                                                    |
+| `completion_time` | datetime | `roll.completion_time` — when the roll is ready to ship.                                        |
 
 #### Row ordering and id semantics
 
@@ -1136,16 +1183,18 @@ ranked by the item's lowest-scoring candidate); within each item
 group `item_score_rank` orders the rows (0 first). The committed
 row is therefore the very first row of each iteration block.
 
-The companion tables are emitted in `cost_id` / `sched_id` order —
+The companion tables are emitted in `move_id` order —
 i.e., parallel to the candidate sequence in `iteration_log.tsv`, so
 each TSV reads top-to-bottom in the same chronological direction.
-The auto-incremented counters (`cost_id`, `sched_id`, `activity_id`,
-and the five `*_detail_id`s) restart at 1 at the beginning of each
-verbose run and are independent of one another — `cost_id` and
-`sched_id` happen to be 1:1 with candidates today, but the
-identifiers are kept separate so future shape changes (e.g.,
-sharing schedule details across candidates) don't require a schema
-migration. Cross-file joins are by integer id only.
+The auto-incremented counters (`move_id`, `activity_id`, and the
+five `*_detail_id`s) restart at 1 at the beginning of each verbose
+run and are independent of one another. `move_id` is 1:1 with scored
+candidates and is the single handle the cost, schedule, and job
+detail tables all join on — this refactor collapsed the former
+separate `cost_id` and `sched_id` (always 1:1 with each other) into
+it. `job_id` is the `Job`'s own id rather than a loop counter, so
+`roll_detail` joins to `job_detail` on it directly. Cross-file joins
+are by id only.
 
 #### Internal flow
 
@@ -1157,11 +1206,13 @@ the per-item deltas for the four demand-cost detail tables by
 subtracting `baseline.{cost}_by_item` from the candidate's
 `{cost}_by_item` (zero-delta items dropped). Priority detail rows
 come directly from `after_move.priority_by_item` (absolute, no
-subtraction). The resulting records flow through `plan(...,
-verbose=True)` into the eight detail tuples on `PlanReport`; the
+subtraction); the `job_detail` and `roll_detail` rows come straight
+from `move.plan.jobs` and each job's `rolls`, needing no baseline.
+The resulting records flow through `plan(...,
+verbose=True)` into the ten detail tuples on `PlanReport`; the
 CLI converts each tuple into the corresponding TSV. With
 `--verbose` off, the loop never calls `cost_breakdown` or
-`cost_breakdown_after_move`, and all eight `PlanReport` detail
+`cost_breakdown_after_move`, and all ten `PlanReport` detail
 tuples stay `None` — the verbose path adds work only when
 explicitly requested.
 
@@ -1288,7 +1339,7 @@ under the CLI section for the file layout.
   `priority_by_item` dict (value type `PriorityContribution`)
   carries each deferred order's `week_idx`, `remaining_lbs`, and
   weighted contribution.
-- Extend `plan` with a `verbose: bool = False` keyword and eight
+- Extend `plan` with a `verbose: bool = False` keyword and ten
   internal record accumulators (one per output table). When
   `verbose=True`, the loop calls `Costing.cost_breakdown(state)`
   once at the start of each iteration to capture a baseline
@@ -1300,19 +1351,22 @@ under the CLI section for the file layout.
   tables (delta computed as `after_move.{cost}_by_item -
   baseline.{cost}_by_item`), one row per non-zero entry in
   `after_move.priority_by_item` for the priority detail table
-  (absolute values, no subtraction), and one `ScheduleDetailRecord`
-  per `Activity` in `move.plan`. Cross-table ids (`cost_id`,
-  `sched_id`, `activity_id`, and the five `*_detail_id`s) are
-  auto-incremented integer counters owned by the loop; a
+  (absolute values, no subtraction), one `ScheduleDetailRecord`
+  per `Activity` in `move.plan.activities`, one `JobDetailRecord`
+  per `Job` in `move.plan.jobs`, and one `RollDetailRecord` per
+  `Roll` in each job's `rolls`. Cross-table ids — `move_id`,
+  `activity_id`, and the five `*_detail_id`s — are auto-incremented
+  integer counters owned by the loop (`job_id` is the `Job`'s own
+  id); a
   `*_detail_id` is `None` when the corresponding cost has no
   contributing rows (no non-zero deltas for the demand-side costs;
   no higher-priority skipped orders for priority). The committed
   move is always the first record of the iteration's batch.
-- Extend `PlanReport` with eight `tuple[..., ...] | None` fields:
+- Extend `PlanReport` with ten `tuple[..., ...] | None` fields:
   `iteration_log`, `cost_detail`, `lateness_detail`,
   `drainage_detail`, `carrying_detail`, `excess_detail`,
-  `priority_detail`, `schedule_detail`. All eight are `None` when
-  `verbose=False` and populated otherwise.
+  `priority_detail`, `schedule_detail`, `job_detail`, `roll_detail`.
+  All ten are `None` when `verbose=False` and populated otherwise.
 - Add `--verbose` / `-v` to the CLI; when set, the CLI calls
   `plan(..., verbose=True)` and writes one TSV per `PlanReport`
   detail tuple into `<output_dir>/verbose_<YYYYMMDD>/` next to the
