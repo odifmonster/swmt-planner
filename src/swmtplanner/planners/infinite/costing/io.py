@@ -17,8 +17,9 @@ def weights_from_dict(
 
     `cfg` must contain every `CostWeights` field as a numeric key —
     Phase 1: `lateness`, `drainage`, `carrying`, `excess`,
-    `tape_out_single`, `tape_out_both`, `family_change`, `idle_time`;
-    Phase 2 cross-cutting: `priority`, `level_loading`, `old_machine`.
+    `tape_out_single`, `tape_out_both`, `family_change`, `idle_time`,
+    `waste_lbs`; Phase 2 cross-cutting: `priority`, `level_loading`,
+    `old_machine`.
     All fields are required (callers set 0 to opt out of a
     contribution). Extra keys raise `TypeError` so a typo isn't
     silently dropped.

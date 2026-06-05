@@ -31,6 +31,7 @@ class Knit(Activity):
 @dataclass(frozen=True)
 class Waste(Activity):
     item: Greige
+    bar: Literal['top', 'btm']
     lbs: float
 
 

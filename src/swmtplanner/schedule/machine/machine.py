@@ -34,6 +34,18 @@ def fresh_beam_lbs(beam: BeamSet) -> float:
             else _HIGH_DENIER_FRESH_LBS)
 
 
+# Runout model (Step 2) — tunable, to be calibrated against real floor
+# behavior. A beam is never knit to zero: `_BEAM_FLOOR_LBS` is the residue
+# that can't be drawn off, so usable yarn on a bar is
+# `bar_lbs - _BEAM_FLOOR_LBS`. The operator also won't knit through a
+# near-empty beam: when a bar's usable falls below `_MAX_BEAM_WASTE_LBS`,
+# the bar is swapped (its residue discarded as `Waste`) before the next
+# roll rather than knit down further. See the Constants section of
+# schedule/DESIGN.md.
+_BEAM_FLOOR_LBS = 5.0
+_MAX_BEAM_WASTE_LBS = 100.0
+
+
 # Tolerance for float arithmetic in plan_production. Beam capacities use
 # floating-point division by top_pct / btm_pct, which can produce values
 # like 499.99999999999994 where 500.0 is meant. We round to nearest
@@ -138,15 +150,18 @@ class Machine(HasID[str]):
 
     @property
     def next_runout(self) -> datetime:
-        """Forward-extrapolated time at which top or btm beam will exhaust,
-        assuming `current_status.current_item` continues running from
-        `current_status.as_of`. Real greiges always draw from both bars
-        (top_pct, btm_pct > 0), so this is always well-defined."""
+        """Forward-extrapolated time at which top or btm beam will reach its
+        floor (`_BEAM_FLOOR_LBS`), assuming `current_status.current_item`
+        continues running from `current_status.as_of`. A beam is never knit
+        to zero, so the prediction is based on the usable yarn
+        (`lbs_remaining - _BEAM_FLOOR_LBS`) on each bar. Real greiges always
+        draw from both bars (top_pct, btm_pct > 0), so this is always
+        well-defined."""
         s = self._current_status
         cfg = s.current_item.configuration
         producible_before_runout = min(
-            s.top_lbs_remaining / cfg.top_pct,
-            s.btm_lbs_remaining / cfg.btm_pct,
+            (s.top_lbs_remaining - _BEAM_FLOOR_LBS) / cfg.top_pct,
+            (s.btm_lbs_remaining - _BEAM_FLOOR_LBS) / cfg.btm_pct,
         )
         rate = s.current_item.get_rate_on_mchn(self._id)
         hours = producible_before_runout / rate
@@ -382,81 +397,108 @@ class Machine(HasID[str]):
     def _emit_run_up(
         self, emitted: list[Activity], working: Status, jobs: list[Job],
     ) -> Status:
-        """Produce `working.current_item` until a beam exhausts. Emits a
-        `Knit` for whole rolls plus any half-roll-or-larger partial, and a
-        `Waste` for any sub-half-roll partial — see `_split_roll` for the
-        rule. Appends one run-up `Job` of the produced rolls to `jobs`
-        (omitted when the run-up yields no whole rolls). Returns the
-        working status after the run-up (at least one beam at 0 lbs)."""
+        """Produce `working.current_item` toward a beam runout in **whole
+        rolls only** — never starting a roll the current beams can't finish
+        above `_BEAM_FLOOR_LBS`, so the machine is never stranded mid-roll at
+        the changeover. Emits at most one `Knit` (no `Waste`, no beam work of
+        its own) and appends one run-up `Job` of the produced rolls to `jobs`
+        (omitted when no whole roll fits). Each bar keeps its leftover usable
+        yarn for the preamble to resolve. Returns the working status with
+        `current_item` unchanged."""
         cur = working.current_item
         cfg = cur.configuration
-        producible = min(
-            working.top_lbs_remaining / cfg.top_pct,
-            working.btm_lbs_remaining / cfg.btm_pct,
-        )
-        job_lbs, waste_lbs = _split_roll(producible, cur.tgt_wt)
+        top_usable = working.top_lbs_remaining - _BEAM_FLOOR_LBS
+        btm_usable = working.btm_lbs_remaining - _BEAM_FLOOR_LBS
+        producible = min(top_usable / cfg.top_pct, btm_usable / cfg.btm_pct)
 
-        rolls: list[Roll] = []
-        if job_lbs > 0:
-            working = self._emit_knit(emitted, working, cur, job_lbs, rolls)
-        if waste_lbs > 0:
-            working = self._emit_waste(emitted, working, cur, waste_lbs)
-        if rolls:
-            jobs.append(Job(item=cur, rolls=tuple(rolls)))
-        return _clamp_zero_lbs(working)
+        # Whole rolls only; snap a near-integer count (float drift from the
+        # usable/pct division) the way producible_lbs_through does.
+        n_rolls_exact = producible / cur.tgt_wt
+        n_rolls_rounded = round(n_rolls_exact)
+        if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
+            n_rolls = n_rolls_rounded
+        else:
+            n_rolls = math.floor(n_rolls_exact)
+        if n_rolls <= 0:
+            return working
+
+        knit_lbs = n_rolls * cur.tgt_wt
+        rate = cur.get_rate_on_mchn(self._id)
+        rolls = self._emit_rolls(working.as_of, knit_lbs, rate, cur.tgt_wt)
+        working = self._emit_knit(emitted, working, cur, knit_lbs)
+        jobs.append(Job(item=cur, rolls=rolls))
+        return working
 
     def _emit_preamble(
         self, emitted: list[Activity], working: Status, item: 'Greige',
     ) -> Status:
-        """Full changeover preamble. Per-bar logic:
+        """Changeover preamble. The run-up no longer drains a bar to empty,
+        so each bar arrives in one of four states, resolved against the new
+        `item`'s yarn and the bar's `usable = bar_lbs - _BEAM_FLOOR_LBS`:
 
-        - Has yarn matching `item`: no activity for that bar.
-        - Has yarn not matching `item`: `TapeOut` + `BeamLoad`.
-        - Empty (post-runout): `BeamLoad` only — no `TapeOut`.
+        - Empty / at the floor (`usable <= 0`): `BeamLoad` only.
+        - Yarn matches `item`: nothing — the beam and its leftover carry
+          over, drawn at the new item's pct (a near-empty match is left for
+          the production loop's pre-roll gate to swap).
+        - Yarn mismatches, `usable > _MAX_BEAM_WASTE_LBS`: `TapeOut` +
+          `BeamLoad` — preserve the worthwhile yarn (the machine reverses
+          it; the preserved beam is not tracked in inventory yet).
+        - Yarn mismatches, `usable <= _MAX_BEAM_WASTE_LBS`: `Waste` +
+          `BeamLoad` — discard the residue (zero-duration unknit drop).
 
-        When both bars have yarn AND both need swapping, emit a single
-        `TapeOut('both')` instead of two singles (cheaper than two singles
-        per the design's duration table).
-
-        After all beam work, emit `StyleChange` if `item != current_item`,
-        with `is_family_change` set from the family comparison."""
+        When both bars need a tape-out, emit a single `TapeOut('both')`
+        rather than two singles (cheaper per the duration table); since the
+        run-up emits no beam work, this can arise in either mode. After all
+        beam work, emit `StyleChange` if `item != current_item`, with
+        `is_family_change` set from the family comparison."""
         cfg = item.configuration
 
-        top_empty = working.top_lbs_remaining <= _FLOAT_EPS
-        btm_empty = working.btm_lbs_remaining <= _FLOAT_EPS
+        def bar_action(bar_lbs: float, beam: 'BeamSet | None',
+                       want_beam: str) -> str:
+            """One of 'load' (empty), 'keep' (matching yarn), 'tape'
+            (mismatch worth preserving), or 'waste' (mismatch to discard)."""
+            usable = bar_lbs - _BEAM_FLOOR_LBS
+            if usable <= _FLOAT_EPS:
+                return 'load'
+            if beam is not None and beam.id == want_beam:
+                return 'keep'
+            return 'tape' if usable > _MAX_BEAM_WASTE_LBS else 'waste'
 
-        top_yarn_matches = (
-            not top_empty
-            and working.top_beam is not None
-            and working.top_beam.id == cfg.top_beam
+        top_action = bar_action(
+            working.top_lbs_remaining, working.top_beam, cfg.top_beam,
         )
-        btm_yarn_matches = (
-            not btm_empty
-            and working.btm_beam is not None
-            and working.btm_beam.id == cfg.btm_beam
+        btm_action = bar_action(
+            working.btm_lbs_remaining, working.btm_beam, cfg.btm_beam,
         )
 
-        top_needs_tape_out = (not top_empty) and (not top_yarn_matches)
-        btm_needs_tape_out = (not btm_empty) and (not btm_yarn_matches)
-        top_needs_load = top_empty or not top_yarn_matches
-        btm_needs_load = btm_empty or not btm_yarn_matches
-
-        # Tape-out phase. 'both' is reserved for the case where both bars
-        # still carry (mismatched) yarn — it cannot arise in 'next_runout'
-        # mode where at least one bar is empty after the run-up.
-        if top_needs_tape_out and btm_needs_tape_out:
+        # Tape-out phase — batch into one 'both' when both bars tape out.
+        if top_action == 'tape' and btm_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'both')
-        elif top_needs_tape_out:
+        elif top_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'top')
-        elif btm_needs_tape_out:
+        elif btm_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'btm')
 
-        # Beam-load phase. Top first, then btm.
-        if top_needs_load:
+        # Waste phase — discard near-empty mismatched residue (the yarn
+        # belongs to the outgoing item). Zero duration; empties the bar.
+        if top_action == 'waste':
+            working = self._emit_waste(
+                emitted, working, working.current_item, 'top',
+                working.top_lbs_remaining - _BEAM_FLOOR_LBS,
+            )
+        if btm_action == 'waste':
+            working = self._emit_waste(
+                emitted, working, working.current_item, 'btm',
+                working.btm_lbs_remaining - _BEAM_FLOOR_LBS,
+            )
+
+        # Beam-load phase — every bar that wasn't kept gets a fresh beam.
+        # Top first, then btm.
+        if top_action != 'keep':
             working = self._emit_beam_load(
                 emitted, working, 'top', BeamSet(cfg.top_beam),
             )
-        if btm_needs_load:
+        if btm_action != 'keep':
             working = self._emit_beam_load(
                 emitted, working, 'btm', BeamSet(cfg.btm_beam),
             )
@@ -480,53 +522,84 @@ class Machine(HasID[str]):
         self, emitted: list[Activity], working: Status,
         item: 'Greige', lbs: float, jobs: list[Job],
     ) -> None:
-        """Emit Knits (and Wastes / BeamLoads) until `lbs` of `item` are
-        produced, then append one `Job` of the accumulated rolls to
-        `jobs`. The rolls accumulate across every mid-run `BeamLoad`, so
-        the single emitted `Job` straddles any beam swaps. The BeamLoads
-        emitted here use the same yarn as `item` (the preamble already
-        guaranteed that)."""
+        """Wind `lbs` of `item` (a whole multiple of `tgt_wt`) as continuous
+        production, breaking the run into separate `Knit`s only at beam
+        events and recording each completed `Roll` on one straddle-aware
+        `Job`. Rolls are always whole `tgt_wt` rolls; a roll that hits a beam
+        floor mid-wind continues on the fresh beam, so a single roll can
+        span two `Knit`s and a `Job` can span many `BeamLoad`s. BeamLoads
+        here use the same yarn as `item` (the preamble guaranteed it). See
+        the production-loop walk in DESIGN.md."""
         cfg = item.configuration
-        remaining = lbs
+        rate = item.get_rate_on_mchn(self._id)
+        tgt = item.tgt_wt
         rolls: list[Roll] = []
 
-        while remaining > _FLOAT_EPS:
-            top_capacity = working.top_lbs_remaining / cfg.top_pct
-            btm_capacity = working.btm_lbs_remaining / cfg.btm_pct
-            producible = min(top_capacity, btm_capacity)
+        rolls_left = round(lbs / tgt)   # whole rolls owed (lbs is a multiple)
+        roll_filled = 0.0               # lbs wound on the in-progress roll
+        knit = 0.0                      # lbs in the current (unflushed) Knit
 
-            # All remaining fits in this beam state — final Knit, done.
-            if producible >= remaining - _FLOAT_EPS:
-                working = self._emit_knit(
-                    emitted, working, item, remaining, rolls,
-                )
-                break
+        def usable(bar_lbs: float, pct: float) -> float:
+            """Live usable yarn on a bar, net of the un-flushed Knit: a bar
+            is exhausted at `usable <= 0`, near-empty below
+            `_MAX_BEAM_WASTE_LBS`."""
+            return bar_lbs - knit * pct - _BEAM_FLOOR_LBS
 
-            # Producible < remaining — produce up to runout, then reload.
-            # The `_split_roll` partition applies the half-roll rule:
-            # the partial counts as a smaller-than-target usable roll
-            # (Knit) when at or above `tgt_wt / 2`, else as Waste.
-            job_lbs, waste_lbs = _split_roll(producible, item.tgt_wt)
-            if job_lbs > 0:
-                working = self._emit_knit(
-                    emitted, working, item, job_lbs, rolls,
-                )
-                remaining -= job_lbs
-            if waste_lbs > 0:
-                working = self._emit_waste(emitted, working, item, waste_lbs)
+        def flush() -> None:
+            """Emit the open Knit (if any) and reset the accumulator. The
+            Knit's start is the current `working.as_of`, unchanged since the
+            accumulator opened (nothing else is emitted mid-segment)."""
+            nonlocal working, knit
+            if knit > _FLOAT_EPS:
+                working = self._emit_knit(emitted, working, item, knit)
+                knit = 0.0
 
-            working = _clamp_zero_lbs(working)
+        def resolve() -> None:
+            """Reload any exhausted bar; swap (discarding its residue as
+            `Waste`) any near-empty bar. Flushes the open Knit before any
+            beam work so the Knit ends at the swap. Checking both bars
+            handles the co-swap: when one runs out and the other has also
+            fallen below the threshold, both are swapped together."""
+            nonlocal working
+            for bar, beam_id, pct in (
+                ('top', cfg.top_beam, cfg.top_pct),
+                ('btm', cfg.btm_beam, cfg.btm_pct),
+            ):
+                bar_lbs = (working.top_lbs_remaining if bar == 'top'
+                           else working.btm_lbs_remaining)
+                u = usable(bar_lbs, pct)
+                if u <= _FLOAT_EPS:             # exhausted — reload to continue
+                    flush()
+                    working = self._emit_beam_load(
+                        emitted, working, bar, BeamSet(beam_id),
+                    )
+                elif u < _MAX_BEAM_WASTE_LBS:   # near-empty — swap, discard residue
+                    flush()
+                    working = self._emit_waste(
+                        emitted, working, item, bar, u,
+                    )
+                    working = self._emit_beam_load(
+                        emitted, working, bar, BeamSet(beam_id),
+                    )
 
-            # Reload whichever bar(s) exhausted. Natural exhaustion: no
-            # TapeOut needed (the bar is already empty).
-            if working.top_lbs_remaining == 0.0:
-                working = self._emit_beam_load(
-                    emitted, working, 'top', BeamSet(cfg.top_beam),
-                )
-            if working.btm_lbs_remaining == 0.0:
-                working = self._emit_beam_load(
-                    emitted, working, 'btm', BeamSet(cfg.btm_beam),
-                )
+        while rolls_left > 0:
+            if roll_filled == 0.0:
+                resolve()                       # pre-roll max-waste gate
+            producible = min(
+                usable(working.top_lbs_remaining, cfg.top_pct) / cfg.top_pct,
+                usable(working.btm_lbs_remaining, cfg.btm_pct) / cfg.btm_pct,
+            )
+            step = min(tgt - roll_filled, producible)
+            knit += step
+            roll_filled += step
+            if roll_filled >= tgt - _FLOAT_EPS:  # roll complete
+                self._emit_roll(rolls, tgt, working.as_of, knit, rate)
+                roll_filled = 0.0
+                rolls_left -= 1
+            else:                                # a bar hit the floor mid-roll
+                resolve()                        # reload it; co-swap the other
+
+        flush()                                  # final Knit
 
         if rolls:
             jobs.append(Job(item=item, rolls=tuple(rolls)))
@@ -535,30 +608,104 @@ class Machine(HasID[str]):
 
     def _emit_knit(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', lbs: float, rolls: list[Roll],
+        item: 'Greige', lbs: float,
     ) -> Status:
-        """Emit one `Knit` activity for `lbs` of `item` and append the
-        rolls it completes to `rolls`. A `Knit` is one uninterrupted run;
-        whether it ends a `Job` is the caller's concern (the run-up and
-        production-loop helpers own the `rolls` list and package it into a
-        `Job`), so this only contributes rolls."""
+        """Emit one `Knit` activity for `lbs` of `item`. A `Knit` is one
+        uninterrupted run between beam events and may end mid-roll, so it no
+        longer derives the rolls it produces — roll tracking is owned by the
+        caller (run-up / production loop), which records `Roll`s onto the
+        `Job` independently via `_emit_rolls`. See DESIGN.md."""
         rate = item.get_rate_on_mchn(self._id)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
         emitted.append(Knit(start=start, end=end, item=item, lbs=lbs))
-        rolls.extend(
-            _compute_rolls(start, lbs, rate, item.tgt_wt, self._workcal)
-        )
         return working.apply_activity(emitted[-1])
+
+    def _emit_rolls(
+        self, start: datetime, lbs: float, rate: float, tgt_wt: float,
+    ) -> tuple[Roll, ...]:
+        """Build the `Roll`s completed by a contiguous run of `lbs` at
+        `rate` starting at `start`. Per-roll lbs sum to exactly `lbs` (mass
+        conservation); when the total snaps to a clean N-roll count under
+        `_ROLL_TOLERANCE`, the lbs are spread evenly across the N rolls.
+        Completion times respect `workcal`.
+
+        Moved here from the former module-level `_compute_rolls`. The
+        trailing partial-roll branch is legacy half-roll handling — dead for
+        the whole-roll run-up, and slated for rework when the production
+        loop's straddling-roll logic is rewritten."""
+        rolls: list[Roll] = []
+        cumulative = 0.0
+
+        # Snap to clean N-roll count if close. Distribute lbs equally
+        # across the N rolls so the sum exactly matches `lbs` (vs. emitting
+        # N rolls of `tgt_wt` each which would over- or under-count by the
+        # snap delta).
+        n_rolls_exact = lbs / tgt_wt
+        n_rolls_rounded = round(n_rolls_exact)
+        if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
+            if n_rolls_rounded == 0:
+                return ()
+            roll_lbs = lbs / n_rolls_rounded
+            for _ in range(n_rolls_rounded):
+                cumulative += roll_lbs
+                rolls.append(Roll(
+                    lbs=roll_lbs,
+                    completion_time=self._workcal.offset_work_hours(
+                        start, cumulative / rate,
+                    ),
+                ))
+            return tuple(rolls)
+
+        # Non-snap: `floor(lbs / tgt_wt)` whole rolls plus one partial.
+        n_full = int(n_rolls_exact)
+        for _ in range(n_full):
+            cumulative += tgt_wt
+            rolls.append(Roll(
+                lbs=tgt_wt,
+                completion_time=self._workcal.offset_work_hours(
+                    start, cumulative / rate,
+                ),
+            ))
+        residual = lbs - cumulative
+        if residual > _FLOAT_EPS:
+            cumulative += residual
+            rolls.append(Roll(
+                lbs=residual,
+                completion_time=self._workcal.offset_work_hours(
+                    start, cumulative / rate,
+                ),
+            ))
+        return tuple(rolls)
+
+    def _emit_roll(
+        self, rolls: list[Roll], lbs: float,
+        start: datetime, wound: float, rate: float,
+    ) -> None:
+        """Append one completed `Roll` of `lbs` to `rolls`, accumulating into
+        the production loop's straddle-aware roll list. Its completion time
+        is the moment the roll's final lb is wound: `wound` lbs into the
+        current `Knit` segment that began at `start`, knit at `rate`. For a
+        roll that straddles a `BeamLoad`, `start`/`wound` describe the later
+        segment that completes it, not the roll's whole span."""
+        rolls.append(Roll(
+            lbs=lbs,
+            completion_time=self._workcal.offset_work_hours(
+                start, wound / rate,
+            ),
+        ))
 
     def _emit_waste(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', lbs: float,
+        item: 'Greige', bar: Literal['top', 'btm'], lbs: float,
     ) -> Status:
-        rate = item.get_rate_on_mchn(self._id)
+        """Emit a zero-duration `Waste` discarding `lbs` of usable residue
+        from `bar`. The yarn is removed unknit, so the activity occupies no
+        machine time (`start == end`); applying it empties the named bar
+        (beam -> None, lbs -> 0) so a paired `BeamLoad` can refill it."""
         start = working.as_of
-        end = self._workcal.offset_work_hours(start, lbs / rate)
-        emitted.append(Waste(start=start, end=end, item=item, lbs=lbs))
+        emitted.append(Waste(start=start, end=start, item=item,
+                             bar=bar, lbs=lbs))
         return working.apply_activity(emitted[-1])
 
     def _emit_tape_out(
@@ -613,132 +760,3 @@ class Machine(HasID[str]):
             is_family_change=is_family_change,
         ))
         return working.apply_activity(emitted[-1])
-
-
-def _split_roll(producible: float, tgt_wt: float) -> tuple[float, float]:
-    """Decide how a beam-runout's `producible` lbs of yarn should be
-    split between a `Job` and a `Waste` under the half-roll rule.
-
-    The plant ships only whole rolls (~`tgt_wt` lbs each) or half rolls
-    (~`tgt_wt / 2` lbs each), with each roll's weight within
-    `_ROLL_TOLERANCE * tgt_wt` lbs of its target. Yarn that doesn't fit
-    those two discrete sizes is waste.
-
-    Returns `(job_lbs, waste_lbs)`:
-
-    - `job_lbs` is the lbs to emit as a `Job` — N whole rolls of
-      `tgt_wt` each, optionally followed by one half-roll of
-      `tgt_wt / 2`. For example, `producible=500` with `tgt_wt=700`
-      yields one 350-lb half-roll, so `job_lbs = 350`.
-    - `waste_lbs` is yarn that doesn't fit in a full or half roll:
-      either yarn beyond `tgt_wt / 2` past the last whole roll, or
-      yarn below the half-roll tolerance band. For the same example,
-      `waste_lbs = 500 - 350 = 150`.
-
-    Float-drift handling: a `producible` within tolerance of either
-    `N * tgt_wt` or `N * tgt_wt + tgt_wt / 2` snaps to that target —
-    the actual `producible` lbs is preserved in `job_lbs` so mass
-    conservation holds (`job_lbs + waste_lbs == producible` always)."""
-    half = tgt_wt / 2
-    tol_lbs = _ROLL_TOLERANCE * tgt_wt
-
-    n_full = int(producible / tgt_wt)
-    remainder = producible - n_full * tgt_wt
-
-    # Remainder close to `tgt_wt` (snap up: treat as N+1 near-full
-    # rolls collectively weighing exactly `producible` lbs).
-    if tgt_wt - remainder < tol_lbs:
-        return producible, 0.0
-
-    # Remainder close to 0 (clean N-whole-roll count + drift). The
-    # drift goes to Waste so mass conservation holds and the runout's
-    # constraint bar still gets consumed to zero downstream.
-    if remainder < tol_lbs:
-        return n_full * tgt_wt, remainder
-
-    # Remainder close to `tgt_wt / 2` (half-roll within tolerance).
-    if abs(remainder - half) < tol_lbs:
-        return producible, 0.0
-
-    # Remainder above the half-roll target: take exactly `tgt_wt / 2`
-    # as a half-roll, discard the rest as Waste.
-    if remainder > half:
-        return n_full * tgt_wt + half, remainder - half
-
-    # Remainder below the half-roll target (minus tolerance): too
-    # small for a half-roll, all Waste.
-    return n_full * tgt_wt, remainder
-
-
-def _compute_rolls(
-    start: datetime, lbs: float, rate: float, tgt_wt: float,
-    workcal: 'WorkCal',
-) -> tuple[Roll, ...]:
-    """Break a `Knit`'s `lbs` into a sequence of `Roll`s. Each `Roll` is
-    either a whole roll (`tgt_wt` lbs, within tolerance) or a half-roll
-    (`tgt_wt / 2`, within tolerance). The per-roll lbs sum to exactly
-    `lbs` (mass conservation); when the total snaps to a clean N-roll
-    count under `_ROLL_TOLERANCE`, the lbs are distributed evenly across
-    the N rolls. Completion times respect `workcal`.
-
-    Inputs are expected to come from `_emit_knit`, where `lbs` is already
-    shaped by `_split_roll`'s half-roll rule — so a non-snap `lbs` either
-    has a clean half-roll partial (`tgt_wt / 2` ± tolerance) or is a
-    single sub-tgt_wt final-leg residual."""
-    rolls: list[Roll] = []
-    cumulative = 0.0
-
-    # Snap to clean N-roll count if close. Distribute lbs equally
-    # across the N rolls so the sum exactly matches `lbs` (vs. emitting
-    # N rolls of `tgt_wt` each which would over- or under-count by the
-    # snap delta).
-    n_rolls_exact = lbs / tgt_wt
-    n_rolls_rounded = round(n_rolls_exact)
-    if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
-        if n_rolls_rounded == 0:
-            return ()
-        roll_lbs = lbs / n_rolls_rounded
-        for _ in range(n_rolls_rounded):
-            cumulative += roll_lbs
-            rolls.append(Roll(
-                lbs=roll_lbs,
-                completion_time=workcal.offset_work_hours(
-                    start, cumulative / rate,
-                ),
-            ))
-        return tuple(rolls)
-
-    # Non-snap: `floor(lbs / tgt_wt)` whole rolls plus one partial.
-    # The partial is normally a half-roll (~`tgt_wt / 2`) produced by
-    # `_split_roll`'s half-roll fold, but can be a sub-tgt_wt residual
-    # in the production loop's final-leg case.
-    n_full = int(n_rolls_exact)
-    for _ in range(n_full):
-        cumulative += tgt_wt
-        rolls.append(Roll(
-            lbs=tgt_wt,
-            completion_time=workcal.offset_work_hours(
-                start, cumulative / rate,
-            ),
-        ))
-    residual = lbs - cumulative
-    if residual > _FLOAT_EPS:
-        cumulative += residual
-        rolls.append(Roll(
-            lbs=residual,
-            completion_time=workcal.offset_work_hours(
-                start, cumulative / rate,
-            ),
-        ))
-    return tuple(rolls)
-
-
-def _clamp_zero_lbs(working: Status) -> Status:
-    """Round bars within `_FLOAT_EPS` of zero down to exactly zero. Lets
-    downstream code check `lbs_remaining == 0.0` rather than threading an
-    epsilon through every comparison."""
-    top = 0.0 if working.top_lbs_remaining <= _FLOAT_EPS else working.top_lbs_remaining
-    btm = 0.0 if working.btm_lbs_remaining <= _FLOAT_EPS else working.btm_lbs_remaining
-    if top == working.top_lbs_remaining and btm == working.btm_lbs_remaining:
-        return working
-    return replace(working, top_lbs_remaining=top, btm_lbs_remaining=btm)

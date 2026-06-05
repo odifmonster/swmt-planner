@@ -145,14 +145,14 @@ def build_iteration_log_record(
 class CostDetailRecord:
     """One row of `cost_detail.tsv`; one record per scored candidate.
 
-    Carries the full weighted cost breakdown — the same eleven scalars
+    Carries the full weighted cost breakdown — the same twelve scalars
     `CostBreakdown` exposes — plus integer foreign keys into the five
     per-cost detail tables. A `*_detail_id` is `None` when the
     corresponding cost has no contributing rows for this candidate
     (no non-zero deltas for the four demand-side costs; no
     higher-priority skipped orders for priority).
 
-    `total` equals the sum of the eleven weighted components and
+    `total` equals the sum of the twelve weighted components and
     matches the `total_score` field on the candidate's
     `IterationLogRecord`."""
     cost_id: int
@@ -165,6 +165,7 @@ class CostDetailRecord:
     tape_out_both: float
     family_change: float
     idle_time: float
+    waste_lbs: float
     priority: float
     level_loading: float
     old_machine: float
@@ -423,6 +424,7 @@ def build_candidate_records(
         tape_out_both=breakdown.tape_out_both,
         family_change=breakdown.family_change,
         idle_time=breakdown.idle_time,
+        waste_lbs=breakdown.waste_lbs,
         priority=breakdown.priority,
         level_loading=breakdown.level_loading,
         old_machine=breakdown.old_machine,

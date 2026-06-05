@@ -58,6 +58,7 @@ class CostDetailRecord:
     tape_out_both: float
     family_change: float
     idle_time: float
+    waste_lbs: float
     priority: float
     level_loading: float
     old_machine: float

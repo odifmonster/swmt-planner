@@ -58,15 +58,27 @@ class Status:
                 is_idle=True,
             )
         if isinstance(activity, Waste):
-            cfg = activity.item.configuration
-            # Waste consumes yarn from the beams just like Job. current_item
-            # does not change — Waste is fabric of whatever was running.
+            # Waste discards a beam's usable residue unknit before an early
+            # swap, so it empties the named bar (beam -> None, lbs -> 0); a
+            # paired BeamLoad refills it. current_item is unchanged — the
+            # yarn was dropped, never knit into anything new.
+            if activity.bar == 'top':
+                return Status(
+                    as_of=activity.end,
+                    top_beam=None,
+                    btm_beam=self.btm_beam,
+                    top_lbs_remaining=0.0,
+                    btm_lbs_remaining=self.btm_lbs_remaining,
+                    current_item=self.current_item,
+                    is_idle=True,
+                )
+            # bar == 'btm'
             return Status(
                 as_of=activity.end,
                 top_beam=self.top_beam,
-                btm_beam=self.btm_beam,
-                top_lbs_remaining=self.top_lbs_remaining - activity.lbs * cfg.top_pct,
-                btm_lbs_remaining=self.btm_lbs_remaining - activity.lbs * cfg.btm_pct,
+                btm_beam=None,
+                top_lbs_remaining=self.top_lbs_remaining,
+                btm_lbs_remaining=0.0,
                 current_item=self.current_item,
                 is_idle=True,
             )

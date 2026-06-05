@@ -67,12 +67,16 @@ class Knit(Activity):
 
 @dataclass(frozen=True)
 class Waste(Activity):
-    """Sub-half-roll partial fabric produced when a beam exhausts
-    mid-roll. Time and lbs are real (the machine ran) but the fabric
-    is too small to keep and is discarded; never reaches the demand
-    layer. Partials at or above `tgt_wt / 2` are emitted as `Job`
-    activities instead — see `Job` and `_split_roll`."""
+    """Usable yarn discarded from a beam the planner swaps early — removed
+    unknit, not fabric the machine ran, so its duration is zero
+    (`start == end`). Emitted when a bar's usable residue
+    (`bar_lbs - BEAM_FLOOR_LBS`) falls below `MAX_BEAM_WASTE_LBS`: the
+    operator won't knit through a near-empty beam, so the residue is
+    dropped and a paired `BeamLoad` refills the bar. Applying it empties
+    the named `bar` (beam -> None, lbs -> 0). Never reaches the demand
+    layer; the cost layer charges it per-lb via the `waste_lbs` weight."""
     item: 'Greige'
+    bar: Literal['top', 'btm']
     lbs: float
     _count: int = field(default_factory=_WASTE_ID, init=False)
 
