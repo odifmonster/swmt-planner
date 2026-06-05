@@ -219,16 +219,16 @@ def build_earliest_dp_excluding(
     commits its own machine.
 
     `dp_time(c)` matches `build_context`:
-    `state.machines[c.machine_id].next_job_end` for
-    `start_at='next_job_end'` and `.next_runout` otherwise.
+    `state.machines[c.machine_id].schedule_tail` for
+    `start_at='schedule_tail'` and `.next_runout` otherwise.
 
     Machines whose only DPs are their own (i.e., no other machine has
     a candidate this iteration) are absent from the returned dict —
     callers fall back to `ctx.earliest_dp_time` in that case."""
     def _dp_time(move: 'Move') -> datetime:
         machine = state.machines[move.machine_id]
-        if move.start_at == 'next_job_end':
-            return machine.next_job_end
+        if move.start_at == 'schedule_tail':
+            return machine.schedule_tail
         return machine.next_runout
 
     # First pass: best (earliest) DP per machine that has any candidate.
@@ -269,7 +269,7 @@ def build_context(
     - `earliest_dp_excluding` from `build_earliest_dp_excluding(state,
       candidates)`.
     - `earliest_dp_time` from `min(dp_time(c) for c in candidates)`
-      where `dp_time` is the machine's `next_job_end` or `next_runout`
+      where `dp_time` is the machine's `schedule_tail` or `next_runout`
       depending on the move's `start_at` — i.e., the decision point
       time *before* any carrying-avoidance idle.
     - `new_machine_avail` from `build_new_machine_avail(state,
@@ -280,8 +280,8 @@ def build_context(
     error (raises `ValueError` via the `min` call)."""
     def _dp_time(move: 'Move') -> datetime:
         machine = state.machines[move.machine_id]
-        if move.start_at == 'next_job_end':
-            return machine.next_job_end
+        if move.start_at == 'schedule_tail':
+            return machine.schedule_tail
         return machine.next_runout
 
     regular_orders_by_key: dict[OrderKey, RegularOrder] = {}

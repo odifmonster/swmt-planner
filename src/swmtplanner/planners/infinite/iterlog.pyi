@@ -28,7 +28,7 @@ class IterationLogRecord:
     target_week: int | None
     machine_id: str
     machine_is_new: bool
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     idle_hours: float
     total_score: float
     cost_id: int

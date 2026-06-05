@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Callable, Literal, TYPE_CHECKING
 
 from swmtplanner.schedule import (
-    Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
 )
 
 from swmtplanner.planners.infinite.costing import CostBreakdown
@@ -84,7 +84,7 @@ class IterationLogRecord:
     target_week: int | None
     machine_id: str
     machine_is_new: bool
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     idle_hours: float
     # summary + foreign keys into the detail tables
     total_score: float
@@ -401,8 +401,8 @@ def build_candidate_records(
                 priority=pc.priority,
             ))
 
-    # --- Schedule detail: one row per Activity in move.plan.
-    for a in move.plan:
+    # --- Schedule detail: one row per Activity in move.plan.activities.
+    for a in move.plan.activities:
         accumulators.schedule_detail.append(ScheduleDetailRecord(
             sched_id=sched_id,
             activity_id=a.id,
@@ -467,7 +467,7 @@ def _activity_desc(a: 'Activity') -> str:
     """Short text description for `ScheduleDetailRecord.description`.
     Mirrors `report._activity_desc` so the verbose TSV's activity
     descriptions match the headline XLSX schedule sheet."""
-    if isinstance(a, (Job, Waste)):
+    if isinstance(a, (Knit, Waste)):
         return a.item.id
     if isinstance(a, BeamLoad):
         return f'{a.beam.id} on {a.bar}'
@@ -486,7 +486,7 @@ def candidate_sort_key(
     """Deterministic tie-break sort key for a candidate within an
     iteration. Score ascending, then `item_id`, then `machine_id`,
     then `start_at` with `'next_runout'` ordered before
-    `'next_job_end'`. Used by the verbose loop for both the global
+    `'schedule_tail'`. Used by the verbose loop for both the global
     `score_rank` ordering and the within-item `item_score_rank`
     ordering. See DESIGN.md's "Tie-breaking" paragraph in the
     "Verbose iteration log" section."""

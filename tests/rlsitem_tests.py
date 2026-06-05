@@ -7,7 +7,7 @@ from pathlib import Path
 
 from swmtplanner.demand.rlsitem import CostComponents, RlsItem
 from swmtplanner.products import Greige
-from swmtplanner.schedule import Job
+from swmtplanner.schedule import Job, Roll
 
 
 # Greige fixtures shared with the view tests. RlsItem owns its own Order/View
@@ -67,9 +67,12 @@ def _make_rls_item(
 
 
 def _real_job(item: Greige, end_dt: datetime, lbs: float) -> Job:
-    # Only `.end` and `.lbs` are touched by recompute; `start` is required
-    # by Job's constructor but otherwise unused here.
-    return Job(start=end_dt, end=end_dt, item=item, lbs=lbs)
+    # A Job record delivering `lbs` as a single roll completing at
+    # `end_dt`. The demand views read per-roll completion times, and
+    # RlsItem sorts jobs by their final roll's completion_time — so a
+    # single roll at `end_dt` preserves the FIFO ordering these tests
+    # assume.
+    return Job(item=item, rolls=(Roll(lbs=lbs, completion_time=end_dt),))
 
 
 class RlsItemAllocationTests(unittest.TestCase):

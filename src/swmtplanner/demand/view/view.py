@@ -32,11 +32,10 @@ class RawView:
 
     def recompute(self, jobs: list['Job'], on_hand: float) -> None:
         # FIFO stream over (availability_time, lbs). Each Job expands
-        # into one chunk per roll via `Job.rolls` (sequence of
-        # `(lbs, completion_time)` pairs) — rolls ship as they come off
-        # the machine rather than as a single bundle at `Job.end`, so
-        # the chunk granularity matches reality. Hand-constructed Jobs
-        # with empty `rolls` fall back to single-chunk-at-end.
+        # into one chunk per `Roll` via `Job.rolls` — rolls ship as they
+        # come off the machine rather than as a single bundle, so the
+        # chunk granularity matches reality. A Job with no rolls
+        # contributes nothing (it carries no completion times of its own).
         #
         # On-hand is available "now"; stamping it at the first order's
         # due date keeps it on-time for every order without taking
@@ -44,10 +43,9 @@ class RawView:
         first_due = self._orders[0].week.due_date
         stream: list[tuple[datetime, float]] = [(first_due, on_hand)]
         for j in jobs:
-            if j.rolls:
-                stream.extend((t, lbs) for lbs, t in j.rolls)
-            else:
-                stream.append((j.end, j.lbs))
+            stream.extend(
+                (roll.completion_time, roll.lbs) for roll in j.rolls
+            )
         # Multiple machines producing the same item can interleave
         # rolls in time; sort to keep the FIFO walk well-formed.
         stream.sort(key=lambda e: e[0])
@@ -131,8 +129,9 @@ class SafetyAwareView:
 
     def recompute(self, jobs: list['Job'], on_hand: float) -> None:
         # On-hand is processed as a pseudo-job at the first order's due_date
-        # (so it's on-time for every order). Real jobs are expected sorted by
-        # job.end; RlsItem maintains that invariant via bisect.insort.
+        # (so it's on-time for every order). Roll arrivals are merged into
+        # the event list below and sorted by time, so job order doesn't
+        # matter here.
         for order in self._orders:
             order.allocated_lbs = 0.0
         self._safety_pool = 0.0
@@ -148,16 +147,15 @@ class SafetyAwareView:
         # Merge chunk arrivals with order drain events. Chunks (priority 0)
         # fire before drains (priority 1) at the same timestamp — material is
         # available at the start of the period, demand ships at the end.
-        # Each Job expands into one chunk per roll via `Job.rolls` so the
-        # drainage sim sees fabric arriving as rolls come off the machine
-        # rather than bundled at `Job.end`. Hand-constructed Jobs with empty
-        # `rolls` fall back to single-chunk-at-end.
+        # Each Job expands into one chunk per `Roll` via `Job.rolls` so the
+        # drainage sim sees fabric arriving as rolls come off the machine.
+        # A Job with no rolls contributes nothing.
         events: list[tuple[datetime, int, _EventQty]] = [(first_due, 0, ('chunk', on_hand))]
         for j in jobs:
-            if j.rolls:
-                events.extend((t, 0, ('chunk', lbs)) for lbs, t in j.rolls)
-            else:
-                events.append((j.end, 0, ('chunk', j.lbs)))
+            events.extend(
+                (roll.completion_time, 0, ('chunk', roll.lbs))
+                for roll in j.rolls
+            )
         events.extend(
             (order.week.due_date, 1, ('drain', order)) for order in self._orders
         )

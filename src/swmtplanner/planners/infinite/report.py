@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from swmtplanner.schedule import (
-    Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
 )
 
 if TYPE_CHECKING:
@@ -42,15 +42,15 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
     Index levels:
 
     - `machine` — machine id.
-    - `activity_id` — the activity's stable id (e.g. `JOB00001`).
+    - `activity_id` — the activity's stable id (e.g. `KNIT00001`).
 
     Columns:
 
     - `start`, `end` — `datetime`s.
-    - `lbs` — populated for `Job`, `Waste`, and `BeamLoad`; `NaN` for
+    - `lbs` — populated for `Knit`, `Waste`, and `BeamLoad`; `NaN` for
       everything else so the cell renders blank in Excel.
     - `desc` — short human-readable description, dispatched on type:
-      Job/Waste show the greige item id, BeamLoad shows
+      Knit/Waste show the greige item id, BeamLoad shows
       `'<beam> on <bar>'`, TapeOut shows the bar(s), StyleChange shows
       `'from <item> to <item>'`, Idle is blank.
 
@@ -76,38 +76,39 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
 
 
 def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
-    """One row per committed `Job` across all schedules, indexed by
-    `(item, activity_id)` so rows visibly group by item in Excel.
+    """One row per committed `Job` record across all rls_items, indexed
+    by `(item, job_id)` so rows visibly group by item in Excel.
 
     Index levels:
 
     - `item` — greige id.
-    - `activity_id` — the Job's stable id (e.g. `JOB00045`), useful for
-      cross-referencing back to the `schedule` sheet.
+    - `job_id` — the `Job`'s stable id (e.g. `JOB00045`).
 
-    Columns: `machine`, `start`, `end`, `lbs`. Rows are sorted by
-    `(item, start)` so each item's production reads as a chronological
-    run."""
+    Columns: `total_rolls`, `total_lbs`, `completion` (the job's last
+    roll's `completion_time`; `NaT` for a job with no rolls). Rows are
+    sorted by `(item, completion)` so each item's production reads as a
+    chronological run."""
     rows = []
-    for machine_id, activities in report.schedules.items():
-        for a in activities:
-            if isinstance(a, Job):
-                rows.append({
-                    'item': a.item.id,
-                    'machine': machine_id,
-                    'activity_id': a.id,
-                    'start': a.start,
-                    'end': a.end,
-                    'lbs': a.lbs,
-                })
+    for item_id, jobs in report.jobs_by_item.items():
+        for job in jobs:
+            completion = (
+                job.rolls[-1].completion_time if job.rolls else pd.NaT
+            )
+            rows.append({
+                'item': item_id,
+                'job_id': job.id,
+                'total_rolls': job.total_rolls,
+                'total_lbs': job.total_lbs,
+                'completion': completion,
+            })
     df = pd.DataFrame(
         rows,
-        columns=['item', 'machine', 'activity_id', 'start', 'end', 'lbs'],
+        columns=['item', 'job_id', 'total_rolls', 'total_lbs', 'completion'],
     )
     if not df.empty:
-        df = df.sort_values(['item', 'start']).reset_index(drop=True)
-    df['lbs'] = _round_int(df['lbs'])
-    return df.set_index(['item', 'activity_id'])
+        df = df.sort_values(['item', 'completion']).reset_index(drop=True)
+    df['total_lbs'] = _round_int(df['total_lbs'])
+    return df.set_index(['item', 'job_id'])
 
 
 def late_orders_dataframe(report: 'PlanReport') -> pd.DataFrame:
@@ -398,14 +399,14 @@ def _activity_lbs(a: 'Activity') -> float:
     """`lbs` cell value for `a`. Only Job/Waste/BeamLoad have a
     meaningful lbs quantity; everything else is NaN (renders blank in
     Excel)."""
-    if isinstance(a, (Job, Waste, BeamLoad)):
+    if isinstance(a, (Knit, Waste, BeamLoad)):
         return a.lbs
     return math.nan
 
 
 def _activity_desc(a: 'Activity') -> str:
     """Short text description for `a`'s `desc` cell."""
-    if isinstance(a, (Job, Waste)):
+    if isinstance(a, (Knit, Waste)):
         return a.item.id
     if isinstance(a, BeamLoad):
         return f'{a.beam.id} on {a.bar}'

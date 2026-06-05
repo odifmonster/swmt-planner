@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from swmtplanner.products import Greige, BeamSet
 from swmtplanner.schedule import (
-    Machine, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Machine, Knit, Job, Roll, Waste, TapeOut, BeamLoad, StyleChange, Idle,
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
 )
 from swmtplanner.support import WorkCal
@@ -117,9 +117,9 @@ class MachineConstructionTests(unittest.TestCase):
         m = _make_machine()
         self.assertEqual(m.activities, ())
 
-    def test_next_job_end_is_start_when_empty(self):
+    def test_schedule_tail_is_start_when_empty(self):
         m = _make_machine()
-        self.assertEqual(m.next_job_end, _START)
+        self.assertEqual(m.schedule_tail, _START)
 
     def test_initial_next_runout(self):
         # top=200, btm=300, top_pct=0.4, btm_pct=0.6, rate=100 lbs/h.
@@ -140,11 +140,11 @@ class ActivityStatusUpdateTests(unittest.TestCase):
                 f'field {k!r}: got {getattr(status, k)!r}, expected {v!r}',
             )
 
-    def test_job_consumes_lbs_and_sets_current_item(self):
+    def test_knit_consumes_lbs_and_sets_current_item(self):
         # 50 lbs of A: 0.4*50=20 from top, 0.6*50=30 from btm. 30 min at rate 100.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         end = _START + timedelta(minutes=30)
-        m.add_activities([Job(start=_START, end=end, item=_ITEM_A, lbs=50.0)])
+        m.add_activities([Knit(start=_START, end=end, item=_ITEM_A, lbs=50.0)])
         s = m.current_status
         self._expect(
             s,
@@ -357,7 +357,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
             StyleChange(start=t3, end=t4,
                         from_item=_ITEM_A, to_item=_ITEM_C,
                         is_family_change=True),
-            Job(start=t4, end=t5, item=_ITEM_C, lbs=50.0),
+            Knit(start=t4, end=t5, item=_ITEM_C, lbs=50.0),
         ])
         s = m.current_status
         self.assertEqual(s.top_beam, _ALT_TOP_BEAM)
@@ -377,8 +377,8 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         t1 = t0 + timedelta(hours=1)
         t2 = t1 + timedelta(hours=1)
         acts = [
-            Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0),
-            Job(start=t1, end=t2, item=_ITEM_A, lbs=100.0),
+            Knit(start=t0, end=t1, item=_ITEM_A, lbs=100.0),
+            Knit(start=t1, end=t2, item=_ITEM_A, lbs=100.0),
         ]
         m_batched.add_activities(acts)
         for a in acts:
@@ -388,7 +388,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
 
     def test_activities_tuple_reflects_full_appended_history(self):
         m = _make_machine()
-        a1 = Job(start=_START, end=_START + timedelta(hours=1),
+        a1 = Knit(start=_START, end=_START + timedelta(hours=1),
                  item=_ITEM_A, lbs=100.0)
         a2 = TapeOut(start=_START + timedelta(hours=1),
                      end=_START + timedelta(hours=2),
@@ -412,8 +412,8 @@ class StatusAtTests(unittest.TestCase):
                           init_top_lbs=400.0, init_btm_lbs=600.0)
         t0, t1, t2, t3 = (_START + timedelta(hours=h) for h in (0, 1, 2, 3))
         m.add_activities([
-            Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0),
-            Job(start=t2, end=t3, item=_ITEM_A, lbs=100.0),
+            Knit(start=t0, end=t1, item=_ITEM_A, lbs=100.0),
+            Knit(start=t2, end=t3, item=_ITEM_A, lbs=100.0),
         ])
         mid_gap = t1 + timedelta(minutes=30)
         s = m.status_at(mid_gap)
@@ -426,7 +426,7 @@ class StatusAtTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=400.0, init_btm_lbs=600.0)
         end = _START + timedelta(hours=1)
-        m.add_activities([Job(start=_START, end=end,
+        m.add_activities([Knit(start=_START, end=end,
                               item=_ITEM_A, lbs=100.0)])
         mid = _START + timedelta(minutes=30)
         s = m.status_at(mid)
@@ -444,7 +444,7 @@ class StatusAtTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=400.0, init_btm_lbs=600.0)
         end = _START + timedelta(hours=1)
-        m.add_activities([Job(start=_START, end=end,
+        m.add_activities([Knit(start=_START, end=end,
                               item=_ITEM_A, lbs=100.0)])
         s = m.status_at(end)
         self.assertEqual(s.as_of, end)
@@ -455,7 +455,7 @@ class StatusAtTests(unittest.TestCase):
     def test_status_at_past_tail_matches_current_status_with_shifted_as_of(self):
         m = _make_machine()
         end = _START + timedelta(hours=1)
-        m.add_activities([Job(start=_START, end=end,
+        m.add_activities([Knit(start=_START, end=end,
                               item=_ITEM_A, lbs=100.0)])
         far_future = end + timedelta(days=30)
         s = m.status_at(far_future)
@@ -503,7 +503,7 @@ class NextRunoutTests(unittest.TestCase):
         # lbs by exactly that much. So next_runout stays at +5h.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         end = _START + timedelta(minutes=30)
-        m.add_activities([Job(start=_START, end=end,
+        m.add_activities([Knit(start=_START, end=end,
                               item=_ITEM_A, lbs=50.0)])
         self.assertEqual(m.next_runout, _START + timedelta(hours=5))
 
@@ -590,13 +590,16 @@ _ITEM_F = Greige(  # different yarn on both bars AND different family
 
 
 def _shape(plan):
-    """Tuple-ize a plan for structural comparison, dropping the auto-
-    incrementing activity ids. Each tuple's leading entry is the activity
-    type name; remaining entries are the fields we care about per type."""
+    """Tuple-ize a plan's activity stream for structural comparison,
+    dropping the auto-incrementing activity ids. Accepts a `ProductionPlan`
+    or a raw iterable of activities. Each tuple's leading entry is the
+    activity type name; remaining entries are the fields we care about per
+    type."""
+    activities = getattr(plan, 'activities', plan)
     out = []
-    for a in plan:
-        if isinstance(a, Job):
-            out.append(('Job', a.lbs, a.item.id))
+    for a in activities:
+        if isinstance(a, Knit):
+            out.append(('Knit', a.lbs, a.item.id))
         elif isinstance(a, Waste):
             out.append(('Waste', a.lbs, a.item.id))
         elif isinstance(a, TapeOut):
@@ -614,6 +617,32 @@ def _shape(plan):
     return out
 
 
+def _knit_count(plan):
+    """Number of `Knit` activities in a plan's activity stream."""
+    return sum(1 for a in plan.activities if isinstance(a, Knit))
+
+
+def _job_shape(plan):
+    """Structural shape of a plan's production records, dropping job ids:
+    one tuple per `Job` of (item id, total_rolls, total_lbs, per-roll
+    lbs)."""
+    return [
+        (j.item.id, j.total_rolls, j.total_lbs,
+         tuple(r.lbs for r in j.rolls))
+        for j in plan.jobs
+    ]
+
+
+def _assert_single_job(test, plan, item_id, total_lbs, total_rolls):
+    """Assert the plan produced exactly one `Job` for `item_id` with the
+    given roll totals (`Waste` lbs are not part of the `Job`)."""
+    test.assertEqual(len(plan.jobs), 1)
+    job = plan.jobs[0]
+    test.assertEqual(job.item.id, item_id)
+    test.assertAlmostEqual(job.total_lbs, total_lbs)
+    test.assertEqual(job.total_rolls, total_rolls)
+
+
 # --- 2.1 Input acceptance -----------------------------------------------
 
 class PlanProductionInputAcceptanceTests(unittest.TestCase):
@@ -621,11 +650,11 @@ class PlanProductionInputAcceptanceTests(unittest.TestCase):
     def test_same_item_accepted(self):
         m = _make_machine()
         # No exception → accepted.
-        m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end')
+        m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
 
     def test_same_yarn_same_family_different_item_accepted(self):
         m = _make_machine()
-        m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
+        m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
 
     def test_invalid_start_at_raises_value_error(self):
         m = _make_machine()
@@ -640,20 +669,20 @@ class PlanProductionPreambleTests(unittest.TestCase):
     def test_same_item_emits_no_preamble(self):
         # to_item == current_item → no preamble; only the production loop.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end')
-        self.assertEqual(_shape(plan), [('Job', 100.0, 'AU0001')])
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [('Knit', 100.0, 'AU0001')])
 
     def test_different_item_emits_simple_style_change_only(self):
         # Different item, same yarn + family → exactly one
         # StyleChange(is_family_change=False), no TapeOut or BeamLoad.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('StyleChange', 'AU0001', 'AU0002', False),
-            ('Job', 200.0, 'AU0002'),
+            ('Knit', 200.0, 'AU0002'),
         ])
         # Duration of the StyleChange is simple_change_duration.
-        sc = plan[0]
+        sc = plan.activities[0]
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
 
 
@@ -664,25 +693,34 @@ class PlanProductionLoopTests(unittest.TestCase):
     def test_single_roll_no_exhaustion_emits_one_job(self):
         # tgt_wt=100, lbs=100, beams have plenty of capacity.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end')
-        self.assertEqual(_shape(plan), [('Job', 100.0, 'AU0001')])
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [('Knit', 100.0, 'AU0001')])
+        # One Job, backed by exactly one Knit (no mid-job BeamLoad).
+        _assert_single_job(self, plan, 'AU0001', 100.0, 1)
+        self.assertEqual(_knit_count(plan), 1)
 
     def test_multiple_rolls_no_exhaustion_emits_one_job(self):
         # 500 lbs = 5 rolls. Beams have capacity (200 top + 300 btm < 2800/1800).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_A, lbs=500.0, start_at='next_job_end')
-        self.assertEqual(_shape(plan), [('Job', 500.0, 'AU0001')])
+        plan = m.plan_production(_ITEM_A, lbs=500.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [('Knit', 500.0, 'AU0001')])
+        # Still one Job (loop didn't split) backed by exactly one Knit.
+        _assert_single_job(self, plan, 'AU0001', 500.0, 5)
+        self.assertEqual(_knit_count(plan), 1)
 
     def test_top_exhausts_at_roll_boundary_no_waste(self):
         # top=200, btm=2000(slack), top_pct=0.4 → top_capacity=500=5 rolls.
         # 40D denier → fresh top is 2800 lbs.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('BeamLoad', 'top', 2800.0),
-            ('Job', 200.0, 'AU0001'),
+            ('Knit', 200.0, 'AU0001'),
         ])
+        # One Job spanning the beam swap, backed by two Knits.
+        _assert_single_job(self, plan, 'AU0001', 700.0, 7)
+        self.assertEqual(_knit_count(plan), 2)
 
     def test_top_exhausts_mid_roll_emits_waste(self):
         # Synthetic item with tgt_wt=300 (half-roll threshold = 150).
@@ -698,13 +736,16 @@ class PlanProductionLoopTests(unittest.TestCase):
         m = _make_machine(init_item=item_big_roll,
                           init_top_lbs=160.0, init_btm_lbs=2000.0)
         plan = m.plan_production(item_big_roll, lbs=600.0,
-                                 start_at='next_job_end')
+                                 start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 300.0, 'AU_BIG'),     # 1 complete roll before top runs out
+            ('Knit', 300.0, 'AU_BIG'),     # 1 complete roll before top runs out
             ('Waste', 100.0, 'AU_BIG'),   # sub-half partial, discarded
             ('BeamLoad', 'top', 2800.0),
-            ('Job', 300.0, 'AU_BIG'),     # 1 more complete roll on the new beam
+            ('Knit', 300.0, 'AU_BIG'),     # 1 more complete roll on the new beam
         ])
+        # One Job (2 whole rolls) across the swap; the Waste is excluded.
+        _assert_single_job(self, plan, 'AU_BIG', 600.0, 2)
+        self.assertEqual(_knit_count(plan), 2)
 
     def test_top_exhausts_mid_roll_yields_half_roll_plus_waste(self):
         # tgt_wt=300 ⇒ half-roll target = 150 lbs. init_top_lbs=200 gives
@@ -722,36 +763,45 @@ class PlanProductionLoopTests(unittest.TestCase):
         m = _make_machine(init_item=item_big_roll,
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(item_big_roll, lbs=600.0,
-                                 start_at='next_job_end')
+                                 start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 450.0, 'AU_HALF'),    # 1 whole roll (300) + 1 half-roll (150)
+            ('Knit', 450.0, 'AU_HALF'),    # 1 whole roll (300) + 1 half-roll (150)
             ('Waste', 50.0, 'AU_HALF'),   # over-half yarn that doesn't fit
             ('BeamLoad', 'top', 2800.0),
-            ('Job', 150.0, 'AU_HALF'),    # final-leg half-roll for remaining 150
+            ('Knit', 150.0, 'AU_HALF'),    # final-leg half-roll for remaining 150
         ])
+        # One Job across the swap: rolls (300, 150, 150) = 3 rolls / 600 lbs.
+        _assert_single_job(self, plan, 'AU_HALF', 600.0, 3)
+        self.assertEqual(_knit_count(plan), 2)
 
     def test_btm_exhausts_at_roll_boundary(self):
         # top=2000(slack), btm=300 → btm_capacity=500=5 rolls.
         # 60D denier → fresh btm is 1800 lbs.
         m = _make_machine(init_top_lbs=2000.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('BeamLoad', 'btm', 1800.0),
-            ('Job', 200.0, 'AU0001'),
+            ('Knit', 200.0, 'AU0001'),
         ])
+        # One Job spanning the btm-bar swap, backed by two Knits.
+        _assert_single_job(self, plan, 'AU0001', 700.0, 7)
+        self.assertEqual(_knit_count(plan), 2)
 
     def test_both_bars_exhaust_simultaneously(self):
         # top=200, btm=300: top_lbs/top_pct == btm_lbs/btm_pct == 500.
         # Both bars need a reload after the first 500 lbs.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_A, lbs=800.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_A, lbs=800.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
-            ('Job', 300.0, 'AU0001'),
+            ('Knit', 300.0, 'AU0001'),
         ])
+        # One Job across the simultaneous swap, backed by two Knits.
+        _assert_single_job(self, plan, 'AU0001', 800.0, 8)
+        self.assertEqual(_knit_count(plan), 2)
 
     def test_cascading_exhaustion_loops_more_than_twice(self):
         # After cycle 1 (Job 500 + reload both), cycle 2 produces 3000 lbs
@@ -759,47 +809,62 @@ class PlanProductionLoopTests(unittest.TestCase):
         # remaining 600.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         plan = m.plan_production(_ITEM_A, lbs=4100.0,
-                                 start_at='next_job_end')
+                                 start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
-            ('Job', 3000.0, 'AU0001'),
+            ('Knit', 3000.0, 'AU0001'),
             ('BeamLoad', 'btm', 1800.0),
-            ('Job', 600.0, 'AU0001'),
+            ('Knit', 600.0, 'AU0001'),
         ])
+        # One Job across three Knits (loop iterated more than twice).
+        _assert_single_job(self, plan, 'AU0001', 4100.0, 41)
+        self.assertEqual(_knit_count(plan), 3)
 
 
 # --- 2.4 start_at mode behavior -----------------------------------------
 
 class PlanProductionStartAtTests(unittest.TestCase):
 
-    def test_next_job_end_no_run_up(self):
+    def test_schedule_tail_no_run_up(self):
         # No current-item Jobs ahead of the changeover; first activity is
         # the StyleChange.
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=2800.0, init_btm_lbs=1800.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0,
-                                 start_at='next_job_end')
+                                 start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('StyleChange', 'AU0001', 'AU0002', False),
-            ('Job', 200.0, 'AU0002'),
+            ('Knit', 200.0, 'AU0002'),
         ])
-        self.assertEqual(plan[0].start, m.current_status.as_of)
+        self.assertEqual(plan.activities[0].start, m.current_status.as_of)
+        # schedule_tail mode: exactly one Job (the new item).
+        _assert_single_job(self, plan, 'AU0002', 200.0, 1)
 
     def test_next_runout_emits_run_up_before_changeover(self):
-        # Run-up emits Jobs of current_item until exhaustion, then changeover,
+        # Run-up emits Knits of current_item until exhaustion, then changeover,
         # then new production.
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=300.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),       # run-up of current item
+            ('Knit', 500.0, 'AU0001'),       # run-up of current item
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0002', False),
-            ('Job', 200.0, 'AU0002'),       # new item production
+            ('Knit', 200.0, 'AU0002'),       # new item production
         ])
+        # Two Jobs: run-up Job (current item) then the new item's Job.
+        self.assertEqual(len(plan.jobs), 2)
+        self.assertEqual(plan.jobs[0].item.id, 'AU0001')
+        self.assertEqual(
+            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (5, 500.0),
+        )
+        self.assertEqual(plan.jobs[1].item.id, 'AU0002')
+        self.assertEqual(
+            (plan.jobs[1].total_rolls, plan.jobs[1].total_lbs), (1, 200.0),
+        )
 
     def test_next_runout_with_partial_roll_emits_waste_in_run_up(self):
         # Current item has tgt_wt=300 (half-roll threshold = 150).
@@ -817,12 +882,19 @@ class PlanProductionStartAtTests(unittest.TestCase):
                           init_top_lbs=160.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 300.0, 'AU_RUN'),
+            ('Knit', 300.0, 'AU_RUN'),
             ('Waste', 100.0, 'AU_RUN'),
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU_RUN', 'AU0001', False),
-            ('Job', 100.0, 'AU0001'),
+            ('Knit', 100.0, 'AU0001'),
         ])
+        # Run-up produced a whole roll → two Jobs (run-up + new item).
+        self.assertEqual(len(plan.jobs), 2)
+        self.assertEqual(plan.jobs[0].item.id, 'AU_RUN')
+        self.assertEqual(
+            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (1, 300.0),
+        )
+        self.assertEqual(plan.jobs[1].item.id, 'AU0001')
 
     def test_next_runout_with_half_roll_partial_in_run_up(self):
         # Same setup as above (tgt_wt=300, init_top=200 ⇒ producible=500).
@@ -838,12 +910,39 @@ class PlanProductionStartAtTests(unittest.TestCase):
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 450.0, 'AU_HRUN'),    # 1 whole roll + 1 half-roll
+            ('Knit', 450.0, 'AU_HRUN'),    # 1 whole roll + 1 half-roll
             ('Waste', 50.0, 'AU_HRUN'),   # over-half yarn that doesn't fit
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU_HRUN', 'AU0001', False),
-            ('Job', 100.0, 'AU0001'),
+            ('Knit', 100.0, 'AU0001'),
         ])
+        # Run-up produced 1.5 rolls → two Jobs (run-up + new item).
+        self.assertEqual(len(plan.jobs), 2)
+        self.assertEqual(plan.jobs[0].item.id, 'AU_HRUN')
+        self.assertEqual(
+            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (2, 450.0),
+        )
+        self.assertEqual(plan.jobs[1].item.id, 'AU0001')
+
+    def test_next_runout_run_up_below_half_roll_yields_one_job(self):
+        # Current item A (tgt 100, half-roll 50). producible = 16/0.4 = 40,
+        # below the 50-lb half-roll floor — so the run-up emits only a
+        # Waste of A (no Knit) and creates NO run-up Job. Exactly one Job
+        # is produced: the new item's.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=16.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
+        # No run-up Knit of the current item — only a Waste of it.
+        self.assertFalse(any(
+            isinstance(a, Knit) and a.item is _ITEM_A
+            for a in plan.activities
+        ))
+        self.assertTrue(any(
+            isinstance(a, Waste) and a.item is _ITEM_A
+            for a in plan.activities
+        ))
+        # Exactly one Job — the new item's.
+        _assert_single_job(self, plan, 'AU0002', 200.0, 1)
 
 
 # --- 2.5 Purity and commit ----------------------------------------------
@@ -854,9 +953,11 @@ class PlanProductionPurityTests(unittest.TestCase):
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         before_status = m.current_status
         before_acts = m.activities
+        before_jobs = m.jobs
         m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
         self.assertEqual(m.current_status, before_status)
         self.assertEqual(m.activities, before_acts)
+        self.assertEqual(m.jobs, before_jobs)
 
     def test_two_calls_produce_identical_shape(self):
         # Activity ids necessarily differ between calls; structural shape
@@ -865,6 +966,7 @@ class PlanProductionPurityTests(unittest.TestCase):
         plan1 = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
         plan2 = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
         self.assertEqual(_shape(plan1), _shape(plan2))
+        self.assertEqual(_job_shape(plan1), _job_shape(plan2))
 
     def test_commit_yields_status_matching_manual_application(self):
         # plan_production + add_activities should leave current_status in the
@@ -873,11 +975,12 @@ class PlanProductionPurityTests(unittest.TestCase):
         m_manual = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
 
         plan = m_plan.plan_production(_ITEM_B, lbs=200.0,
-                                      start_at='next_job_end')
-        m_plan.add_activities(plan)
+                                      start_at='schedule_tail')
+        m_plan.add_activities(plan.activities)
+        m_plan.add_jobs(plan.jobs)
 
         manual_status = m_manual.current_status
-        for a in plan:
+        for a in plan.activities:
             manual_status = manual_status.apply_activity(a)
 
         for field in ('as_of', 'top_beam', 'btm_beam', 'top_lbs_remaining',
@@ -887,6 +990,8 @@ class PlanProductionPurityTests(unittest.TestCase):
                 getattr(manual_status, field),
                 f'field {field!r} differs',
             )
+        # add_jobs committed exactly the plan's Job records.
+        self.assertEqual(m_plan.jobs, plan.jobs)
 
 
 # --- 2.6 Timing ---------------------------------------------------------
@@ -899,32 +1004,32 @@ class PlanProductionTimingTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=300.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
-        self.assertEqual(plan[0].start, m.current_status.as_of)
-        for i in range(1, len(plan)):
+        self.assertEqual(plan.activities[0].start, m.current_status.as_of)
+        for i in range(1, len(plan.activities)):
             self.assertEqual(
-                plan[i].start, plan[i-1].end,
-                f'activity {i} ({type(plan[i]).__name__}) start '
-                f'{plan[i].start} != previous end {plan[i-1].end}',
+                plan.activities[i].start, plan.activities[i-1].end,
+                f'activity {i} ({type(plan.activities[i]).__name__}) start '
+                f'{plan.activities[i].start} != previous end {plan.activities[i-1].end}',
             )
 
     def test_job_duration_matches_rate(self):
         # 200 lbs of B at rate 100 lbs/h → 2h.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
-        job = next(a for a in plan if isinstance(a, Job))
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
+        job = next(a for a in plan.activities if isinstance(a, Knit))
         self.assertEqual(job.end - job.start, timedelta(hours=2))
 
     def test_style_change_duration_matches_simple_change_duration(self):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
 
     def test_beam_load_duration_matches_module_constant(self):
         from swmtplanner.schedule import BEAM_LOAD_DURATION
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='next_job_end')
-        bl = next(a for a in plan if isinstance(a, BeamLoad))
+        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='schedule_tail')
+        bl = next(a for a in plan.activities if isinstance(a, BeamLoad))
         self.assertEqual(bl.end - bl.start, BEAM_LOAD_DURATION)
 
     def test_activity_end_respects_workcal_gap(self):
@@ -934,9 +1039,9 @@ class PlanProductionTimingTests(unittest.TestCase):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0,
                           workcal=_WEEKDAY_9H)
         plan = m.plan_production(_ITEM_A, lbs=1000.0,
-                                 start_at='next_job_end')
-        self.assertEqual(plan[0].start, _START)
-        self.assertEqual(plan[0].end, datetime(2026, 5, 19, 10, 0))
+                                 start_at='schedule_tail')
+        self.assertEqual(plan.activities[0].start, _START)
+        self.assertEqual(plan.activities[0].end, datetime(2026, 5, 19, 10, 0))
 
 
 # --- 2.7 idle_for parameter ---------------------------------------------
@@ -945,40 +1050,40 @@ class PlanProductionIdleForTests(unittest.TestCase):
 
     def test_idle_for_default_emits_no_idle(self):
         m = _make_machine()
-        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end')
-        self.assertFalse(any(isinstance(a, Idle) for a in plan))
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
+        self.assertFalse(any(isinstance(a, Idle) for a in plan.activities))
 
     def test_idle_for_positive_emits_idle_first(self):
         m = _make_machine()
         plan = m.plan_production(_ITEM_A, lbs=100.0,
-                                 start_at='next_job_end',
+                                 start_at='schedule_tail',
                                  idle_for=timedelta(hours=6))
-        self.assertIsInstance(plan[0], Idle)
-        self.assertEqual(plan[0].start, m.current_status.as_of)
-        self.assertEqual(plan[0].end - plan[0].start, timedelta(hours=6))
+        self.assertIsInstance(plan.activities[0], Idle)
+        self.assertEqual(plan.activities[0].start, m.current_status.as_of)
+        self.assertEqual(plan.activities[0].end - plan.activities[0].start, timedelta(hours=6))
 
     def test_idle_precedes_run_up_in_next_runout(self):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=300.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout',
                                  idle_for=timedelta(hours=6))
-        # First is Idle; second is the run-up Job(A).
-        self.assertIsInstance(plan[0], Idle)
-        self.assertIsInstance(plan[1], Job)
-        self.assertEqual(plan[1].item, _ITEM_A)
+        # First is Idle; second is the run-up Knit(A).
+        self.assertIsInstance(plan.activities[0], Idle)
+        self.assertIsInstance(plan.activities[1], Knit)
+        self.assertEqual(plan.activities[1].item, _ITEM_A)
 
-    def test_idle_precedes_preamble_in_next_job_end(self):
+    def test_idle_precedes_preamble_in_schedule_tail(self):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end',
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail',
                                  idle_for=timedelta(hours=6))
         # First is Idle; second is StyleChange.
-        self.assertIsInstance(plan[0], Idle)
-        self.assertIsInstance(plan[1], StyleChange)
+        self.assertIsInstance(plan.activities[0], Idle)
+        self.assertIsInstance(plan.activities[1], StyleChange)
 
     def test_negative_idle_for_raises_value_error(self):
         m = _make_machine()
         with self.assertRaises(ValueError):
-            m.plan_production(_ITEM_A, lbs=100.0, start_at='next_job_end',
+            m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail',
                               idle_for=timedelta(hours=-1))
 
 
@@ -1011,24 +1116,24 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
         # current A → D: top yarn differs (30D RED), btm yarn matches.
         # Expect TapeOut('top') + BeamLoad(top, 2800) + StyleChange(False).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'top'),
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU0001', 'AU0004', False),
-            ('Job', 100.0, 'AU0004'),
+            ('Knit', 100.0, 'AU0004'),
         ])
 
     def test_different_btm_yarn_same_family(self):
         # current A → E: btm yarn differs (90D GREEN), top yarn matches.
         # Expect TapeOut('btm') + BeamLoad(btm, 1800) + StyleChange(False).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_E, lbs=100.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_E, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'btm'),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0005', False),
-            ('Job', 100.0, 'AU0005'),
+            ('Knit', 100.0, 'AU0005'),
         ])
 
     def test_different_yarn_on_both_bars_same_family(self):
@@ -1036,35 +1141,35 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
         # Expect TapeOut('both') + BeamLoad(top, 2800) + BeamLoad(btm, 1800)
         # + StyleChange(False).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'both'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0007', False),
-            ('Job', 100.0, 'AU0007'),
+            ('Knit', 100.0, 'AU0007'),
         ])
 
     def test_same_yarn_different_family(self):
         # current A → C: same yarn on both bars, family changes (A → C).
         # Expect StyleChange(True) only; no beam work.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('StyleChange', 'AU0001', 'AU0003', True),
-            ('Job', 150.0, 'AU0003'),
+            ('Knit', 150.0, 'AU0003'),
         ])
 
     def test_different_top_yarn_different_family(self):
         # current A → H: top yarn differs, btm yarn matches, family Q.
         # Expect TapeOut('top') + BeamLoad(top) + StyleChange(True).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_H, lbs=100.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_H, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'top'),
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU0001', 'AU0008', True),
-            ('Job', 100.0, 'AU0008'),
+            ('Knit', 100.0, 'AU0008'),
         ])
 
     def test_different_yarn_on_both_bars_different_family(self):
@@ -1072,13 +1177,13 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
         # Expect TapeOut('both') + BeamLoad(top) + BeamLoad(btm)
         # + StyleChange(True).
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='next_job_end')
+        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'both'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0006', True),
-            ('Job', 100.0, 'AU0006'),
+            ('Knit', 100.0, 'AU0006'),
         ])
 
 
@@ -1094,10 +1199,10 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),               # run-up of current item
+            ('Knit', 500.0, 'AU0001'),               # run-up of current item
             ('BeamLoad', 'top', 2800.0),            # exhausted bar reload
             ('StyleChange', 'AU0001', 'AU0004', False),
-            ('Job', 100.0, 'AU0004'),
+            ('Knit', 100.0, 'AU0004'),
         ])
 
     def test_one_bar_exhausted_other_yarn_does_not_match(self):
@@ -1108,12 +1213,12 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('TapeOut', 'btm'),                     # single, not 'both'
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0007', False),
-            ('Job', 100.0, 'AU0007'),
+            ('Knit', 100.0, 'AU0007'),
         ])
 
     def test_both_bars_exhaust_simultaneously_with_full_changeover(self):
@@ -1124,11 +1229,11 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
                           init_top_lbs=200.0, init_btm_lbs=300.0)
         plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Job', 500.0, 'AU0001'),
+            ('Knit', 500.0, 'AU0001'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0007', False),
-            ('Job', 100.0, 'AU0007'),
+            ('Knit', 100.0, 'AU0007'),
         ])
 
     def test_tape_out_both_never_appears_in_next_runout_mode(self):
@@ -1142,7 +1247,7 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
                 plan = m.plan_production(
                     new_item, lbs=100.0, start_at='next_runout',
                 )
-                bars = [a.bars for a in plan if isinstance(a, TapeOut)]
+                bars = [a.bars for a in plan.activities if isinstance(a, TapeOut)]
                 self.assertNotIn('both', bars)
 
     def test_style_change_is_family_change_reflects_family_comparison(self):
@@ -1151,7 +1256,7 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_runout')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertTrue(sc.is_family_change)
 
 
@@ -1161,16 +1266,16 @@ class PlanProductionStyleChangeDurationTests(unittest.TestCase):
 
     def test_simple_change_uses_simple_change_duration(self):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertFalse(sc.is_family_change)
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
 
     def test_family_change_uses_family_change_duration(self):
         # A → C is a family change with no beam work.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertTrue(sc.is_family_change)
         self.assertEqual(sc.end - sc.start, _FAMILY_CHANGE)
 
@@ -1182,11 +1287,11 @@ class PlanProductionStyleChangeDurationTests(unittest.TestCase):
         m_long = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0,
                                family_change_duration=long_family)
         plan_short = m_short.plan_production(_ITEM_C, lbs=150.0,
-                                             start_at='next_job_end')
+                                             start_at='schedule_tail')
         plan_long = m_long.plan_production(_ITEM_C, lbs=150.0,
-                                           start_at='next_job_end')
-        sc_short = next(a for a in plan_short if isinstance(a, StyleChange))
-        sc_long = next(a for a in plan_long if isinstance(a, StyleChange))
+                                           start_at='schedule_tail')
+        sc_short = next(a for a in plan_short.activities if isinstance(a, StyleChange))
+        sc_long = next(a for a in plan_long.activities if isinstance(a, StyleChange))
         self.assertEqual(sc_short.end - sc_short.start, _FAMILY_CHANGE)
         self.assertEqual(sc_long.end - sc_long.start, long_family)
 
@@ -1212,8 +1317,8 @@ class PlanProductionNewMachineTests(unittest.TestCase):
         m = _make_machine(
             init_top_lbs=2800.0, init_btm_lbs=1800.0, is_new=True,
         )
-        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertFalse(sc.is_family_change)
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
 
@@ -1223,8 +1328,8 @@ class PlanProductionNewMachineTests(unittest.TestCase):
         m = _make_machine(
             init_top_lbs=2800.0, init_btm_lbs=1800.0, is_new=True,
         )
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertFalse(sc.is_family_change)
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
 
@@ -1237,8 +1342,8 @@ class PlanProductionNewMachineTests(unittest.TestCase):
             init_top_lbs=2800.0, init_btm_lbs=1800.0,
             family_change_duration=long_family, is_new=True,
         )
-        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertEqual(sc.end - sc.start, _SIMPLE_CHANGE)
         self.assertFalse(sc.is_family_change)
 
@@ -1246,8 +1351,8 @@ class PlanProductionNewMachineTests(unittest.TestCase):
         # Regression check: the default (is_new=False) path is
         # unchanged.
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='next_job_end')
-        sc = next(a for a in plan if isinstance(a, StyleChange))
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail')
+        sc = next(a for a in plan.activities if isinstance(a, StyleChange))
         self.assertTrue(sc.is_family_change)
         self.assertEqual(sc.end - sc.start, _FAMILY_CHANGE)
 
@@ -1258,15 +1363,15 @@ class PlanProductionTapeOutDurationTests(unittest.TestCase):
 
     def test_single_tape_out_uses_single_duration(self):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_job_end')
-        to = next(a for a in plan if isinstance(a, TapeOut))
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        to = next(a for a in plan.activities if isinstance(a, TapeOut))
         self.assertEqual(to.bars, 'top')
         self.assertEqual(to.end - to.start, TAPE_OUT_SINGLE_DURATION)
 
     def test_both_tape_out_uses_both_duration(self):
         m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
-        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='next_job_end')
-        to = next(a for a in plan if isinstance(a, TapeOut))
+        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='schedule_tail')
+        to = next(a for a in plan.activities if isinstance(a, TapeOut))
         self.assertEqual(to.bars, 'both')
         self.assertEqual(to.end - to.start, TAPE_OUT_BOTH_DURATION)
 

@@ -20,36 +20,36 @@ _FLOAT_EPS = 1e-6
 class DecisionPoint:
     """A point in time at which a machine could begin new production.
 
-    Each machine has at most two: `next_job_end` (the schedule tail) and
+    Each machine has at most two: `schedule_tail` (the schedule tail) and
     `next_runout` (the forward-extrapolated time at which the current
     item's beam(s) would naturally exhaust). They collapse to one when
     they coincide — e.g., when the schedule has just exhausted a beam at
     its tail. The `start_at` value matches the `Machine.plan_production`
     argument of the same name."""
     machine_id: str
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     time: datetime
 
 
 def eligible_decision_points(state: State) -> list[DecisionPoint]:
     """Return every machine's in-window decision points
     (`time <= state.window_end`). Deduplicates the case where a
-    machine's `next_job_end` and `next_runout` coincide — only the
-    `'next_job_end'` entry is emitted in that case, since the two are
+    machine's `schedule_tail` and `next_runout` coincide — only the
+    `'schedule_tail'` entry is emitted in that case, since the two are
     behaviorally identical when there's no current-item run-up to
     perform.
 
-    `next_runout >= next_job_end` always, so a `next_runout` in the
-    window implies `next_job_end` is in the window too — no asymmetric
+    `next_runout >= schedule_tail` always, so a `next_runout` in the
+    window implies `schedule_tail` is in the window too — no asymmetric
     case to worry about."""
     out: list[DecisionPoint] = []
     for machine_id, machine in state.machines.items():
-        job_end = machine.next_job_end
+        job_end = machine.schedule_tail
         runout = machine.next_runout
         if job_end <= state.window_end:
             out.append(DecisionPoint(
                 machine_id=machine_id,
-                start_at='next_job_end',
+                start_at='schedule_tail',
                 time=job_end,
             ))
         if runout != job_end and runout <= state.window_end:

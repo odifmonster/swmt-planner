@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Iterable, Literal, TYPE_CHECKING
 
 from swmtplanner.support import HasID
 from swmtplanner.products import BeamSet
 from swmtplanner.schedule.activity import (
-    Activity, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Activity, Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
     BEAM_LOAD_DURATION, TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
 )
+from swmtplanner.schedule.job import Job, Roll
 from .status import Status
 
 if TYPE_CHECKING:
@@ -42,10 +43,20 @@ _FLOAT_EPS = 1e-6
 _ROLL_TOLERANCE = 1e-2
 
 
+@dataclass(frozen=True)
+class ProductionPlan:
+    """Return value of `plan_production`: the activity-schedule and
+    production-schedule additions for one planning call. Committed
+    together via `add_activities(plan.activities)` +
+    `add_jobs(plan.jobs)`. A basic data record — no behavior."""
+    activities: tuple[Activity, ...]
+    jobs: tuple[Job, ...]
+
+
 class Machine(HasID[str]):
     """Single knitting machine. Owns an append-only sequence of activities
-    and the derived `Status` after each. `plan_production` produces a list
-    of activities to enact a desired production goal — handling the
+    and the derived `Status` after each. `plan_production` produces a
+    `ProductionPlan` to enact a desired production goal — handling the
     changeover preamble (tape-outs, beam loads, style change as needed),
     optional run-up of the current item, and the new item's production
     loop with mid-stream reloads when beams exhaust mid-request."""
@@ -79,6 +90,7 @@ class Machine(HasID[str]):
             is_idle=True,
         )
         self._activities: list[Activity] = []
+        self._jobs: list[Job] = []
         self._current_status: Status = self._initial_status
 
     @property
@@ -112,7 +124,14 @@ class Machine(HasID[str]):
         return tuple(self._activities)
 
     @property
-    def next_job_end(self) -> datetime:
+    def jobs(self) -> tuple[Job, ...]:
+        """The committed production schedule — `Job` records appended via
+        `add_jobs`. Parallel to `activities`; `Job`s have no machine-state
+        effect (they record the rolls produced, not machine time)."""
+        return tuple(self._jobs)
+
+    @property
+    def schedule_tail(self) -> datetime:
         """End time of the last scheduled activity, or `initial_status.as_of`
         if no activities have been added."""
         return self._current_status.as_of
@@ -157,7 +176,7 @@ class Machine(HasID[str]):
 
         Pure: does not mutate any machine state. Implementation
         re-uses `plan_production` by asking for a generous upper bound
-        and tallying the lbs of `Job` activities whose execution
+        and tallying the lbs of `Knit` activities whose execution
         overlaps `[start, end)`."""
         as_of = self._current_status.as_of
         if start is not None and start < as_of:
@@ -191,20 +210,20 @@ class Machine(HasID[str]):
         )
         idle_for = timedelta(hours=bridge_hours)
         plan = self.plan_production(
-            item, upper_lbs_bound, start_at='next_job_end',
+            item, upper_lbs_bound, start_at='schedule_tail',
             idle_for=idle_for,
         )
 
-        # Tally lbs of `Job`s for `item` that overlap
-        # [effective_start, end). Activities other than Job (TapeOut,
+        # Tally lbs of `Knit`s for `item` that overlap
+        # [effective_start, end). Activities other than Knit (TapeOut,
         # BeamLoad, StyleChange, Waste, Idle) consume time but produce
         # nothing; their effect on production capacity is already
-        # reflected in subsequent Jobs' start times.
+        # reflected in subsequent Knits' start times.
         total_lbs = 0.0
-        for a in plan:
+        for a in plan.activities:
             if a.start >= end:
                 break
-            if not isinstance(a, Job):
+            if not isinstance(a, Knit):
                 continue
             if a.item != item:
                 continue
@@ -290,15 +309,21 @@ class Machine(HasID[str]):
             self._activities.append(a)
             self._current_status = self._current_status.apply_activity(a)
 
+    def add_jobs(self, jobs: Iterable[Job]) -> None:
+        """Append `Job` records to the production schedule. Jobs carry no
+        machine-state effect, so (unlike `add_activities`) this does not
+        touch `current_status` — it only records what was produced."""
+        self._jobs.extend(jobs)
+
     # ----- plan_production --------------------------------------------
 
     def plan_production(
         self,
         item: 'Greige',
         lbs: float,
-        start_at: Literal['next_job_end', 'next_runout'],
+        start_at: Literal['schedule_tail', 'next_runout'],
         idle_for: timedelta = timedelta(0),
-    ) -> list[Activity]:
+    ) -> 'ProductionPlan':
         """Plan production of `lbs` of `item` on this machine. Pure — does
         not mutate state.
 
@@ -310,23 +335,31 @@ class Machine(HasID[str]):
 
         Walk (see DESIGN.md for details):
           0. Optional `Idle` (when `idle_for > 0`).
-          1. Run-up — `'next_runout'` mode emits Jobs (and a possible
+          1. Run-up — `'next_runout'` mode emits Knits (and a possible
              Waste) of the current item until a beam exhausts;
-             `'next_job_end'` mode emits nothing here.
+             `'schedule_tail'` mode emits nothing here.
           2. Changeover preamble — per-bar `TapeOut`/`BeamLoad` for any
              bar whose yarn doesn't match the new item, `BeamLoad` only
              for any empty bar, then `StyleChange` if the item differs.
-          3. Production loop — Jobs/Waste/BeamLoad cycles until `lbs` are
-             complete."""
-        if start_at not in ('next_job_end', 'next_runout'):
+          3. Production loop — Knits/Waste/BeamLoad cycles until `lbs` are
+             complete.
+
+        Returns a `ProductionPlan` carrying both the emitted activities
+        and the production-schedule `Job` records: one `Job` for the new
+        item, plus a run-up `Job` for the current item in `'next_runout'`
+        mode (omitted when the run-up yields no whole rolls). Each
+        `Job`'s rolls accumulate across any mid-run `BeamLoad`s, so a
+        single `Job` can straddle a beam swap."""
+        if start_at not in ('schedule_tail', 'next_runout'):
             raise ValueError(
-                f"start_at must be 'next_job_end' or 'next_runout', "
+                f"start_at must be 'schedule_tail' or 'next_runout', "
                 f'got {start_at!r}'
             )
         if idle_for < timedelta(0):
             raise ValueError(f'idle_for must be non-negative, got {idle_for}')
 
         emitted: list[Activity] = []
+        jobs: list[Job] = []
         working = self._current_status
 
         # 0. Optional idle gap at the head of the plan.
@@ -335,23 +368,26 @@ class Machine(HasID[str]):
 
         # 1. Run-up (only in 'next_runout' mode).
         if start_at == 'next_runout':
-            working = self._emit_run_up(emitted, working)
+            working = self._emit_run_up(emitted, working, jobs)
 
         # 2. Changeover preamble.
         working = self._emit_preamble(emitted, working, item)
 
         # 3. Production loop for the new item.
-        self._emit_production_loop(emitted, working, item, lbs)
-        return emitted
+        self._emit_production_loop(emitted, working, item, lbs, jobs)
+        return ProductionPlan(activities=tuple(emitted), jobs=tuple(jobs))
 
     # ----- private plan_production helpers -----
 
-    def _emit_run_up(self, emitted: list[Activity], working: Status) -> Status:
+    def _emit_run_up(
+        self, emitted: list[Activity], working: Status, jobs: list[Job],
+    ) -> Status:
         """Produce `working.current_item` until a beam exhausts. Emits a
-        `Job` for whole rolls plus any half-roll-or-larger partial, and a
+        `Knit` for whole rolls plus any half-roll-or-larger partial, and a
         `Waste` for any sub-half-roll partial — see `_split_roll` for the
-        rule. Returns the working status after the run-up (at least one
-        beam at 0 lbs)."""
+        rule. Appends one run-up `Job` of the produced rolls to `jobs`
+        (omitted when the run-up yields no whole rolls). Returns the
+        working status after the run-up (at least one beam at 0 lbs)."""
         cur = working.current_item
         cfg = cur.configuration
         producible = min(
@@ -360,10 +396,13 @@ class Machine(HasID[str]):
         )
         job_lbs, waste_lbs = _split_roll(producible, cur.tgt_wt)
 
+        rolls: list[Roll] = []
         if job_lbs > 0:
-            working = self._emit_job(emitted, working, cur, job_lbs)
+            working = self._emit_knit(emitted, working, cur, job_lbs, rolls)
         if waste_lbs > 0:
             working = self._emit_waste(emitted, working, cur, waste_lbs)
+        if rolls:
+            jobs.append(Job(item=cur, rolls=tuple(rolls)))
         return _clamp_zero_lbs(working)
 
     def _emit_preamble(
@@ -439,31 +478,39 @@ class Machine(HasID[str]):
 
     def _emit_production_loop(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', lbs: float,
+        item: 'Greige', lbs: float, jobs: list[Job],
     ) -> None:
-        """Emit Jobs (and Wastes / BeamLoads) until `lbs` of `item` are
-        produced. In Phase 2 the BeamLoads emitted here use the same yarn
-        as `item` (since the preamble already guaranteed that)."""
+        """Emit Knits (and Wastes / BeamLoads) until `lbs` of `item` are
+        produced, then append one `Job` of the accumulated rolls to
+        `jobs`. The rolls accumulate across every mid-run `BeamLoad`, so
+        the single emitted `Job` straddles any beam swaps. The BeamLoads
+        emitted here use the same yarn as `item` (the preamble already
+        guaranteed that)."""
         cfg = item.configuration
         remaining = lbs
+        rolls: list[Roll] = []
 
         while remaining > _FLOAT_EPS:
             top_capacity = working.top_lbs_remaining / cfg.top_pct
             btm_capacity = working.btm_lbs_remaining / cfg.btm_pct
             producible = min(top_capacity, btm_capacity)
 
-            # All remaining fits in this beam state — single Job and done.
+            # All remaining fits in this beam state — final Knit, done.
             if producible >= remaining - _FLOAT_EPS:
-                working = self._emit_job(emitted, working, item, remaining)
-                return
+                working = self._emit_knit(
+                    emitted, working, item, remaining, rolls,
+                )
+                break
 
             # Producible < remaining — produce up to runout, then reload.
             # The `_split_roll` partition applies the half-roll rule:
             # the partial counts as a smaller-than-target usable roll
-            # (Job) when at or above `tgt_wt / 2`, else as Waste.
+            # (Knit) when at or above `tgt_wt / 2`, else as Waste.
             job_lbs, waste_lbs = _split_roll(producible, item.tgt_wt)
             if job_lbs > 0:
-                working = self._emit_job(emitted, working, item, job_lbs)
+                working = self._emit_knit(
+                    emitted, working, item, job_lbs, rolls,
+                )
                 remaining -= job_lbs
             if waste_lbs > 0:
                 working = self._emit_waste(emitted, working, item, waste_lbs)
@@ -481,21 +528,27 @@ class Machine(HasID[str]):
                     emitted, working, 'btm', BeamSet(cfg.btm_beam),
                 )
 
+        if rolls:
+            jobs.append(Job(item=item, rolls=tuple(rolls)))
+
     # ----- single-activity emission helpers -----
 
-    def _emit_job(
+    def _emit_knit(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', lbs: float,
+        item: 'Greige', lbs: float, rolls: list[Roll],
     ) -> Status:
+        """Emit one `Knit` activity for `lbs` of `item` and append the
+        rolls it completes to `rolls`. A `Knit` is one uninterrupted run;
+        whether it ends a `Job` is the caller's concern (the run-up and
+        production-loop helpers own the `rolls` list and package it into a
+        `Job`), so this only contributes rolls."""
         rate = item.get_rate_on_mchn(self._id)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
-        rolls = _compute_rolls(
-            start, lbs, rate, item.tgt_wt, self._workcal,
+        emitted.append(Knit(start=start, end=end, item=item, lbs=lbs))
+        rolls.extend(
+            _compute_rolls(start, lbs, rate, item.tgt_wt, self._workcal)
         )
-        emitted.append(Job(
-            start=start, end=end, item=item, lbs=lbs, rolls=rolls,
-        ))
         return working.apply_activity(emitted[-1])
 
     def _emit_waste(
@@ -620,20 +673,19 @@ def _split_roll(producible: float, tgt_wt: float) -> tuple[float, float]:
 def _compute_rolls(
     start: datetime, lbs: float, rate: float, tgt_wt: float,
     workcal: 'WorkCal',
-) -> tuple[tuple[float, datetime], ...]:
-    """Break a Job's total `lbs` into a sequence of per-roll deliveries
-    `((roll_lbs, completion_time), ...)`. Each entry is either a whole
-    roll (`tgt_wt` lbs, within tolerance) or a half-roll
-    (`tgt_wt / 2`, within tolerance). The per-entry lbs sum to exactly
+) -> tuple[Roll, ...]:
+    """Break a `Knit`'s `lbs` into a sequence of `Roll`s. Each `Roll` is
+    either a whole roll (`tgt_wt` lbs, within tolerance) or a half-roll
+    (`tgt_wt / 2`, within tolerance). The per-roll lbs sum to exactly
     `lbs` (mass conservation); when the total snaps to a clean N-roll
-    count under `_ROLL_TOLERANCE`, the lbs are distributed evenly
-    across the N rolls. Completion times respect `workcal`.
+    count under `_ROLL_TOLERANCE`, the lbs are distributed evenly across
+    the N rolls. Completion times respect `workcal`.
 
-    Inputs are expected to come from `_emit_job`, where `lbs` is
-    already shaped by `_split_roll`'s half-roll rule — so a non-snap
-    `lbs` either has a clean half-roll partial (`tgt_wt / 2` ±
-    tolerance) or is a single sub-tgt_wt final-leg residual."""
-    rolls: list[tuple[float, datetime]] = []
+    Inputs are expected to come from `_emit_knit`, where `lbs` is already
+    shaped by `_split_roll`'s half-roll rule — so a non-snap `lbs` either
+    has a clean half-roll partial (`tgt_wt / 2` ± tolerance) or is a
+    single sub-tgt_wt final-leg residual."""
+    rolls: list[Roll] = []
     cumulative = 0.0
 
     # Snap to clean N-roll count if close. Distribute lbs equally
@@ -648,9 +700,11 @@ def _compute_rolls(
         roll_lbs = lbs / n_rolls_rounded
         for _ in range(n_rolls_rounded):
             cumulative += roll_lbs
-            rolls.append((
-                roll_lbs,
-                workcal.offset_work_hours(start, cumulative / rate),
+            rolls.append(Roll(
+                lbs=roll_lbs,
+                completion_time=workcal.offset_work_hours(
+                    start, cumulative / rate,
+                ),
             ))
         return tuple(rolls)
 
@@ -661,15 +715,20 @@ def _compute_rolls(
     n_full = int(n_rolls_exact)
     for _ in range(n_full):
         cumulative += tgt_wt
-        rolls.append((
-            tgt_wt, workcal.offset_work_hours(start, cumulative / rate),
+        rolls.append(Roll(
+            lbs=tgt_wt,
+            completion_time=workcal.offset_work_hours(
+                start, cumulative / rate,
+            ),
         ))
     residual = lbs - cumulative
     if residual > _FLOAT_EPS:
         cumulative += residual
-        rolls.append((
-            residual,
-            workcal.offset_work_hours(start, cumulative / rate),
+        rolls.append(Roll(
+            lbs=residual,
+            completion_time=workcal.offset_work_hours(
+                start, cumulative / rate,
+            ),
         ))
     return tuple(rolls)
 

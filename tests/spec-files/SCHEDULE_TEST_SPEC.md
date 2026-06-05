@@ -14,9 +14,12 @@ where noted as a regression check.
 ## Phase 1 — Status tracking and `next_runout`
 
 The current implementation. The class has: constructor, `initial_status`,
-`current_status`, `activities`, `next_job_end`, `next_runout`, `status_at`,
-`add_activities`. Tests in this phase construct activity sequences manually
-(without `plan_production`) and verify the derived status is correct.
+`current_status`, `activities`, `jobs`, `schedule_tail`, `next_runout`,
+`status_at`, `add_activities`, `add_jobs`. Tests in this phase construct
+activity sequences manually (without `plan_production`) and verify the
+derived status is correct. The production schedule (`jobs` / `add_jobs`)
+and `plan_production`'s `Job` output are covered from Phase 2 on, where
+`Job` records are produced.
 
 ### 1.1 Construction and initial state
 
@@ -26,8 +29,9 @@ The current implementation. The class has: constructor, `initial_status`,
       `current_item == init_item`, `current_family == init_item.family`
 3. `current_status == initial_status` immediately after construction
 4. `activities` is an empty tuple
-5. `next_job_end == initial_status.as_of`
+5. `schedule_tail == initial_status.as_of`
 6. `next_runout` matches a hand-computed value for the initial state
+7. `jobs` is an empty tuple
 
 ### 1.2 Per-activity-type status update
 
@@ -36,12 +40,12 @@ exactly one activity, and verify `current_status` against a hand-computed
 expected. Also verify `current_status == status_at(activity.end)` to confirm
 the cached tail matches the walked value.
 
-1. `Job`
+1. `Knit`
     - lbs consumed from each bar in proportion to `top_pct` / `btm_pct`
-    - `current_item == job.item`
-    - `as_of == job.end`, `is_idle == True`
+    - `current_item == knit.item`
+    - `as_of == knit.end`, `is_idle == True`
 2. `Waste`
-    - same consumption math as `Job`
+    - same consumption math as `Knit`
     - `current_item` is unchanged — `Waste` does not switch the item
 3. `TapeOut`
     1. `bars='top'`: top beam → None, `top_lbs_remaining` → 0; btm unchanged
@@ -70,7 +74,7 @@ the cached tail matches the walked value.
 
 1. Adding multiple activities in one call applies them in order
     - use a realistic preamble: `TapeOut('both') + BeamLoad(top) +
-      BeamLoad(btm) + StyleChange + Job`
+      BeamLoad(btm) + StyleChange + Knit`
     - assert `current_status` matches the manually computed final state
 2. Adding activities in multiple calls produces the same `current_status`
    as adding them in one call (incremental cache equals one-shot cache)
@@ -98,7 +102,7 @@ the cached tail matches the walked value.
     1. top exhausts first: `top_lbs / top_pct < btm_lbs / btm_pct`
     2. btm exhausts first
     3. Both simultaneous (equal ratios)
-2. After a `Job` that updates lbs, `next_runout` reflects the new state
+2. After a `Knit` that updates lbs, `next_runout` reflects the new state
 3. After a `BeamLoad` of one bar, `next_runout` reflects the refilled lbs
 4. After a `StyleChange` to a different item, `next_runout` is recomputed
    at the **new** item's rate and pcts
@@ -111,6 +115,19 @@ the cached tail matches the walked value.
 `current_item` is non-nullable: a machine is always programmed to produce
 something. There is no "no current item" state to test against.
 
+### 1.6 `add_jobs` / `jobs` (production schedule)
+
+The production schedule is parallel to the activity schedule and carries
+no machine-state effect.
+
+1. `add_jobs` appends `Job` records to `jobs` in order; `jobs` reflects the
+   full appended history
+2. `add_jobs` does **not** change `current_status` (a `Job` records the
+   rolls produced, not machine time — only `add_activities` advances the
+   status tail)
+3. `add_activities` and `add_jobs` are independent: adding activities leaves
+   `jobs` untouched, and adding jobs leaves `activities` untouched
+
 ## Phase 2 — Partial `plan_production` (same-yarn + same-family only)
 
 `plan_production(item, lbs, start_at)` is added with a deliberate
@@ -121,6 +138,14 @@ the item differs.
 
 The production loop is fully implemented in this phase. Mid-stream beam
 exhaustion still emits `BeamLoad` (a fresh beam of the same yarn).
+
+`plan_production` returns a `ProductionPlan(activities, jobs)`. These tests
+assert on both halves: the **activity stream** (`plan.activities` — the
+`Knit` / `Waste` / `BeamLoad` / `StyleChange` / `Idle` sequence and each
+activity's `lbs`) and the **production records** (`plan.jobs` — the `Job`
+objects, each holding the `Roll`s its `Knit`(s) produced). A single `Job`
+accumulates rolls across any mid-run `BeamLoad`, so one `Job` can be backed
+by more than one `Knit` activity.
 
 ### 2.1 Input acceptance
 
@@ -141,16 +166,18 @@ exhaustion still emits `BeamLoad` (a fresh beam of the same yarn).
 ### 2.3 Production loop
 
 For all of these, request a multiple of `item.tgt_wt` and verify the
-emitted sequence shape, item references, and lbs per activity.
+emitted **activity** sequence shape, item references, and `Knit.lbs` per
+activity. The production loop emits `Knit`s (not `Job`s); the `Job` record
+is checked separately per the Job-object rule below.
 
-1. Single roll, no mid-stream exhaustion: one `Job` of the requested lbs
-2. Multiple rolls, no mid-stream exhaustion: one `Job` for the full lbs
+1. Single roll, no mid-stream exhaustion: one `Knit` of the requested lbs
+2. Multiple rolls, no mid-stream exhaustion: one `Knit` for the full lbs
    (the loop does not split when beams have capacity)
 3. Mid-stream exhaustion exactly at a roll boundary
-    - `Job(complete_rolls) + BeamLoad(top) + Job(remaining)`
+    - `Knit(complete_rolls) + BeamLoad(top) + Knit(remaining)`
     - no `Waste` emitted
 4. Mid-stream exhaustion mid-roll
-    - `Job(complete_rolls) + Waste(partial) + BeamLoad(top) + Job(remaining)`
+    - `Knit(complete_rolls) + Waste(partial) + BeamLoad(top) + Knit(remaining)`
 5. Mid-stream exhaustion of the btm bar (single)
 6. Both bars exhaust simultaneously
     - set top/btm lbs so `top_lbs / top_pct == btm_lbs / btm_pct`
@@ -159,34 +186,62 @@ emitted sequence shape, item references, and lbs per activity.
 7. Cascading exhaustion: the freshly loaded beam also exhausts before the
    request is satisfied (loop iterates more than twice)
 
+**Job object produced by the loop.** `plan.jobs` contains exactly one `Job`
+for `item`, regardless of how many `Knit`s back it. Its `total_lbs` equals
+the requested lbs and `total_rolls` equals the expected roll count (`Waste`
+lbs are **not** part of the `Job`). The backing-`Knit` count distinguishes
+the no-reload and reload cases:
+
+- Cases 1–2 (no mid-job `BeamLoad`): exactly **one** `Knit` activity
+  corresponds to the single `Job`.
+- Cases 3–7 (one or more mid-job `BeamLoad`s): **multiple** `Knit`
+  activities correspond to the single `Job` — the `Job`'s rolls span the
+  beam-swap boundary, with roll `completion_time`s strictly increasing
+  across it.
+
 ### 2.4 `start_at` mode behavior
 
-1. `start_at='next_job_end'`
+1. `start_at='schedule_tail'`
     - the first emitted activity's `start == current_status.as_of`
     - no run-up activities of the current item
+    - `plan.jobs` contains exactly one `Job` (the new item)
 2. `start_at='next_runout'`
-    - run-up emits `Job`(s) of `current_item` for complete rolls until
+    - run-up emits `Knit`(s) of `current_item` for complete rolls until
       beam exhaustion, plus a `Waste` of `current_item` for any partial
     - then `BeamLoad` for the exhausted bar(s) (no `TapeOut`)
     - then `StyleChange` if `to_item != current_item`
     - then the new item's production loop
+    - **two `Job`s produced**: a run-up `Job` of `current_item` (its
+      complete rolls) followed by the new item's `Job`, in that order —
+      `plan.jobs == (run_up_job, new_item_job)`
+3. `start_at='next_runout'`, run-up yields no whole/half roll
+    - the current item's remaining yarn is below half a roll
+      (`producible < tgt_wt / 2`), so the run-up emits only a `Waste`
+      (no `Knit`) and creates no run-up `Job`
+    - **one `Job` produced**: `plan.jobs` contains only the new item's
+      `Job`
 
 ### 2.5 Purity and commit
 
-1. `plan_production` does not mutate `current_status`, `activities`, or the
-   schedule tail
-    - call twice with the same args; the two plans must be activity-shape
-      equal (same types, item refs, lbs, durations), allowing only the
-      auto-incremented activity ids to differ
-2. After `add_activities(plan)`, `current_status` matches the status
-   computed by manually applying each activity in the plan
+1. `plan_production` does not mutate `current_status`, `activities`,
+   `jobs`, or the schedule tail
+    - call twice with the same args; the two plans must be shape-equal on
+      both halves — `plan.activities` (same types, item refs, `lbs`,
+      durations) and `plan.jobs` (same item refs, per-`Roll` `lbs` and
+      `completion_time` offsets) — allowing only auto-incremented activity
+      / job ids to differ
+2. After `add_activities(plan.activities)`, `current_status` matches the
+   status computed by manually applying each activity in the plan
+3. After `add_jobs(plan.jobs)`, `machine.jobs` contains exactly those `Job`
+   records and `current_status` is unchanged by them (Jobs carry no
+   machine-state effect)
 
 ### 2.6 Timing
 
 1. Each activity's `start` equals the previous activity's `end` (or
    `current_status.as_of` for the first activity)
 2. Durations match the design's duration table
-    - `Job` / `Waste`: `lbs / item.get_rate_on_mchn(machine.id)`
+    - `Knit` / `Waste`: `lbs / item.get_rate_on_mchn(machine.id)`
     - `BeamLoad`: `BEAM_LOAD_DURATION`
     - `StyleChange`: `simple_change_duration` (Phase 2 only emits the
       simple variant)
@@ -199,10 +254,10 @@ emitted sequence shape, item references, and lbs per activity.
 2. `idle_for > 0`: first emitted activity is an `Idle` of that duration
     - its `start` equals `current_status.as_of`
     - its `end - start` reflects work-hour offset (matches workcal
-      semantics, just like Job/changeover durations)
+      semantics, just like Knit/changeover durations)
 3. Idle precedes the run-up in `'next_runout'` mode (it is the very first
-   activity, ahead of `Job`s of the current item)
-4. Idle precedes the preamble in `'next_job_end'` mode (it is the very
+   activity, ahead of `Knit`s of the current item)
+4. Idle precedes the preamble in `'schedule_tail'` mode (it is the very
    first activity, ahead of any `StyleChange`)
 5. `idle_for < timedelta(0)` raises `ValueError`
 

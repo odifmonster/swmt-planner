@@ -30,7 +30,7 @@ __all__ = [
 @dataclass(frozen=True)
 class DecisionPoint:
     machine_id: str
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     time: datetime
 
 

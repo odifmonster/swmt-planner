@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from swmtplanner.schedule.activity import (
-    Activity, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Activity, Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
 )
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ class Status:
         `self`. Pure: `self` is not mutated. The returned status's `as_of`
         is `activity.end` and `is_idle` is True (the activity just finished;
         nothing is in progress at exactly `activity.end`)."""
-        if isinstance(activity, Job):
+        if isinstance(activity, Knit):
             cfg = activity.item.configuration
             return Status(
                 as_of=activity.end,

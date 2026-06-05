@@ -162,13 +162,12 @@ class Costing:
         other machines use their current counts. Adds the move's
         cross-cutting contributions (priority, level-loading,
         old-machine) read off `ctx`."""
-        # Group plan's Jobs by their item.id. Multiple items can appear
-        # in a single plan (the 'next_runout' run-up may add Jobs of the
-        # current item ahead of the new item's production).
+        # Group the plan's Job records by their item.id. A single plan
+        # can carry Jobs for more than one item (the 'next_runout' run-up
+        # adds a Job of the current item ahead of the new item's).
         jobs_by_item: dict[str, list[Job]] = {}
-        for a in move.plan:
-            if isinstance(a, Job):
-                jobs_by_item.setdefault(a.item.id, []).append(a)
+        for job in move.plan.jobs:
+            jobs_by_item.setdefault(job.item.id, []).append(job)
 
         total = 0.0
         # Demand: cost_if for items touched by the plan, current for the rest.
@@ -191,7 +190,7 @@ class Costing:
         for machine_id, machine in state.machines.items():
             if machine_id == move.machine_id:
                 total += self._schedule_penalty_for(
-                    list(machine.activities) + list(move.plan),
+                    list(machine.activities) + list(move.plan.activities),
                     machine.workcal,
                 )
             else:
@@ -273,9 +272,8 @@ class Costing:
         # Demand: per-item weighted contributions. cost_if for items
         # touched by move.plan, current views for the rest.
         jobs_by_item: dict[str, list[Job]] = {}
-        for a in move.plan:
-            if isinstance(a, Job):
-                jobs_by_item.setdefault(a.item.id, []).append(a)
+        for job in move.plan.jobs:
+            jobs_by_item.setdefault(job.item.id, []).append(job)
         lateness_by_item: dict[str, float] = {}
         drainage_by_item: dict[str, float] = {}
         carrying_by_item: dict[str, float] = {}
@@ -308,7 +306,7 @@ class Costing:
         tos_q = tob_q = fc_q = it_q = 0.0
         for machine_id, machine in state.machines.items():
             if machine_id == move.machine_id:
-                activities = list(machine.activities) + list(move.plan)
+                activities = list(machine.activities) + list(move.plan.activities)
             else:
                 activities = machine.activities
             stos, stob, sfc, sit = self._schedule_quantities_for(
@@ -323,8 +321,8 @@ class Costing:
         move_machine = state.machines[move.machine_id]
         priority_cost, priority_by_item = self._priority_breakdown(move, ctx)
         dp_time = (
-            move_machine.next_job_end
-            if move.start_at == 'next_job_end'
+            move_machine.schedule_tail
+            if move.start_at == 'schedule_tail'
             else move_machine.next_runout
         )
         work_hours_delta = move_machine.workcal.get_work_hours_between(
@@ -372,7 +370,7 @@ class Costing:
         # Level-loading: work hours between the iteration's earliest DP
         # and this move's DP (pre-idle).
         dp_time = (
-            machine.next_job_end if move.start_at == 'next_job_end'
+            machine.schedule_tail if move.start_at == 'schedule_tail'
             else machine.next_runout
         )
         level_loading_cost = w.level_loading * machine.workcal.get_work_hours_between(

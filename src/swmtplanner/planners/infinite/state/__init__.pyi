@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from swmtplanner.products import Greige
-from swmtplanner.schedule import Activity, Machine
+from swmtplanner.schedule import Machine, ProductionPlan
 from swmtplanner.demand.rlsitem import RlsItem
 
 __all__ = ['Move', 'State']
@@ -14,9 +14,9 @@ class Move:
     machine_id: str
     item: Greige
     lbs: float
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     idle_for: timedelta
-    plan: list[Activity]
+    plan: ProductionPlan
     week_idx: int | None = ...
 
 

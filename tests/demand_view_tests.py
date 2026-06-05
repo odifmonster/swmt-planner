@@ -13,12 +13,17 @@ from swmtplanner.products import Greige
 
 # RawView / SafetyAwareView touch `.item` on the rls_item (and through it
 # `.id` and `.safety`), `.lead_time` on the rls_item (for carrying-cost math),
-# and `.end` / `.lbs` on each job. We stand in for RlsItem and Job with
-# namedtuples, and use real Greige objects loaded from the canonical fixture
-# file so the safety-stock target matches real inputs.
+# and `.rolls` on each job — a sequence of `Roll`s, each with `.lbs` and
+# `.completion_time` (the views expand every job into one chunk per roll).
+# We stand in for RlsItem, Job, and Roll with namedtuples, and use real
+# Greige objects loaded from the canonical fixture file so the safety-stock
+# target matches real inputs. `_FakeJob` keeps a convenience `.end` (its
+# single roll's completion time) so the late_fill_date assertions can refer
+# to it directly.
 _DEFAULT_LEAD_TIME = timedelta(days=7)
 _FakeRlsItem = namedtuple('_FakeRlsItem', ['item', 'lead_time'], defaults=[_DEFAULT_LEAD_TIME])
-_FakeJob = namedtuple('_FakeJob', ['end', 'lbs', 'rolls'], defaults=[()])
+_FakeRoll = namedtuple('_FakeRoll', ['lbs', 'completion_time'])
+_FakeJob = namedtuple('_FakeJob', ['end', 'lbs', 'rolls'])
 
 
 _GREIGE_FIXTURE = Path(__file__).parent / 'data-files' / 'greige-styles.json'
@@ -76,14 +81,20 @@ def _make_safety_view(
 
 
 def _job(week_offset: int, lbs: float) -> _FakeJob:
-    # job.end timestamps are not used by recompute beyond preserving FIFO
-    # order; we set them to a reasonable per-week offset so the assumed
-    # invariant (jobs sorted by job.end) is naturally satisfied.
-    return _FakeJob(end=_START + timedelta(days=7 * week_offset), lbs=lbs)
+    # A job delivering `lbs` as a single roll completing at a per-week
+    # offset. The views expand jobs into per-roll chunks; one roll
+    # reproduces the old single-chunk-at-end behavior these tests assume.
+    end = _START + timedelta(days=7 * week_offset)
+    return _FakeJob(
+        end=end, lbs=lbs, rolls=(_FakeRoll(lbs=lbs, completion_time=end),),
+    )
 
 
 def _job_at(end_dt: datetime, lbs: float) -> _FakeJob:
-    return _FakeJob(end=end_dt, lbs=lbs)
+    return _FakeJob(
+        end=end_dt, lbs=lbs,
+        rolls=(_FakeRoll(lbs=lbs, completion_time=end_dt),),
+    )
 
 
 # Convenience: due_date for week i in our standard 4-week setup starting _START.

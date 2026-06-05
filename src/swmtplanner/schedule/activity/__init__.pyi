@@ -6,7 +6,7 @@ from swmtplanner.support import HasID
 from swmtplanner.products import Greige, BeamSet
 
 __all__ = [
-    'Activity', 'Job', 'Waste', 'TapeOut', 'BeamLoad', 'StyleChange', 'Idle',
+    'Activity', 'Knit', 'Waste', 'TapeOut', 'BeamLoad', 'StyleChange', 'Idle',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION', 'BEAM_LOAD_DURATION',
 ]
 
@@ -23,10 +23,9 @@ class Activity(HasID[str]):
 
 
 @dataclass(frozen=True)
-class Job(Activity):
+class Knit(Activity):
     item: Greige
     lbs: float
-    rolls: tuple[tuple[float, datetime], ...] = ...
 
 
 @dataclass(frozen=True)

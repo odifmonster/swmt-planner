@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 
 from swmtplanner.products import Greige, BeamSet
 from swmtplanner.schedule import (
-    Machine, Job, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Machine, Knit, Job, Roll, ProductionPlan,
+    Waste, TapeOut, BeamLoad, StyleChange, Idle,
 )
 from swmtplanner.demand.rlsitem import RlsItem
 from swmtplanner.support import WorkCal
@@ -132,18 +133,33 @@ def _make_state(machines=None, rls_items=None, **kwargs) -> State:
     return State(machines=machines, rls_items=rls_items, **kwargs)
 
 
+def _plan(activities=(), jobs=()) -> ProductionPlan:
+    """Wrap activity-stream and Job-record lists into a ProductionPlan."""
+    return ProductionPlan(activities=tuple(activities), jobs=tuple(jobs))
+
+
+def _job_rec(item: Greige, lbs: float, completion_time: datetime) -> Job:
+    """A Job record delivering `lbs` as a single roll completing at
+    `completion_time` (the demand views read per-roll completion times)."""
+    return Job(
+        item=item, rolls=(Roll(lbs=lbs, completion_time=completion_time),),
+    )
+
+
 def _move_with_plan(
-    plan: list,
+    activities=(),
+    jobs=(),
     machine_id: str = 'M1',
     item: Greige = _ITEM_A,
 ) -> Move:
-    """Convenience for the 1.1 tests, where only the plan matters: build
-    a Move with the given plan and placeholder values for the
-    bookkeeping fields the State doesn't touch."""
+    """Convenience for the 1.1 tests, where only the plan matters: build a
+    Move whose `ProductionPlan` carries the given activity stream and Job
+    records, with placeholder values for the bookkeeping fields the State
+    doesn't touch."""
     return Move(
         machine_id=machine_id, item=item, lbs=0.0,
-        start_at='next_job_end', idle_for=timedelta(0),
-        plan=plan,
+        start_at='schedule_tail', idle_for=timedelta(0),
+        plan=_plan(activities, jobs),
     )
 
 
@@ -248,16 +264,32 @@ class StateTests(unittest.TestCase):
 
     # ----- 1.1.2 commit_move per activity type -----
 
-    def test_commit_move_with_job_routes_to_machine_and_rls_item(self):
+    def test_commit_move_with_knit_activity_does_not_touch_rls_item(self):
+        # The productive *activity* is a Knit; it goes to the activity
+        # schedule only. Production records (Jobs) are routed separately.
         state = _make_state()
         rls = state.rls_items['AU0001']
-        job = Job(
+        knit = Knit(
             start=_START, end=_START + timedelta(hours=1),
             item=_ITEM_A, lbs=100.0,
         )
-        state.commit_move(_move_with_plan([job]))
-        self.assertEqual(state.machines['M1'].activities, (job,))
+        state.commit_move(_move_with_plan([knit]))
+        self.assertEqual(state.machines['M1'].activities, (knit,))
+        self.assertEqual(state.machines['M1'].jobs, ())
+        self.assertEqual(rls.jobs, ())
+
+    def test_commit_move_with_job_record_routes_to_machine_jobs_and_rls(self):
+        # A Job record in plan.jobs lands on machine.jobs and on the
+        # matching rls_item.jobs (via register_jobs); it is not an activity.
+        state = _make_state()
+        rls = state.rls_items['AU0001']
+        job = _job_rec(
+            _ITEM_A, lbs=100.0, completion_time=_START + timedelta(hours=1),
+        )
+        state.commit_move(_move_with_plan(jobs=[job]))
+        self.assertEqual(state.machines['M1'].jobs, (job,))
         self.assertEqual(rls.jobs, (job,))
+        self.assertEqual(state.machines['M1'].activities, ())
 
     def test_commit_move_with_waste_does_not_touch_rls_item(self):
         state = _make_state()
@@ -365,12 +397,12 @@ class StateTests(unittest.TestCase):
         t0 = _START
         t1 = t0 + timedelta(hours=1)
         t2 = t1 + timedelta(hours=1)
-        j1 = Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
-        j2 = Job(start=t1, end=t2, item=_ITEM_A, lbs=100.0)
-        state.commit_move(_move_with_plan([j1]))
-        state.commit_move(_move_with_plan([j2]))
-        self.assertEqual(state.machines['M1'].activities, (j1, j2))
-        self.assertEqual(state.machines['M1'].next_job_end, t2)
+        k1 = Knit(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
+        k2 = Knit(start=t1, end=t2, item=_ITEM_A, lbs=100.0)
+        state.commit_move(_move_with_plan([k1]))
+        state.commit_move(_move_with_plan([k2]))
+        self.assertEqual(state.machines['M1'].activities, (k1, k2))
+        self.assertEqual(state.machines['M1'].schedule_tail, t2)
 
     def test_commits_on_different_machines_are_independent(self):
         state = _make_state(machines={
@@ -378,9 +410,9 @@ class StateTests(unittest.TestCase):
         })
         t0 = _START
         t1 = t0 + timedelta(hours=1)
-        job = Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
-        state.commit_move(_move_with_plan([job], machine_id='M1'))
-        self.assertEqual(state.machines['M1'].activities, (job,))
+        knit = Knit(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
+        state.commit_move(_move_with_plan([knit], machine_id='M1'))
+        self.assertEqual(state.machines['M1'].activities, (knit,))
         self.assertEqual(state.machines['M2'].activities, ())
 
     def test_jobs_for_same_item_accumulate_in_rls_item(self):
@@ -390,10 +422,10 @@ class StateTests(unittest.TestCase):
         rls = state.rls_items['AU0001']
         t0 = _START
         t1 = t0 + timedelta(hours=1)
-        j_m1 = Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
-        j_m2 = Job(start=t0, end=t1, item=_ITEM_A, lbs=200.0)
-        state.commit_move(_move_with_plan([j_m1], machine_id='M1'))
-        state.commit_move(_move_with_plan([j_m2], machine_id='M2'))
+        j_m1 = _job_rec(_ITEM_A, lbs=100.0, completion_time=t1)
+        j_m2 = _job_rec(_ITEM_A, lbs=200.0, completion_time=t1)
+        state.commit_move(_move_with_plan(jobs=[j_m1], machine_id='M1'))
+        state.commit_move(_move_with_plan(jobs=[j_m2], machine_id='M2'))
         self.assertEqual(set(rls.jobs), {j_m1, j_m2})
 
     def test_jobs_for_different_items_route_to_correct_rls_items(self):
@@ -409,10 +441,10 @@ class StateTests(unittest.TestCase):
         t0 = _START
         t1 = t0 + timedelta(hours=1)
         t2 = t1 + timedelta(hours=1)
-        j_a = Job(start=t0, end=t1, item=_ITEM_A, lbs=100.0)
-        j_b = Job(start=t1, end=t2, item=_ITEM_B, lbs=100.0)
-        state.commit_move(_move_with_plan([j_a], item=_ITEM_A))
-        state.commit_move(_move_with_plan([j_b], item=_ITEM_B))
+        j_a = _job_rec(_ITEM_A, lbs=100.0, completion_time=t1)
+        j_b = _job_rec(_ITEM_B, lbs=100.0, completion_time=t2)
+        state.commit_move(_move_with_plan(jobs=[j_a], item=_ITEM_A))
+        state.commit_move(_move_with_plan(jobs=[j_b], item=_ITEM_B))
         self.assertEqual(rls_a.jobs, (j_a,))
         self.assertEqual(rls_b.jobs, (j_b,))
 
@@ -440,14 +472,10 @@ class StateTests(unittest.TestCase):
         plan = machine.plan_production(
             _ITEM_B, lbs=100.0, start_at='next_runout',
         )
-        a_jobs = [
-            a for a in plan if isinstance(a, Job) and a.item == _ITEM_A
-        ]
-        b_jobs = [
-            a for a in plan if isinstance(a, Job) and a.item == _ITEM_B
-        ]
-        # Sanity: plan really does contain run-up Job(s) of A and new
-        # production Job(s) of B.
+        a_jobs = [j for j in plan.jobs if j.item == _ITEM_A]
+        b_jobs = [j for j in plan.jobs if j.item == _ITEM_B]
+        # Sanity: plan really does carry a run-up Job of A and a new
+        # production Job of B.
         self.assertGreater(len(a_jobs), 0)
         self.assertGreater(len(b_jobs), 0)
 
@@ -461,14 +489,16 @@ class StateTests(unittest.TestCase):
         )
         state.commit_move(move)
 
-        # 1. Machine has the full plan in order; current_status reflects
-        # the post-plan state (current_item swapped to B).
-        self.assertEqual(machine.activities, tuple(plan))
+        # 1. Machine has the full activity stream in order; current_status
+        # reflects the post-plan state (current_item swapped to B).
+        self.assertEqual(machine.activities, plan.activities)
         self.assertEqual(machine.current_status.current_item, _ITEM_B)
+        # 2. machine.jobs holds both Job records.
+        self.assertEqual(machine.jobs, plan.jobs)
 
-        # 2. rls_a contains the run-up Job(s) of A.
+        # 3. rls_a contains the run-up Job(s) of A.
         self.assertEqual(set(rls_a.jobs), set(a_jobs))
-        # 3. rls_b contains the new Job(s) of B.
+        # 4. rls_b contains the new Job(s) of B.
         self.assertEqual(set(rls_b.jobs), set(b_jobs))
 
         # 4. Each rls_item's view trackers updated — replenishment_need
@@ -527,16 +557,22 @@ class CostingTests(unittest.TestCase):
         t2 = t1 + timedelta(hours=2)
         t3 = t2 + timedelta(hours=2)
         t4 = t3 + timedelta(hours=1)
-        plan = [
-            TapeOut(start=t0, end=t1, bars='top'),
-            BeamLoad(start=t1, end=t2, bar='top',
-                     beam=_TOP_BEAM, lbs=2800.0),
-            Idle(start=t2, end=t3),
-            Job(start=t3, end=t4, item=_ITEM_A, lbs=100.0),
-        ]
+        # Activity stream drives the schedule penalties (TapeOut, Idle);
+        # the Job record (its roll completing at t4, 9h past due) drives
+        # the demand-side lateness/drainage.
+        plan = _plan(
+            activities=[
+                TapeOut(start=t0, end=t1, bars='top'),
+                BeamLoad(start=t1, end=t2, bar='top',
+                         beam=_TOP_BEAM, lbs=2800.0),
+                Idle(start=t2, end=t3),
+                Knit(start=t3, end=t4, item=_ITEM_A, lbs=100.0),
+            ],
+            jobs=[_job_rec(_ITEM_A, lbs=100.0, completion_time=t4)],
+        )
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_A, lbs=100.0,
-            start_at='next_job_end', idle_for=timedelta(0), plan=plan,
+            start_at='schedule_tail', idle_for=timedelta(0), plan=plan,
         ))
 
         weights = _weights(
@@ -566,7 +602,7 @@ class CostingTests(unittest.TestCase):
         t2 = t1 + timedelta(hours=2)     # BeamLoad(top) = 2h
         t3 = t2 + timedelta(hours=2)     # BeamLoad(btm) = 2h
         t4 = t3 + _FAMILY_CHANGE         # StyleChange(family) = 1h
-        plan = [
+        plan = _plan(activities=[
             TapeOut(start=t0, end=t1, bars='both'),
             BeamLoad(start=t1, end=t2, bar='top',
                      beam=_TOP_BEAM, lbs=2800.0),
@@ -575,12 +611,12 @@ class CostingTests(unittest.TestCase):
             StyleChange(start=t3, end=t4,
                         from_item=_ITEM_A, to_item=_ITEM_B,
                         is_family_change=True),
-        ]
+        ])
         # Empty rls_items so there are no demand-side contributions.
         state = _make_state(machines={'M1': machine}, rls_items={})
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_B, lbs=0.0,
-            start_at='next_job_end', idle_for=timedelta(0), plan=plan,
+            start_at='schedule_tail', idle_for=timedelta(0), plan=plan,
         ))
 
         weights = _weights(tape_out_both=15.0, family_change=5.0)
@@ -602,10 +638,11 @@ class CostingTests(unittest.TestCase):
         state = _make_state(
             machines={'M1': machine}, rls_items={'AU0001': rls},
         )
-        job = Job(start=_START, end=_START, item=_ITEM_A, lbs=1500.0)
+        job = _job_rec(_ITEM_A, lbs=1500.0, completion_time=_START)
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_A, lbs=1500.0,
-            start_at='next_job_end', idle_for=timedelta(0), plan=[job],
+            start_at='schedule_tail', idle_for=timedelta(0),
+            plan=_plan(jobs=[job]),
         ))
 
         self.assertGreater(rls.safety_view.excess, 0)
@@ -627,10 +664,11 @@ class CostingTests(unittest.TestCase):
         state = _make_state(
             machines={'M1': machine}, rls_items={'AU0001': rls},
         )
-        job = Job(start=_START, end=_START, item=_ITEM_A, lbs=900.0)
+        job = _job_rec(_ITEM_A, lbs=900.0, completion_time=_START)
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_A, lbs=900.0,
-            start_at='next_job_end', idle_for=timedelta(0), plan=[job],
+            start_at='schedule_tail', idle_for=timedelta(0),
+            plan=_plan(jobs=[job]),
         ))
 
         self.assertGreater(rls.safety_view.carrying, 0)
@@ -660,11 +698,11 @@ class CostingTests(unittest.TestCase):
         costing = Costing(weights)
 
         plan = machine.plan_production(
-            _ITEM_A, lbs=100.0, start_at='next_job_end',
+            _ITEM_A, lbs=100.0, start_at='schedule_tail',
         )
         move = Move(
             machine_id='M1', item=_ITEM_A, lbs=100.0,
-            start_at='next_job_end', idle_for=timedelta(0), plan=plan,
+            start_at='schedule_tail', idle_for=timedelta(0), plan=plan,
         )
         # Minimal ctx — Phase 2 weights are 0, so its contents don't
         # affect the score, but score_after_move requires a ctx.
@@ -672,7 +710,7 @@ class CostingTests(unittest.TestCase):
             priorities={},
             regular_orders_by_key={},
             earliest_dp_excluding={},
-            earliest_dp_time=machine.next_job_end,
+            earliest_dp_time=machine.schedule_tail,
             new_machine_avail={},
         )
 
@@ -824,8 +862,8 @@ class PriorityCostTests(unittest.TestCase):
         is multiplied by 0 weights anyway)."""
         return Move(
             machine_id='M1', item=item, lbs=0.0,
-            start_at='next_job_end', idle_for=timedelta(0),
-            plan=[], week_idx=week_idx,
+            start_at='schedule_tail', idle_for=timedelta(0),
+            plan=_plan(), week_idx=week_idx,
         )
 
     def test_setup_priority_ordering(self):
@@ -915,7 +953,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertEqual(eligible_decision_points(state), [])
 
     def test_eligible_dps_all_out_of_window(self):
-        # next_job_end == start_date == _START on a fresh machine; setting
+        # schedule_tail == start_date == _START on a fresh machine; setting
         # window_end before _START leaves every DP out of window.
         machine = _make_machine('M1')
         state = _make_state(
@@ -935,12 +973,12 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=runout,
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
             DecisionPoint('M1', 'next_runout', runout),
         })
 
     def test_eligible_dps_both_in_window_coinciding(self):
-        # Empty beams → next_runout coincides with next_job_end.
+        # Empty beams → next_runout coincides with schedule_tail.
         machine = _make_machine(
             'M1', init_top_lbs=0.0, init_btm_lbs=0.0,
         )
@@ -948,14 +986,14 @@ class CandidateEnumerationTests(unittest.TestCase):
             machines={'M1': machine}, rls_items={},
             window_end=_START + timedelta(hours=24),
         )
-        # Only the next_job_end entry is emitted; the coincident
+        # Only the schedule_tail entry is emitted; the coincident
         # next_runout is deduplicated.
         self.assertEqual(eligible_decision_points(state), [
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
         ])
 
-    def test_eligible_dps_only_next_job_end_in_window(self):
-        # Default beams; window covers next_job_end (= _START) but ends
+    def test_eligible_dps_only_schedule_tail_in_window(self):
+        # Default beams; window covers schedule_tail (= _START) but ends
         # before next_runout (= _START + 36h).
         machine = _make_machine('M1')
         state = _make_state(
@@ -963,7 +1001,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=_START + timedelta(hours=10),
         )
         self.assertEqual(eligible_decision_points(state), [
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
         ])
 
     # ----- 1.3.1.6 multi-machine sub-cases -----
@@ -977,9 +1015,9 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=runout,
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
             DecisionPoint('M1', 'next_runout', runout),
-            DecisionPoint('M2', 'next_job_end', _START),
+            DecisionPoint('M2', 'schedule_tail', _START),
             DecisionPoint('M2', 'next_runout', runout),
         })
 
@@ -991,8 +1029,8 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=_START + timedelta(hours=10),
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
-            DecisionPoint('M2', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
+            DecisionPoint('M2', 'schedule_tail', _START),
         })
 
     def test_eligible_dps_multi_subset_with_both_dps(self):
@@ -1007,12 +1045,12 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=m1.next_runout,
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
             DecisionPoint('M1', 'next_runout', m1.next_runout),
         })
 
     def test_eligible_dps_multi_subset_only_job_ends(self):
-        # All machines in window for next_job_end only. M3 runs the
+        # All machines in window for schedule_tail only. M3 runs the
         # family-C item _TC (whose machines dict includes 'M3').
         m1 = _make_machine('M1')
         m2 = _make_machine('M2')
@@ -1025,15 +1063,15 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=_START + timedelta(hours=30),
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
-            DecisionPoint('M2', 'next_job_end', _START),
-            DecisionPoint('M3', 'next_job_end',
+            DecisionPoint('M1', 'schedule_tail', _START),
+            DecisionPoint('M2', 'schedule_tail', _START),
+            DecisionPoint('M3', 'schedule_tail',
                           _START + timedelta(hours=24)),
         })
 
     def test_eligible_dps_multi_mix_of_dps(self):
         # M1: both DPs in window (default beams, runout at +36h).
-        # M2: only next_job_end in window — huge beams push next_runout
+        # M2: only schedule_tail in window — huge beams push next_runout
         # far past window_end.
         # M3: out of window entirely (starts past window_end).
         m1 = _make_machine('M1')
@@ -1047,10 +1085,10 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=_START + timedelta(hours=36),
         )
         self.assertEqual(set(eligible_decision_points(state)), {
-            DecisionPoint('M1', 'next_job_end', _START),
+            DecisionPoint('M1', 'schedule_tail', _START),
             DecisionPoint('M1', 'next_runout',
                           _START + timedelta(hours=36)),
-            DecisionPoint('M2', 'next_job_end', _START),
+            DecisionPoint('M2', 'schedule_tail', _START),
         })
 
     # ===================================================================
@@ -1075,7 +1113,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
         )
         rls_b.register_jobs([
-            Job(start=_START, end=_START, item=_ITEM_A, lbs=900.0),
+            _job_rec(_ITEM_A, lbs=900.0, completion_time=_START),
         ])
         state_b = _make_state(machines={}, rls_items={'AU0001': rls_b})
         self._assert_orders_match(eligible_orders(state_b), [])
@@ -1112,7 +1150,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             weekly_lbs_needed=[300.0, 0.0, 0.0, 0.0],
         )
         rls_b.register_jobs([
-            Job(start=_START, end=_START, item=item, lbs=200.0),
+            _job_rec(item, lbs=200.0, completion_time=_START),
         ])
         state_b = _make_state(machines={}, rls_items={item.id: rls_b})
         self._assert_orders_match(eligible_orders(state_b), expected)
@@ -1139,7 +1177,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         late_t = _START + timedelta(weeks=10)
         rls_b.register_jobs([
-            Job(start=late_t, end=late_t, item=_ITEM_A, lbs=400.0),
+            _job_rec(_ITEM_A, lbs=400.0, completion_time=late_t),
         ])
         state_b = _make_state(machines={}, rls_items={'AU0001': rls_b})
         self._assert_orders_match(eligible_orders(state_b), expected)
@@ -1203,7 +1241,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             weekly_lbs_needed=[200.0, 100.0, 100.0, 100.0],
         )
         rls_b.register_jobs([
-            Job(start=_START, end=_START, item=item, lbs=100.0),
+            _job_rec(item, lbs=100.0, completion_time=_START),
         ])
         state_b = _make_state(machines={}, rls_items={item.id: rls_b})
         self._assert_orders_match(eligible_orders(state_b), expected)
@@ -1254,7 +1292,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         # at the start state. Orders are small and target week 0, so no
         # carrying-avoidance idle. Items run on both machines, so each
         # item gets a candidate per machine; we assert the
-        # programmed-machine candidate has plan == [Job(item)].
+        # programmed-machine candidate has one Knit activity + one Job record.
         m1 = _make_machine('M1', init_item=_T1)
         m2 = _make_machine('M2', init_item=_T2)
         rls_t1 = RlsItem(
@@ -1270,7 +1308,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         state = _make_state(
             machines={'M1': m1, 'M2': m2},
             rls_items={_T1.id: rls_t1, _T2.id: rls_t2},
-            window_end=_START,  # only next_job_end DPs in window
+            window_end=_START,  # only schedule_tail DPs in window
         )
         moves = enumerate_candidates(state)
 
@@ -1285,15 +1323,18 @@ class CandidateEnumerationTests(unittest.TestCase):
                 f'expected 1 candidate for ({programmed_mchn}, {item.id})',
             )
             mv = matching[0]
-            self.assertEqual(len(mv.plan), 1)
-            self.assertIsInstance(mv.plan[0], Job)
-            self.assertEqual(mv.plan[0].item, item)
+            # One Knit activity and one Job record for the item.
+            self.assertEqual(len(mv.plan.activities), 1)
+            self.assertIsInstance(mv.plan.activities[0], Knit)
+            self.assertEqual(mv.plan.activities[0].item, item)
+            self.assertEqual(len(mv.plan.jobs), 1)
+            self.assertEqual(mv.plan.jobs[0].item, item)
             self.assertEqual(mv.idle_for, timedelta(0))
 
         # No move anywhere idles.
         for mv in moves:
             self.assertEqual(mv.idle_for, timedelta(0))
-            self.assertFalse(any(isinstance(a, Idle) for a in mv.plan))
+            self.assertFalse(any(isinstance(a, Idle) for a in mv.plan.activities))
 
     def test_enumerate_candidates_multi_family(self):
         # Three items in three families. Machines partition by family
@@ -1368,9 +1409,9 @@ class CandidateEnumerationTests(unittest.TestCase):
         mv = moves[0]
         self.assertEqual(mv.idle_for, timedelta(hours=312))
         # The plan should start with the Idle gap of matching duration.
-        self.assertIsInstance(mv.plan[0], Idle)
+        self.assertIsInstance(mv.plan.activities[0], Idle)
         self.assertEqual(
-            mv.plan[0].end - mv.plan[0].start, mv.idle_for,
+            mv.plan.activities[0].end - mv.plan.activities[0].start, mv.idle_for,
         )
 
     # ===================================================================
@@ -1446,9 +1487,9 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertLessEqual(mv.lbs, ideal_upper)
         # Preamble shape sanity: TapeOut('both'), two BeamLoads, family
         # StyleChange — all present, in order, before the first Job.
-        kinds = [type(a).__name__ for a in mv.plan]
-        first_job = kinds.index('Job')
-        preamble = mv.plan[:first_job]
+        kinds = [type(a).__name__ for a in mv.plan.activities]
+        first_job = kinds.index('Knit')
+        preamble = mv.plan.activities[:first_job]
         self.assertEqual(
             [type(a).__name__ for a in preamble],
             ['TapeOut', 'BeamLoad', 'BeamLoad', 'StyleChange'],
@@ -1486,9 +1527,9 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertEqual(mv.idle_for, timedelta(hours=312))
         # Plan: a single Idle of 312h, then directly into the
         # production Job (no preamble since current item matches).
-        self.assertIsInstance(mv.plan[0], Idle)
-        self.assertEqual(mv.plan[0].end - mv.plan[0].start, mv.idle_for)
-        jobs = [a for a in mv.plan if isinstance(a, Job)]
+        self.assertIsInstance(mv.plan.activities[0], Idle)
+        self.assertEqual(mv.plan.activities[0].end - mv.plan.activities[0].start, mv.idle_for)
+        jobs = [a for a in mv.plan.activities if isinstance(a, Knit)]
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].item, _T1)
         self.assertEqual(jobs[0].lbs, 2400.0)
@@ -1523,7 +1564,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             window_end=machine.next_runout,
         )
         moves = enumerate_candidates(state)
-        # Two DPs (next_job_end + next_runout); we focus on the
+        # Two DPs (schedule_tail + next_runout); we focus on the
         # next_runout one.
         runout_moves = [
             mv for mv in moves if mv.start_at == 'next_runout'
@@ -1553,16 +1594,16 @@ class CandidateEnumerationTests(unittest.TestCase):
         # StyleChange (not a family change), and finally _T2 production
         # Jobs.
         first_job = next(
-            i for i, a in enumerate(mv.plan) if isinstance(a, Job)
+            i for i, a in enumerate(mv.plan.activities) if isinstance(a, Knit)
         )
-        self.assertEqual(mv.plan[first_job].item, _T1)
+        self.assertEqual(mv.plan.activities[first_job].item, _T1)
         style_changes = [
-            a for a in mv.plan if isinstance(a, StyleChange)
+            a for a in mv.plan.activities if isinstance(a, StyleChange)
         ]
         self.assertEqual(len(style_changes), 1)
         self.assertFalse(style_changes[0].is_family_change)
         # No tape-outs anywhere in the plan.
-        self.assertFalse(any(isinstance(a, TapeOut) for a in mv.plan))
+        self.assertFalse(any(isinstance(a, TapeOut) for a in mv.plan.activities))
 
     def test_enumerate_candidates_cap_bumpup_to_next_week(self):
         # When `effective_start` lands so late in its ISO week that the
@@ -1720,12 +1761,12 @@ class MainLoopTests(unittest.TestCase):
             self.assertEqual(order.remaining_lbs, 0.0)
         self.assertEqual(report.unmet_lbs_by_item_week, {})
         # Total scheduled lbs >= total demand (safety=0 for _T1).
-        total_scheduled = sum(j.lbs for j in rls.jobs)
+        total_scheduled = sum(j.total_lbs for j in rls.jobs)
         self.assertGreaterEqual(total_scheduled, 400.0)
 
     def test_plan_single_item_multiple_machines(self):
         # Two identical eligible machines; the window mechanism spreads
-        # work across both as each machine's next_job_end falls out of
+        # work across both as each machine's schedule_tail falls out of
         # window between commits.
         m1 = _big_beam_machine('M1', init_item=_T1)
         m2 = _big_beam_machine('M2', init_item=_T1)
@@ -1776,7 +1817,7 @@ class MainLoopTests(unittest.TestCase):
         # can run on the machine it landed on.
         for m_id, schedule in report.schedules.items():
             for a in schedule:
-                if isinstance(a, Job):
+                if isinstance(a, Knit):
                     self.assertTrue(
                         a.item.can_run_on_mchn(m_id),
                         f'{a.item.id} committed on {m_id} '
@@ -1802,7 +1843,7 @@ class MainLoopTests(unittest.TestCase):
         )
         report = plan(state, Costing(_weights(lateness=10, drainage=1)))
         # Loop committed *something*.
-        scheduled = sum(j.lbs for j in state.rls_items[_T1.id].jobs)
+        scheduled = sum(j.total_lbs for j in state.rls_items[_T1.id].jobs)
         self.assertGreater(scheduled, 0.0)
         # …but a shortfall remains on week 0.
         self.assertIn((_T1.id, 0), report.unmet_lbs_by_item_week)
@@ -1872,7 +1913,7 @@ class MainLoopTests(unittest.TestCase):
 
     def test_plan_narrow_initial_window_advances(self):
         # Start with window_end == start_date. After the first commit
-        # M1.next_job_end pushes past window_end, forcing
+        # M1.schedule_tail pushes past window_end, forcing
         # advance_window() to keep the loop progressing. By the end
         # window has advanced past its initial value.
         m = _big_beam_machine('M1', init_item=_T1)

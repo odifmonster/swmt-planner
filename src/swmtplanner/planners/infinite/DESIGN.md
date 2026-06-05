@@ -370,7 +370,7 @@ PriorityDetailRecord                            # one row of priority_detail.tsv
 
 ScheduleDetailRecord                            # one row of schedule_detail.tsv; one record per Activity in a candidate's move.plan.activities
   move_id: int                                  # groups all rows from one candidate's plan.activities
-  activity_id: int                              # primary key within schedule_detail; auto-incremented across the verbose run
+  activity_id: str                              # the Activity's own id (Activity.id); unique across the run
   machine_id: str
   start: datetime
   end: datetime
@@ -386,9 +386,20 @@ JobDetailRecord                                 # one row of job_detail.tsv; one
 RollDetailRecord                                # one row of roll_detail.tsv; one record per Roll in a candidate's job
   move_id: int                                  # foreign key into iteration_log
   job_id: str                                   # foreign key into job_detail (the owning Job)
-  roll_idx: int                                 # 0-based index of the roll within job.rolls
+  roll_idx: int                                 # unique id for this roll; auto-incremented across the verbose run (Roll has no id of its own)
   lbs: float                                    # roll.lbs
   completion_time: datetime                     # roll.completion_time
+
+IterLogCounters                                 # loop-owned bundle of auto-incrementing id counters for the verbose tables; built once per verbose run, each field a zero-arg callable returning the next int in its own independent sequence
+  move_id: () -> int                            # per scored candidate (collapsed the former cost_id + sched_id)
+  roll_idx: () -> int                           # per RollDetailRecord; Roll carries no id of its own, so the loop assigns one
+  lateness_detail_id: () -> int                 # per non-empty lateness delta group
+  drainage_detail_id: () -> int                 # per non-empty drainage delta group
+  carrying_detail_id: () -> int                 # per non-empty carrying delta group
+  excess_detail_id: () -> int                   # per non-empty excess delta group
+  priority_detail_id: () -> int                 # per non-empty priority group
+  # activity_id and job_id are NOT counters here — they are record-owned
+  # ids (Activity.id, Job.id); only Roll, which has no id, needs a counter
 ```
 
 The full schedules also remain on the `Machine` instances inside
@@ -476,11 +487,14 @@ passed over and how much unfulfilled demand each carries, which is
 exactly the diagnostic an operator needs when an urgent order
 doesn't get committed.
 
-Cross-table links are ids owned by the loop. `move_id` (the scored
-candidate), `activity_id`, and the five `*_detail_id` counters are
-auto-incremented integers, each starting at 1 at the beginning of
-the verbose run; `job_id` is the `Job`'s own id (`Job.id`), reused
-as the `job_detail`→`roll_detail` link rather than a loop counter.
+Cross-table links are ids owned by the loop, bundled in
+`IterLogCounters`. `move_id` (the scored candidate), `roll_idx`, and
+the five `*_detail_id` counters are auto-incremented integers, each
+starting at 1 at the beginning of the verbose run. `activity_id` and
+`job_id` are not counters — they are the record-owned ids `Activity.id`
+and `Job.id`; `roll_idx` exists as a counter only because `Roll` has
+no id of its own. `job_id` is reused as the `job_detail`→`roll_detail`
+link.
 A `*_detail_id` is omitted (`None` on the
 `CostDetailRecord`, blank cell in the TSV) when the corresponding
 cost would have no contributing rows (no non-zero deltas for the
@@ -1148,7 +1162,7 @@ produces no row.
 | Column         | Type     | Notes                                                                                          |
 |---|---|---|
 | `move_id`      | int      | Groups all rows from one candidate's `move.plan.activities`.                                   |
-| `activity_id`  | int      | Primary key within `schedule_detail.tsv`; unique across the run.                               |
+| `activity_id`  | str      | The `Activity`'s own id (`Activity.id`); unique across the run.                                 |
 | `machine_id`   | str      | The candidate's machine.                                                                       |
 | `start`        | datetime | Activity start.                                                                                |
 | `end`          | datetime | Activity end.                                                                                  |
@@ -1170,7 +1184,7 @@ produces no row.
 |---|---|---|
 | `move_id`         | int      | Foreign key into `iteration_log.tsv`.                                                          |
 | `job_id`          | str      | Foreign key into `job_detail.tsv` (the owning `Job`).                                          |
-| `roll_idx`        | int      | 0-based index of the roll within `job.rolls`.                                                  |
+| `roll_idx`        | int      | Unique id for this roll, auto-incremented across the verbose run (`Roll` has no id of its own). |
 | `lbs`             | float    | `roll.lbs`.                                                                                    |
 | `completion_time` | datetime | `roll.completion_time` — when the roll is ready to ship.                                        |
 
@@ -1186,15 +1200,17 @@ row is therefore the very first row of each iteration block.
 The companion tables are emitted in `move_id` order —
 i.e., parallel to the candidate sequence in `iteration_log.tsv`, so
 each TSV reads top-to-bottom in the same chronological direction.
-The auto-incremented counters (`move_id`, `activity_id`, and the
-five `*_detail_id`s) restart at 1 at the beginning of each verbose
-run and are independent of one another. `move_id` is 1:1 with scored
-candidates and is the single handle the cost, schedule, and job
-detail tables all join on — this refactor collapsed the former
-separate `cost_id` and `sched_id` (always 1:1 with each other) into
-it. `job_id` is the `Job`'s own id rather than a loop counter, so
-`roll_detail` joins to `job_detail` on it directly. Cross-file joins
-are by id only.
+The auto-incremented counters (`move_id`, `roll_idx`, and the five
+`*_detail_id`s, bundled in `IterLogCounters`) restart at 1 at the
+beginning of each verbose run and are independent of one another.
+`move_id` is 1:1 with scored candidates and is the single handle the
+cost, schedule, and job detail tables all join on — this refactor
+collapsed the former separate `cost_id` and `sched_id` (always 1:1
+with each other) into it. `activity_id` and `job_id` are not
+counters — they are the record-owned ids `Activity.id` and `Job.id`;
+`roll_detail` joins to `job_detail` on `job_id` directly. `roll_idx`
+is a counter only because `Roll` has no id of its own. Cross-file
+joins are by id only.
 
 #### Internal flow
 
@@ -1355,9 +1371,9 @@ under the CLI section for the file layout.
   per `Activity` in `move.plan.activities`, one `JobDetailRecord`
   per `Job` in `move.plan.jobs`, and one `RollDetailRecord` per
   `Roll` in each job's `rolls`. Cross-table ids — `move_id`,
-  `activity_id`, and the five `*_detail_id`s — are auto-incremented
-  integer counters owned by the loop (`job_id` is the `Job`'s own
-  id); a
+  `roll_idx`, and the five `*_detail_id`s — are auto-incremented
+  integer counters owned by the loop; `activity_id` and `job_id` are
+  the record-owned `Activity.id` and `Job.id`; a
   `*_detail_id` is `None` when the corresponding cost has no
   contributing rows (no non-zero deltas for the demand-side costs;
   no higher-priority skipped orders for priority). The committed

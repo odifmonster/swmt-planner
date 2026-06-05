@@ -5,8 +5,15 @@ from typing import Iterable, Literal
 from swmtplanner.support import HasID, WorkCal
 from swmtplanner.products import Greige, BeamSet
 from swmtplanner.schedule.activity import Activity
+from swmtplanner.schedule.job import Job
 
-__all__ = ['Status', 'Machine', 'fresh_beam_lbs']
+__all__ = ['Status', 'Machine', 'ProductionPlan', 'fresh_beam_lbs']
+
+
+@dataclass(frozen=True)
+class ProductionPlan:
+    activities: tuple[Activity, ...]
+    jobs: tuple[Job, ...]
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,9 @@ class Machine(HasID[str]):
     @property
     def activities(self) -> tuple[Activity, ...]: ...
     @property
-    def next_job_end(self) -> datetime: ...
+    def jobs(self) -> tuple[Job, ...]: ...
+    @property
+    def schedule_tail(self) -> datetime: ...
     @property
     def next_runout(self) -> datetime: ...
     def producible_lbs_through(
@@ -65,10 +74,11 @@ class Machine(HasID[str]):
     ) -> float: ...
     def status_at(self, t: datetime) -> Status: ...
     def add_activities(self, activities: Iterable[Activity]) -> None: ...
+    def add_jobs(self, jobs: Iterable[Job]) -> None: ...
     def plan_production(
         self,
         item: Greige,
         lbs: float,
-        start_at: Literal['next_job_end', 'next_runout'],
+        start_at: Literal['schedule_tail', 'next_runout'],
         idle_for: timedelta = ...,
-    ) -> list[Activity]: ...
+    ) -> ProductionPlan: ...

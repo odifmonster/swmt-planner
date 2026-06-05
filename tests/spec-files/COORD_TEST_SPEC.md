@@ -127,7 +127,7 @@ Bundles the per-iteration `ScoringContext` from `state` and
 `candidates`. Composition: `priorities` from `assign_priorities(state)`;
 `new_machine_avail` from `build_new_machine_avail(state, candidates)`;
 `earliest_dp_time` from `min(dp_time(c) for c in candidates)`, where
-`dp_time` is `machine.next_job_end` for `start_at='next_job_end'` and
+`dp_time` is `machine.schedule_tail` for `start_at='schedule_tail'` and
 `machine.next_runout` otherwise — i.e., the bare DP time *before* any
 carrying-avoidance idle.
 
@@ -138,8 +138,8 @@ carrying-avoidance idle.
    `ctx.earliest_dp_time == min(dp_time(c) for c in candidates)`.
 
 2. **`dp_time` resolution per `start_at`** — two candidates on the
-   same machine, one with `start_at='next_job_end'` (dp_time =
-   `machine.next_job_end`) and one with `start_at='next_runout'`
+   same machine, one with `start_at='schedule_tail'` (dp_time =
+   `machine.schedule_tail`) and one with `start_at='next_runout'`
    (dp_time = `machine.next_runout`, generally later). Verify each
    branch picks the right time.
 
@@ -149,7 +149,7 @@ carrying-avoidance idle.
 
 4. **Carrying-avoidance idle ignored in DP time** — a candidate whose
    `idle_for > 0` doesn't shift its DP time; `dp_time` is the
-   machine's bare `next_job_end` / `next_runout`, not the post-idle
+   machine's bare `schedule_tail` / `next_runout`, not the post-idle
    effective start. Confirms idle isn't double-counted between
    `level_loading` and `idle_time`.
 

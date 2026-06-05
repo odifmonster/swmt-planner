@@ -25,29 +25,30 @@ here.
 3. `carrying_avoidance_margin` defaults to 24h when omitted; a custom
    value is stored unchanged.
 
-#### 1.1.2 `commit_move` per activity type
+#### 1.1.2 `commit_move` routing
 
-Each test builds a `Move` whose plan contains the activity (or a small
-sequence containing that activity), calls `commit_move`, and verifies
-that the machine's `activities` and any affected `rls_item.jobs`
-reflect the commit. Activities that don't produce a `Job` should
-appear on the machine but should not touch any `rls_item`.
+`Move.plan` is a `ProductionPlan(activities, jobs)`. `commit_move`
+appends `plan.activities` to `machine.activities` (advancing
+`current_status`), appends `plan.jobs` to `machine.jobs`, and registers
+those same `Job` records on each `rls_item` (grouped by `job.item.id`)
+via `register_jobs`. No activity by itself touches any `rls_item` —
+only `Job` records do.
 
-These tests are about `commit_move`'s routing behavior; the per-type
-status-update math is already covered by `tests/machine_tests.py`.
+These tests are about `commit_move`'s routing; the per-type status-
+update math and the `Job` / `Roll` construction are covered by
+`tests/machine_tests.py`.
 
-1. `Job` — appears in `machine.activities`; the corresponding
-   `rls_item.jobs` gains it; lbs and item match.
-2. `Waste` — appears in `machine.activities`; no `rls_item` is touched.
-3. `TapeOut` — covers all three `bars` values (`'top'`, `'btm'`,
-   `'both'`). Each appears in `machine.activities`; no `rls_item` is
+1. **Activity stream** — for each activity type (`Knit`, `Waste`,
+   `TapeOut` over all three `bars`, `BeamLoad` over both `bar`s,
+   `StyleChange` over both `is_family_change` values, `Idle`): the
+   activity appears in `machine.activities` and no `rls_item.jobs` is
    touched.
-4. `BeamLoad` — covers both `bar` values (`'top'`, `'btm'`). Each
-   appears in `machine.activities`; no `rls_item` is touched.
-5. `StyleChange` — covers both `is_family_change` values (`False`,
-   `True`). Each appears in `machine.activities`; no `rls_item` is
-   touched.
-6. `Idle` — appears in `machine.activities`; no `rls_item` is touched.
+2. **Job records** — a plan whose `jobs` holds a `Job(item, rolls)`
+   routes that `Job` into `machine.jobs` and into `rls_item.jobs` for
+   `job.item.id` (item and rolls match). A move whose two jobs target
+   two different items registers each on its own `rls_item`.
+3. **Empty production** — a plan with activities but empty `jobs`
+   leaves every `rls_item.jobs` untouched (and `machine.jobs` empty).
 
 #### 1.1.3 Multiple `commit_move` calls accumulate
 
@@ -67,14 +68,18 @@ status-update math is already covered by `tests/machine_tests.py`.
 
 A single `Move` whose plan begins with a run-up of the machine's
 current item, hits a beam runout, swaps to a new item, and produces the
-new item. Specifically, in order:
+new item. The plan's **activity stream** (`plan.activities`) is, in
+order:
 
-- `Job(A, run-up_lbs)` — produced before the beam exhaustion.
+- `Knit(A, run-up_lbs)` — produced before the beam exhaustion.
 - optional `Waste(A, partial_lbs)` — the partial roll discarded at the
   runout.
 - `BeamLoad(...)` — for the bar(s) that exhausted.
 - `StyleChange(from=A, to=B)` — transition to the new item.
-- `Job(B, new_item_lbs)` — production of the new item.
+- `Knit(B, new_item_lbs)` — production of the new item.
+
+and its **production records** (`plan.jobs`) are the run-up `Job(A)`
+(the whole rolls of `A`) followed by the new-item `Job(B)`.
 
 Built by calling `Machine.plan_production(B, lbs, start_at='next_runout')`
 on a machine whose initial state has beams arranged to force the
@@ -86,9 +91,10 @@ After `commit_move`:
    `machine.current_status` reflects the post-plan state (new beam(s)
    loaded, `current_item == B`, beam lbs decremented by B's
    consumption).
-2. `state.rls_items[A.id].jobs` contains the run-up `Job(A)`.
-3. `state.rls_items[B.id].jobs` contains the new `Job(B)`.
-4. Each `rls_item`'s safety and raw views have been recomputed with
+2. `machine.jobs` contains both `Job` records (`Job(A)` then `Job(B)`).
+3. `state.rls_items[A.id].jobs` contains the run-up `Job(A)`.
+4. `state.rls_items[B.id].jobs` contains the new `Job(B)`.
+5. Each `rls_item`'s safety and raw views have been recomputed with
    their respective jobs — the relevant orders' `allocated_lbs`
    reflects the new commitment, and view-level cost trackers
    (`lateness`, `drainage`, `carrying`, `excess`, `safety_pool`)
@@ -125,8 +131,8 @@ Setup:
   that no jobs results in non-zero `drainage` against the safety view.
 - A machine whose committed plan contains a `TapeOut('top')` (or
   `'btm'`), a `BeamLoad`, an `Idle` of known work-hour duration, and a
-  `Job` whose `end` falls past the earliest order's `due_date`
-  (producing non-zero `lateness` in the raw view).
+  `Knit` whose `Job` record has a roll completing past the earliest
+  order's `due_date` (producing non-zero `lateness` in the raw view).
 
 Assert: `score(state)` equals
 `w_lateness × raw_view.lateness + w_drainage × safety_view.drainage
@@ -163,8 +169,9 @@ Components covered: `excess`.
 #### 1.2.4 Carrying
 
 Setup:
-- An `RlsItem` with a committed `Job` whose `end` is well before the
-  target order's `due_date - lead_time`, so `safety_view.carrying > 0`.
+- An `RlsItem` with a committed `Job` whose rolls all complete well
+  before the target order's `due_date - lead_time`, so
+  `safety_view.carrying > 0`.
 - No schedule-side contributions.
 
 Assert: `score(state)` equals `w_carrying × safety_view.carrying`.
@@ -258,25 +265,25 @@ The `loop/candidates.py` module exposes three functions:
 1. **Empty state** — no machines in `state.machines`. Output: `[]`.
 
 2. **All machines' decision points out of window** — every machine has
-   `next_job_end > state.window_end` (and therefore
+   `schedule_tail > state.window_end` (and therefore
    `next_runout > state.window_end` too). Output: `[]`.
 
 3. **Single machine, both DPs in window, distinct** — beams partially
-   used so that `next_runout > next_job_end`, both within
+   used so that `next_runout > schedule_tail`, both within
    `window_end`. Output: two `DecisionPoint`s, one with
-   `start_at='next_job_end'` (time = `current_status.as_of`), one with
+   `start_at='schedule_tail'` (time = `current_status.as_of`), one with
    `start_at='next_runout'` (time = `machine.next_runout`).
 
 4. **Single machine, both DPs in window, coinciding** — beams empty,
-   so `next_runout == next_job_end`. Output: a single `DecisionPoint`
-   with `start_at='next_job_end'`; the `next_runout` entry is
+   so `next_runout == schedule_tail`. Output: a single `DecisionPoint`
+   with `start_at='schedule_tail'`; the `next_runout` entry is
    deduplicated.
 
-5. **Single machine, `next_job_end` in window, `next_runout` out** —
+5. **Single machine, `schedule_tail` in window, `next_runout` out** —
    beams full enough that the forward-extrapolated runout is past the
    window's end. Output: a single `DecisionPoint` with
-   `start_at='next_job_end'`. (The asymmetric "runout in, job_end out"
-   case is impossible by `next_runout >= next_job_end`, so no test for
+   `start_at='schedule_tail'`. (The asymmetric "runout in, job_end out"
+   case is impossible by `next_runout >= schedule_tail`, so no test for
    it.)
 
 6. **Multiple machines** — state contains several machines, at
@@ -289,7 +296,7 @@ The `loop/candidates.py` module exposes three functions:
     3. Various subsets of machines where all machines in the subset
        have both decision points in window.
     4. Various subsets of machines where all machines in the subset
-       have exactly one decision point (next_job_end) in window.
+       have exactly one decision point (schedule_tail) in window.
     5. Various subsets that have a mix of decision points in window.
 
 #### 1.3.2 `eligible_orders`
@@ -348,7 +355,7 @@ records (modulo small float tolerance on `lbs`):
        - all greige items belong to the same family.
        - there is one machine programmed to run each item at the start state.
        - no orders trigger idling before production begins.
-       - orders assigned to the machine already programmed for that item emit only one Job.
+       - orders assigned to the machine already programmed for that item produce a single `Job` record (one `plan_production` call, no run-up).
     2. **Multiple family case** - assert that no order gets assigned to a
        machine that can't run it, otherwise same setup as in part 1.
     3. **Idling case** - mix of orders across weeks such that some pairs will
@@ -426,9 +433,10 @@ Verify the loop terminates without hanging in each of:
 
 Given a plant whose capacity exceeds total demand + safety:
 
-1. **Single item, single machine** — total scheduled lbs (sum over
-   `report.jobs_by_item[item_id]`) ≥ `sum(weekly_lbs_needed) +
-   item.safety`. Every `safety_view.orders[i].remaining_lbs == 0` on
+1. **Single item, single machine** — total scheduled lbs (sum of
+   `job.total_lbs` over `report.jobs_by_item[item_id]`) ≥
+   `sum(weekly_lbs_needed) + item.safety`. Every
+   `safety_view.orders[i].remaining_lbs == 0` on
    the post-plan rls_item. `unmet_lbs_by_item_week` is empty.
 2. **Single item, multiple eligible machines** — committed activities
    appear on more than one machine (the window mechanism spreads
@@ -459,8 +467,8 @@ demand + safety:
 #### 1.4.4 Window advancement
 
 1. **Narrow initial window** — `state.window_end = state.start_date`.
-   Fresh machines have `next_job_end == start_date` and are initially
-   in window. After commits push `next_job_end` past `window_end`,
+   Fresh machines have `schedule_tail == start_date` and are initially
+   in window. After commits push `schedule_tail` past `window_end`,
    the loop calls `advance_window()` to bring more decisions in.
    Verify multiple advances occur during plan execution (e.g.,
    snapshot `state.window_end` before and after `plan`; it should

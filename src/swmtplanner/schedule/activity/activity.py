@@ -26,7 +26,7 @@ def _make_id_counter():
     return _next
 
 
-_JOB_ID = _make_id_counter()
+_KNIT_ID = _make_id_counter()
 _WASTE_ID = _make_id_counter()
 _TAPE_OUT_ID = _make_id_counter()
 _BEAM_LOAD_ID = _make_id_counter()
@@ -44,38 +44,25 @@ class Activity(HasID[str]):
 
 
 @dataclass(frozen=True)
-class Job(Activity):
-    """Productive activity. The plant ships only whole rolls
-    (~`item.tgt_wt` lbs each) or half rolls (~`item.tgt_wt / 2`),
-    within tolerance — so `Job.lbs` is normally `N * tgt_wt` (N
-    whole rolls) or `N * tgt_wt + tgt_wt / 2` (N whole + a half-roll
-    from a beam runout). The half-roll rule lives in `_split_roll`
-    in `schedule/machine/machine.py`. Yarn that doesn't fit those
-    sizes — over-half scraps or sub-half tails at a runout — is
-    emitted as a separate `Waste` activity, never folded into
-    `Job.lbs`.
+class Knit(Activity):
+    """A single uninterrupted productive run: the machine knits `lbs`
+    of `item` from its current threading without stopping. One `Knit`
+    is bounded by changeovers, beam loads, idles, or doffs on either
+    side. A longer production order that spans beam swaps is a sequence
+    of `Knit`s on the activity schedule, tied together as one `Job`
+    record on the production schedule.
 
-    `rolls` is the per-roll delivery schedule: a tuple of
-    `(lbs, completion_time)` pairs, one per physical roll coming off
-    the machine, in chronological order. Each entry is either a whole
-    roll (`tgt_wt` ± tolerance) or a half-roll (`tgt_wt / 2` ±
-    tolerance); their lbs sum to exactly `Job.lbs`. The demand layer
-    reads `rolls` rather than treating the whole `Job.lbs` as
-    delivered at `Job.end`, since the dyeing plant is on the same
-    campus and rolls ship as they come off — lateness is per-roll,
-    not per-Job.
-
-    Defaults to `()` so hand-constructed `Job`s in tests continue to
-    work; the demand views treat an empty `rolls` as a single chunk
-    at `Job.end` (the pre-`rolls` behavior)."""
+    `Knit` carries no per-roll detail — roll completions live on the
+    `Job` record in `schedule/job`. The demand layer reads `Job.rolls`,
+    never `Knit`s. (Formerly `Job(Activity)`; renamed now that `Job`
+    refers to the production-schedule record, not an activity.)"""
     item: 'Greige'
     lbs: float
-    rolls: tuple[tuple[float, datetime], ...] = ()
-    _count: int = field(default_factory=_JOB_ID, init=False)
+    _count: int = field(default_factory=_KNIT_ID, init=False)
 
     @property
     def id(self) -> str:
-        return f'JOB{self._count:05}'
+        return f'KNIT{self._count:05}'
 
 
 @dataclass(frozen=True)

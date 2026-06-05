@@ -76,7 +76,7 @@ def _machine(
     """A bare Machine sufficient for the coordination tests. With
     `init_top_lbs == init_btm_lbs == 1e6` and an item rate of 100 lbs/hr
     split 50/50, `next_runout` sits ~20,000 work-hours after `start` —
-    cleanly distinct from `next_job_end == start` for the dp_time
+    cleanly distinct from `schedule_tail == start` for the dp_time
     tests."""
     return Machine(
         machine_id, init_item, start,
@@ -88,7 +88,7 @@ def _machine(
 
 def _move(
     machine_id: str, item: Greige,
-    start_at: Literal['next_job_end', 'next_runout'] = 'next_job_end',
+    start_at: Literal['schedule_tail', 'next_runout'] = 'schedule_tail',
     idle_for: timedelta = timedelta(0),
 ) -> Move:
     """A bare Move sufficient for the coordination tests — the
@@ -514,13 +514,13 @@ class BuildContextTests(unittest.TestCase):
             ctx.new_machine_avail,
             build_new_machine_avail(state, candidates),
         )
-        # M_new's next_job_end (t0) is earliest across the two
+        # M_new's schedule_tail (t0) is earliest across the two
         # candidates.
         self.assertEqual(ctx.earliest_dp_time, t0)
 
     def test_dp_time_resolution_per_start_at(self):
         # 1.3.2: same machine, one candidate per start_at value.
-        # `next_job_end` candidate's dp_time = machine.next_job_end;
+        # `schedule_tail` candidate's dp_time = machine.schedule_tail;
         # `next_runout` candidate's dp_time = machine.next_runout
         # (which is much later for this fixture).
         item_a = _greige('AU_A', safety=0.0)
@@ -530,13 +530,13 @@ class BuildContextTests(unittest.TestCase):
             rls_items={'AU_A': rls_a}, machines={'M1': m},
         )
         # Sanity check the fixture: the two times are distinct.
-        self.assertGreater(m.next_runout, m.next_job_end)
+        self.assertGreater(m.next_runout, m.schedule_tail)
 
-        # Single next_job_end candidate.
+        # Single schedule_tail candidate.
         ctx = build_context(
-            state, [_move('M1', item_a, start_at='next_job_end')],
+            state, [_move('M1', item_a, start_at='schedule_tail')],
         )
-        self.assertEqual(ctx.earliest_dp_time, m.next_job_end)
+        self.assertEqual(ctx.earliest_dp_time, m.schedule_tail)
 
         # Single next_runout candidate.
         ctx = build_context(
@@ -571,7 +571,7 @@ class BuildContextTests(unittest.TestCase):
 
     def test_carrying_avoidance_idle_ignored_in_dp_time(self):
         # 1.3.4: a candidate with idle_for > 0 doesn't shift its
-        # dp_time. The function reads machine.next_job_end directly,
+        # dp_time. The function reads machine.schedule_tail directly,
         # not effective_start. Confirms idle isn't double-counted
         # between level_loading and idle_time.
         item_a = _greige('AU_A', safety=0.0)
@@ -581,13 +581,13 @@ class BuildContextTests(unittest.TestCase):
             rls_items={'AU_A': rls_a}, machines={'M1': m},
         )
         move_with_idle = _move(
-            'M1', item_a, start_at='next_job_end',
+            'M1', item_a, start_at='schedule_tail',
             idle_for=timedelta(hours=24),
         )
 
         ctx = build_context(state, [move_with_idle])
-        # dp_time == m.next_job_end, NOT m.next_job_end + 24h.
-        self.assertEqual(ctx.earliest_dp_time, m.next_job_end)
+        # dp_time == m.schedule_tail, NOT m.schedule_tail + 24h.
+        self.assertEqual(ctx.earliest_dp_time, m.schedule_tail)
 
     def test_empty_candidate_list_raises(self):
         # 1.3.5: build_context(state, []) raises ValueError via

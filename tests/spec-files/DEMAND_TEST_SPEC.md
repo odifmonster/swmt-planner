@@ -210,8 +210,9 @@ sections 1–3 below pass a one-element list (`[job]`). Section 4 covers multi-j
         - `bisect_right` places the hypothetical after the existing job; this is the boundary
         case where insertion position is ambiguous on time alone.
 4. Multi-job batch behavior
-    - These tests cover the case where `plan_production` emits multiple `Job`s from one
-    decision (mid-stream beam exhaustion split, or `'next_runout'` mode's run-up). Both
+    - These tests cover the case where `plan_production` emits two `Job`s from one
+    decision (`'next_runout'` mode's run-up `Job` of the current item plus the new
+    item's `Job`; a single `Job` otherwise spans any mid-stream beam loads). Both
     `register_jobs` and `cost_if` accept a list and treat the batch as a single update.
     1. `register_jobs([j1, j2])` yields the same end state as `register_jobs([j1])` followed
        by `register_jobs([j2])`. Compare both `CostComponents` and per-order `allocated_lbs`.
@@ -219,5 +220,6 @@ sections 1–3 below pass a one-element list (`[job]`). Section 4 covers multi-j
     3. `cost_if([j1, j2])` returns the same `CostComponents` as registering the batch and
        reading the view trackers. State unchanged after the call.
     4. `cost_if([j1, j2])` equals `cost_if([j2, j1])` — order in the input list does not affect
-       the result, because `register_jobs` sorts by `job.end` internally.
+       the result, because `register_jobs` sorts by each job's final roll
+       `completion_time` internally.
     5. `cost_if([])` returns the current state's cost; state unchanged.

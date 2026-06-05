@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, TYPE_CHECKING
 
-from swmtplanner.schedule import Activity, Job
+from swmtplanner.schedule import Job, ProductionPlan
 
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
@@ -17,10 +17,12 @@ class Move:
     """A candidate placement: produce `lbs` of `item` on `machine_id`
     starting at `start_at`, with `idle_for` of leading idle time.
 
-    `plan` is the cached output of `machine.plan_production(item, lbs,
-    start_at, idle_for)`. The loop computes it once at enumeration time
-    and reuses it for scoring (via `Costing.score_after_move`) and
-    committing (via `State.commit_move`).
+    `plan` is the cached `ProductionPlan` from
+    `machine.plan_production(item, lbs, start_at, idle_for)`. The loop
+    computes it once at enumeration time and reuses it for scoring (via
+    `Costing.score_after_move`) and committing (via `State.commit_move`),
+    reading `plan.activities` for the machine schedule and `plan.jobs`
+    for the production records.
 
     `week_idx` is the week index of the order this move addresses, or
     `None` for safety-replenishment moves. The cost layer uses it to
@@ -30,9 +32,9 @@ class Move:
     machine_id: str
     item: 'Greige'
     lbs: float
-    start_at: Literal['next_job_end', 'next_runout']
+    start_at: Literal['schedule_tail', 'next_runout']
     idle_for: timedelta
-    plan: list[Activity]
+    plan: ProductionPlan
     week_idx: int | None = None
 
 
@@ -99,18 +101,20 @@ class State:
     reference_threshold: int = 5
 
     def commit_move(self, move: Move) -> None:
-        """Apply `move` to the appropriate machine and rls_items. All
-        `Job` activities in `move.plan` are grouped by `job.item.id` and
-        submitted to each `RlsItem` as a batch via `register_jobs` —
-        matching the contract documented in `demand/DESIGN.md` and
+        """Apply `move` to the appropriate machine and rls_items. The
+        plan's activities are appended to the machine's activity schedule
+        and its `Job` records to the machine's production schedule; the
+        same `Job` records are grouped by `job.item.id` and submitted to
+        each `RlsItem` as a batch via `register_jobs` — matching the
+        contract documented in `demand/DESIGN.md` and
         `schedule/DESIGN.md`."""
         machine = self.machines[move.machine_id]
-        machine.add_activities(move.plan)
+        machine.add_activities(move.plan.activities)
+        machine.add_jobs(move.plan.jobs)
 
         jobs_by_item: dict[str, list[Job]] = {}
-        for a in move.plan:
-            if isinstance(a, Job):
-                jobs_by_item.setdefault(a.item.id, []).append(a)
+        for job in move.plan.jobs:
+            jobs_by_item.setdefault(job.item.id, []).append(job)
 
         for item_id, jobs in jobs_by_item.items():
             self.rls_items[item_id].register_jobs(jobs)

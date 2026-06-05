@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from datetime import timedelta
+from datetime import datetime, timedelta
 from bisect import bisect_right
 
 from swmtplanner.support import HasID
@@ -10,12 +10,17 @@ from swmtplanner.demand.order import WeeklyDemand
 from swmtplanner.demand.view import RawView, SafetyAwareView
 
 if TYPE_CHECKING:
-    from datetime import datetime
     from swmtplanner.products import Greige
     from swmtplanner.schedule import Job
 
 def _due_date(start: 'datetime', idx: int):
     return start + timedelta(weeks=idx)
+
+def _job_completion(job: 'Job') -> datetime:
+    """Sort key for the production schedule: a job's final roll's
+    `completion_time` (its effective end). A job with no rolls sorts
+    first via `datetime.min`."""
+    return job.rolls[-1].completion_time if job.rolls else datetime.min
 
 @dataclass(frozen=True)
 class CostComponents:
@@ -88,7 +93,7 @@ class RlsItem(HasID[str]):
 
     @property
     def scheduled_lbs(self) -> float:
-        return sum(j.lbs for j in self._jobs)
+        return sum(j.total_lbs for j in self._jobs)
 
     @property
     def total_demand_lbs(self) -> float:
@@ -116,11 +121,13 @@ class RlsItem(HasID[str]):
 
     def register_jobs(self, jobs: list['Job']):
         """Insert each of `jobs` into the internal job list (kept sorted by
-        `job.end`) then re-run both views' `recompute` once. `jobs` may be
-        empty, in which case this just re-runs the views against the
-        unchanged job list."""
+        each job's final `roll.completion_time`) then re-run both views'
+        `recompute` once. `jobs` may be empty, in which case this just
+        re-runs the views against the unchanged job list."""
         for job in jobs:
-            idx = bisect_right(self._jobs, job.end, key=lambda j: j.end)
+            idx = bisect_right(
+                self._jobs, _job_completion(job), key=_job_completion,
+            )
             self._jobs.insert(idx, job)
         self._recompute_views()
 
@@ -130,7 +137,9 @@ class RlsItem(HasID[str]):
         current state's cost."""
         new_jobs = list(self._jobs)
         for job in jobs:
-            idx = bisect_right(new_jobs, job.end, key=lambda j: j.end)
+            idx = bisect_right(
+                new_jobs, _job_completion(job), key=_job_completion,
+            )
             new_jobs.insert(idx, job)
 
         self._raw_view.recompute(new_jobs, self._on_hand_lbs)
