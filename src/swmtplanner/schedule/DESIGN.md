@@ -49,18 +49,11 @@ each roll lands, demand says *how expensive that when is*.
 The constructor builds `initial_status` from these fields. The status is then
 exposed read-only.
 
-Module-level constants (constant across all machines):
-
-- `TAPE_OUT_SINGLE_DURATION = 4 hours` — taping out one bar while the other
-  is empty.
-- `TAPE_OUT_BOTH_DURATION = 6 hours` — taping out both bars at once.
-- `BEAM_LOAD_DURATION = 2 hours` — loading a fresh beam onto one bar.
-
 Module-level function:
 
 - `fresh_beam_lbs(beam: BeamSet) -> float` — the lbs of yarn on a freshly
-  loaded beam, by yarn-denier convention. Low-denier beams (≤ 45D) hold
-  **2800 lbs**; higher-denier beams hold **1800 lbs**. Used by
+  loaded beam, by yarn-denier convention (the threshold and per-denier lbs
+  are module-level constants — see the Constants section). Used by
   `plan_production` whenever a `BeamLoad` is emitted; the values are a
   plant-wide convention rather than per-machine config. Lives at module
   level instead of on `BeamSet` because it is plant-specific operational
@@ -86,18 +79,26 @@ Activity (abstract)               # anything that occupies machine time
   start: datetime
   end: datetime
 
-  Knit(Activity)                  # a continuous block of fabric production
-                                  # at the machine's current item rate.
-                                  # Same shape as the old Job-as-Activity:
-                                  # one `Knit` per uninterrupted run, lbs a
-                                  # multiple of item.tgt_wt under the
-                                  # current runout model.
+  Knit(Activity)                  # a continuous block of fabric production at
+                                  # the machine's current item rate — one
+                                  # `Knit` per uninterrupted run between beam
+                                  # events. A roll may straddle a `BeamLoad`,
+                                  # so a `Knit` can end mid-roll.
     item: Greige
-    lbs: float                    # always a multiple of item.tgt_wt
+    lbs: float                    # arbitrary; bounded by the usable yarn knit
+                                  # before the next beam event (not constrained
+                                  # to whole rolls or halves)
 
-  Waste(Activity)
+  Waste(Activity)                 # usable yarn discarded from a swapped-out
+                                  # beam — removed unknit (zero machine time),
+                                  # not fabric the machine ran. Applying it
+                                  # empties the named `bar` (beam -> None,
+                                  # lbs -> 0); a paired `BeamLoad` refills it.
     item: Greige
-    lbs: float                    # partial-roll fabric that gets discarded
+    bar: Literal['top', 'btm']    # which bar's residual is discarded
+    lbs: float                    # usable residue on `bar` (bar_lbs - floor),
+                                  # below the max-waste threshold, discarded
+                                  # unknit when the beam is swapped
 
   TapeOut(Activity)
     bars: Literal['top', 'btm', 'both']
@@ -224,7 +225,7 @@ All durations are deterministic given (machine, activity spec).
 | Activity | Duration |
 |---|---|
 | `Knit(item, lbs)` | `lbs / item.get_rate_on_mchn(machine.id)` |
-| `Waste(item, lbs)` | `lbs / item.get_rate_on_mchn(machine.id)` |
+| `Waste(item, bar, lbs)` | `timedelta(0)` — yarn is swapped out unknit, not run |
 | `TapeOut('top')` or `TapeOut('btm')` | `TAPE_OUT_SINGLE_DURATION` |
 | `TapeOut('both')` | `TAPE_OUT_BOTH_DURATION` |
 | `BeamLoad(...)` | `BEAM_LOAD_DURATION` |
@@ -237,6 +238,38 @@ The two style-change durations are machine-specific because different
 machines (manual pattern-wheel vs. digitally programmed) take different
 amounts of time to reconfigure. Tape-out and beam-load are physical-handling
 operations whose time does not vary meaningfully by machine.
+
+## Constants
+
+Module-level constants (defined in `activity.py` / `machine.py`).
+
+**Fixed activity durations** — physical-handling operations whose time does
+not vary meaningfully by machine (referenced by name in the durations table
+above):
+
+- **`TAPE_OUT_SINGLE_DURATION = 4h`** — a single-bar `TapeOut`.
+- **`TAPE_OUT_BOTH_DURATION = 6h`** — a `TapeOut('both')`; more than two
+  singles because the floor can't parallelize the cuts.
+- **`BEAM_LOAD_DURATION = 2h`** — mounting one fresh beam.
+
+**Fresh-beam yarn** — plant-wide convention for how much yarn a freshly loaded
+beam holds, by yarn denier (used by `fresh_beam_lbs`):
+
+- **`LOW_DENIER_FRESH_LBS = 2800`** — lbs on a fresh low-denier (≤ 45D) beam.
+- **`HIGH_DENIER_FRESH_LBS = 1800`** — lbs on a fresh higher-denier beam.
+- **`LOW_DENIER_THRESHOLD = 45`** — denier at or below which a beam counts as
+  low-denier.
+
+**Runout model** (Step 2) — tunable, to be calibrated against real floor
+behavior:
+
+- **`BEAM_FLOOR_LBS = 5`** — residue that can't be knit off a beam. A beam is
+  never run to zero; the usable yarn on a bar is
+  `usable = bar_lbs - BEAM_FLOOR_LBS`.
+- **`MAX_BEAM_WASTE_LBS = 100`** — the operator won't knit through a
+  near-empty beam: when a bar's `usable` falls below this, the bar is
+  swapped — its residual discarded as `Waste` — before the next roll
+  starts, rather than knit down further.
 
 ## Beam-swap decision
 
@@ -271,44 +304,43 @@ that distinguishes family changes from simple ones.
 
 ## Roll-level production
 
-The plant ships only two roll sizes: **whole rolls** of ~`Greige.tgt_wt`
-lbs and **half rolls** of ~`tgt_wt / 2` lbs, each within tolerance of
-its target weight. Yarn that doesn't fit those two discrete sizes is
-waste.
+The plant ships **whole rolls** of ~`Greige.tgt_wt` lbs (within tolerance of
+the target weight). `plan_production` is called with `lbs` already a multiple
+of `tgt_wt` (the demand layer plans in whole-roll quantities, since all real
+orders are for full rolls), so every roll a call produces is a whole roll.
+There are no half rolls and no run-out-induced partials — the half-roll rule
+of the previous model is gone.
 
-When a beam exhausts mid-stream, the **half-roll rule** in
-`_split_roll` partitions the remaining producible yarn:
+**Rolls straddle beam loads.** A beam is never knit to zero, and a roll is
+never cut short at a runout. When a bar reaches `BEAM_FLOOR_LBS` partway
+through a roll, the machine swaps that beam (a `BeamLoad`) and the *same*
+roll keeps winding on the fresh beam up to its full `tgt_wt`. So a roll can be
+produced across two `Knit`s separated by a `BeamLoad`:
 
-- Producible close to `tgt_wt / 2`: yield one half-roll of that weight.
-  Example: `producible=350, tgt_wt=700` ⇒ one 350-lb half-roll.
-- Producible above the half-roll target: yield one half-roll of
-  exactly `tgt_wt / 2`, the over-half remainder becomes Waste. Example:
-  `producible=500, tgt_wt=700` ⇒ one 350-lb half-roll plus 150 lbs of
-  Waste.
-- Producible below the half-roll target (minus tolerance): too small
-  for any roll, all Waste. Example: `producible=14, tgt_wt=700` ⇒ 14
-  lbs of Waste.
-- Producible near `N * tgt_wt` (within tolerance): N whole rolls
-  summing to exactly `producible` lbs (each roll's weight may sit
-  within tolerance of `tgt_wt`).
+- A `Knit` is one uninterrupted run between beam events, so it can end
+  mid-roll — its `lbs` is whatever was wound before the swap, **not**
+  constrained to whole rolls (nor halves). Example: `tgt_wt=700`, a bar with
+  430 usable lbs of capacity left mid-roll ⇒ a `Knit` of 430 lbs, a
+  `BeamLoad`, then a `Knit` that finishes the roll's remaining 270 lbs and
+  continues.
+- The roll itself is still a whole roll (~`tgt_wt`); only its production is
+  split across the swap. Its `completion_time` is when its final lbs are
+  wound, in whichever `Knit` completes it.
 
-A `Knit` activity's lbs is always whole rolls + at most one half-roll
-(rolls that complete within that knit). Across a single
-`plan_production` call, every roll produced — whether a whole roll or
-a half-roll from a runout — is recorded as a `Roll(lbs,
-completion_time)` entry on the same `Job` record, which the call
-returns alongside the activity list. `Waste.lbs` covers the discarded
-yarn; its duration is calculated at the same production rate as a
-`Knit`, and no doffing / cleanup activity is emitted afterward.
+`Waste` is no longer knitted fabric. It is the **usable residue on a beam the
+planner swaps early** — when a bar's `usable` (`bar_lbs - BEAM_FLOOR_LBS`)
+falls below `MAX_BEAM_WASTE_LBS`, that yarn is discarded unknit (see the
+max-waste rule in the production loop). `Waste` therefore carries the `bar`
+whose residue is discarded and has zero duration; no doffing / cleanup
+activity is emitted.
 
-`plan_production` is called with `lbs` already a multiple of `tgt_wt`
-(the demand layer plans in whole-roll quantities, since all real orders
-are for full rolls). The half-roll rule applies only to runout-induced
-partials inside the production loop, not to the request shape.
+Across a single `plan_production` call, every (whole) roll produced is
+recorded as a `Roll(lbs, completion_time)` entry on the same `Job` record,
+which the call returns alongside the activity list.
 
-Only `Job` records reach the demand layer. `Knit`, `Waste`, and the
-other activity types affect machine occupation and end-time
-calculation but are never registered with an `RlsItem`.
+Only `Job` records reach the demand layer. `Knit`, `Waste`, and the other
+activity types affect machine occupation and end-time calculation but are
+never registered with an `RlsItem`.
 
 ## The `plan_production` walk
 
@@ -323,8 +355,8 @@ additions (one or two `Job` records). `start_at` is one of:
   production loop, and the call yields one `Job` for the new item.
 - `'next_runout'` — the machine continues running its current item until
   the next beam exhausts, *then* changes over to the new item. The
-  activity list begins with `Knit`s (and possibly a `Waste`) of
-  `current_item`, followed by the changeover preamble and the
+  activity list begins with `Knit`s of `current_item`, followed by the
+  changeover preamble and the
   new-item production loop. The call yields one `Job` for the
   current item's run-up rolls plus one for the new item (or only the
   new-item `Job` if the run-up produced no whole rolls).
@@ -358,49 +390,62 @@ In `'schedule_tail'` mode, no run-up activities are emitted. The
 **working status** (the status against which the changeover preamble
 is computed) is `current_status` directly.
 
-In `'next_runout'` mode, walk forward producing the current item until a
-beam exhausts:
+In `'next_runout'` mode, the run-up produces the current item toward a beam
+runout — but only in **whole rolls**. It never starts a roll the current
+beams can't finish above the floor, so it never strands the machine mid-roll
+at the changeover:
 
 ```
 current_item = current_status.current_item
-producible = min(current_status.top_lbs_remaining / current_item.top_pct,
-                 current_status.btm_lbs_remaining / current_item.btm_pct)
-complete_rolls_lbs = (producible // current_item.tgt_wt) * current_item.tgt_wt
-partial_lbs        = producible - complete_rolls_lbs
-
-if complete_rolls_lbs > 0: emit Knit(current_item, complete_rolls_lbs)
-if partial_lbs > 0:        emit Waste(current_item, partial_lbs)
+top_usable = current_status.top_lbs_remaining - BEAM_FLOOR_LBS
+btm_usable = current_status.btm_lbs_remaining - BEAM_FLOOR_LBS
+producible = min(top_usable / current_item.top_pct,
+                 btm_usable / current_item.btm_pct)
+n_rolls    = producible // current_item.tgt_wt
+if n_rolls > 0: emit Knit(current_item, n_rolls * current_item.tgt_wt)
 ```
 
-Each completed roll inside this run-up — whole rolls from
-`complete_rolls_lbs`, plus the half-roll captured by the `Waste`
-fallback when applicable — is appended as a `Roll` entry on the
-run-up's `Job` record for `current_item`. The call yields that
-`Job` alongside the new-item `Job` from phase 3.
+Each whole roll is appended as a `Roll` entry on the run-up's `Job` record
+for `current_item`; the call yields that `Job` alongside the new-item `Job`
+from phase 3 (no run-up `Job` when `n_rolls == 0`). **No `Waste` is emitted
+here** — the run-up never knits a partial, so there is no runout fabric to
+discard.
 
-The working status after the run-up has at least one beam at zero (the
-bar(s) that exhausted; possibly both if they exhausted simultaneously) and
-`current_item` unchanged.
+The run-up emits **no beam work of its own.** Because it stops on a whole-roll
+boundary rather than draining a bar, each bar is left with its leftover usable
+yarn — the **limiting bar** (the one that capped `producible`) with less than
+one roll's worth, the other bar possibly more. The changeover preamble
+(phase 2) then resolves every bar uniformly — preserve (`TapeOut`), discard
+(`Waste`), keep, or load — per the new item's yarn and each bar's `usable`.
+
+The working status after the run-up has `current_item` unchanged, with both
+bars still carrying their leftover yarn.
 
 ### 2. Changeover preamble
 
-For each bar, the working status falls into one of three cases:
+The run-up no longer drains a bar to empty, so a bar reaching the preamble
+can be in one of four states. For each bar — given the new `item`'s required
+yarn and the bar's `usable = bar_lbs - BEAM_FLOOR_LBS` — the preamble emits:
 
-| Bar state | New item's yarn matches? | Activities for that bar |
-|---|---|---|
-| Has yarn | yes | (none) |
-| Has yarn | no | `TapeOut` + `BeamLoad` |
-| Empty (post-runout) | always needs a load | `BeamLoad` only |
+| Bar state | Activities for that bar |
+|---|---|
+| Empty / at the floor (`usable <= 0`) | `BeamLoad` only |
+| Yarn matches the new item | (none) — the beam and its leftover carry over; the new item draws it at its own pct |
+| Yarn doesn't match, `usable > MAX_BEAM_WASTE_LBS` | `TapeOut` + `BeamLoad` — preserve the worthwhile yarn (machine reverses; preserved beam not tracked in inventory yet) |
+| Yarn doesn't match, `usable <= MAX_BEAM_WASTE_LBS` | `Waste(bar)` + `BeamLoad` — discard the residue |
 
-A bar with yarn never escapes a tape-out when its yarn doesn't match — the
-machine doesn't drop yarn unless we have a reason. This applies whether
-the working status is from `'schedule_tail'` mode (both bars always have
-yarn) or `'next_runout'` mode (one or both bars now empty).
+The bottom two rows are the new runout-model behavior. Previously a beam
+runout left the bar empty, so the preamble only ever loaded it. Now the
+run-up stops on a whole-roll boundary, leaving the bar with **post-run-out
+yarn**: usable that's less than one roll's worth but, when above
+`MAX_BEAM_WASTE_LBS`, still worth preserving with a `TapeOut` rather than
+discarding. A bar whose yarn matches is never taped out or wasted — the
+machine doesn't drop yarn without reason.
 
-When both bars have yarn *and* both need swapping, emit a single
-`TapeOut('both')` instead of two singles. `'both'` is only possible in
-`'schedule_tail'` mode; in `'next_runout'` mode at least one bar is empty,
-so the most we can emit is a single `TapeOut('top'|'btm')`.
+When both bars are taped out together, emit a single `TapeOut('both')` rather
+than two singles (cheaper per the duration table). Since the run-up emits no
+beam work, this applies in both modes — a `'next_runout'` run can leave both
+bars carrying mismatched yarn above the threshold, exactly the `'both'` case.
 
 After all beam work (if any), if `working_status.current_item != item`,
 emit `StyleChange(from_item=working_status.current_item, to_item=item,
@@ -409,43 +454,70 @@ working_status.current_item.family != item.family))`.
 
 ### 3. Production loop
 
-Let `remaining = lbs` and run:
+`plan_production` is called with `lbs` a multiple of `tgt_wt`, so the loop
+owes `rolls_left = lbs / item.tgt_wt` whole rolls. It winds them continuously,
+breaking the run into separate `Knit`s only at beam events. Each bar's
+`usable = bar_lbs - BEAM_FLOOR_LBS`; a bar is exhausted at `usable <= 0`.
+
+There are two swap triggers, both routed through one `resolve` step:
+
+- **Pre-roll max-waste gate** — before starting a roll, swap any bar whose
+  `usable` is below `MAX_BEAM_WASTE_LBS` (discard its residue as `Waste`)
+  rather than knit through a near-empty beam.
+- **Mid-roll runout + co-swap** — if a bar reaches the floor partway through a
+  roll, reload it (the roll continues on the fresh beam) and, in the same
+  operation, co-swap the *other* bar when it has also fallen below the
+  threshold.
 
 ```
-while remaining > 0:
-    producible = min(top_lbs_remaining / item.top_pct,
-                     btm_lbs_remaining / item.btm_pct)
+rolls_left  = lbs / item.tgt_wt        # whole rolls owed
+roll_filled = 0.0                      # lbs wound on the in-progress roll
+knit        = 0.0                      # lbs in the current (unflushed) Knit
 
-    if producible >= remaining:
-        emit Knit(item, remaining)
-        remaining = 0
-        break
+flush():   if knit > 0: emit Knit(item, knit); knit = 0
 
-    complete_rolls_lbs = (producible // item.tgt_wt) * item.tgt_wt
-    partial_lbs        = producible - complete_rolls_lbs
+# reload any exhausted bar; swap (and discard the residue of) any near-empty
+# bar. Flushes the open Knit whenever it emits beam work.
+resolve():
+    for bar in (top, btm):
+        u = usable(bar)                          # bar_lbs - BEAM_FLOOR_LBS
+        if u <= 0:                               # exhausted — reload to continue
+            flush(); emit BeamLoad(bar)
+        elif u < MAX_BEAM_WASTE_LBS:             # near-empty — swap, discard residue
+            flush(); emit Waste(bar, u); emit BeamLoad(bar)
 
-    if complete_rolls_lbs > 0:
-        emit Knit(item, complete_rolls_lbs)
-        remaining -= complete_rolls_lbs
-    if partial_lbs > 0:
-        emit Waste(item, partial_lbs)
+while rolls_left > 0:
+    if roll_filled == 0:
+        resolve()                                # pre-roll max-waste gate
+    producible = min(usable(top) / item.top_pct,
+                     usable(btm) / item.btm_pct)
+    step = min(item.tgt_wt - roll_filled, producible)
+    knit += step; roll_filled += step            # draws both bars at their pcts
+    if roll_filled >= item.tgt_wt:               # roll complete
+        record Roll(item.tgt_wt, completion_time = end of this step)
+        roll_filled = 0; rolls_left -= 1
+    else:                                        # a bar hit BEAM_FLOOR mid-roll
+        resolve()                                # reload it; co-swap the other if near-empty
 
-    # whichever bar(s) exhausted, swap them
-    emit BeamLoad for the exhausted bar(s)   # no TapeOut — already empty
-    # if only one bar exhausted, the other carries lbs forward unchanged
+flush()                                          # final Knit
 ```
 
-Every roll that completes inside this loop — whole rolls produced by
-the `Knit`s, plus the half-roll captured by the `Waste` fallback when
-applicable — is appended as a `Roll` entry on the new-item `Job`
-record. When the loop terminates, that `Job` (and the run-up `Job`
-from phase 1, if any) is bundled into the `ProductionPlan` the call
+A `Knit` spans as many consecutive rolls as one beam state allows and ends
+mid-roll when a swap intervenes — its `lbs` is whatever was wound since the
+previous beam event, not a whole-roll multiple. Every roll is a whole `tgt_wt`
+roll; a roll that straddles a `BeamLoad` is wound partly before and partly
+after the swap, completing in the later `Knit`.
+
+Every completed roll is appended as a `Roll(lbs, completion_time)` entry on the
+new-item `Job` record. When the loop terminates, that `Job` (and the run-up
+`Job` from phase 1, if any) is bundled into the `ProductionPlan` the call
 returns.
 
-If only one bar exhausts, the other's remaining lbs carry into the next
-iteration. The planner does **not** preemptively swap a non-exhausted bar
-at the same time — that is a scheduler-level optimization, not a planner
-responsibility.
+Unlike the previous model, the loop **does** co-swap a non-exhausted bar: when
+one bar runs out, the other is swapped too if it has fallen below
+`MAX_BEAM_WASTE_LBS`, so the machine doesn't return to a near-empty beam it
+would have to swap again a roll or two later. A bar still above the threshold
+carries its remaining yarn into the next `Knit` unchanged.
 
 All emitted activities have `start` / `end` anchored to the activity-schedule
 tail and threaded through `workcal`. The walk does not mutate `current_status`,
@@ -469,9 +541,9 @@ or `current_status.as_of` and ending at `end`. Accounts for:
 
 - Required changeover preamble if the machine's threaded state doesn't
   already match `item` (tape-outs, beam-loads, style-change).
-- Mid-stream beam swaps within the window (each consumes
-  `BEAM_LOAD_DURATION` only — natural exhaustion doesn't require taping
-  the exhausted bar).
+- Mid-stream beam swaps within the window (each adds `BEAM_LOAD_DURATION`;
+  mid-stream swaps never tape out, and a max-waste residue discard is a
+  zero-duration `Waste`, so neither adds machine time beyond the load).
 - `workcal` — only counts actual work hours in the window.
 - Rounds down to a whole multiple of `item.tgt_wt`.
 
@@ -525,14 +597,14 @@ a production-schedule record rather than an activity.)
 machine.next_runout: datetime
 ```
 
-Forward-extrapolated time at which top or btm beam will exhaust, assuming
-`current_status.current_item` continues running from `current_status.as_of`.
-Always well-defined: `current_item` is never `None`, and real greiges always
-draw from both bars (`top_pct, btm_pct > 0`).
+Forward-extrapolated time at which top or btm beam will reach its floor
+(`BEAM_FLOOR_LBS`), assuming `current_status.current_item` continues running
+from `current_status.as_of`. Always well-defined: `current_item` is never
+`None`, and real greiges always draw from both bars (`top_pct, btm_pct > 0`).
 
 ```
-producible_before_runout = min(top_lbs_remaining / top_pct,
-                               btm_lbs_remaining / btm_pct)
+producible_before_runout = min((top_lbs_remaining - BEAM_FLOOR_LBS) / top_pct,
+                               (btm_lbs_remaining - BEAM_FLOOR_LBS) / btm_pct)
 hours = producible_before_runout / current_item.get_rate_on_mchn(id)
 next_runout = workcal.offset_work_hours(current_status.as_of, hours)
 ```
