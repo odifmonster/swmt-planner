@@ -597,21 +597,34 @@ a production-schedule record rather than an activity.)
 machine.next_runout: datetime
 ```
 
-Forward-extrapolated time at which top or btm beam will reach its floor
-(`BEAM_FLOOR_LBS`), assuming `current_status.current_item` continues running
-from `current_status.as_of`. Always well-defined: `current_item` is never
-`None`, and real greiges always draw from both bars (`top_pct, btm_pct > 0`).
+Forward-extrapolated time at which the machine would change over after
+running `current_status.current_item` from `current_status.as_of`. This must
+agree with what `plan_production` actually does in `'next_runout'` mode: the
+run-up produces **whole rolls only** and stops before any roll the beams
+can't finish above the floor (`BEAM_FLOOR_LBS`). So `next_runout` is the end
+of that **last whole roll**, not the instant a beam first crosses the floor —
+the two would otherwise disagree by up to a partial roll. Always
+well-defined: `current_item` is never `None`, and real greiges always draw
+from both bars (`top_pct, btm_pct > 0`).
 
 ```
-producible_before_runout = min((top_lbs_remaining - BEAM_FLOOR_LBS) / top_pct,
-                               (btm_lbs_remaining - BEAM_FLOOR_LBS) / btm_pct)
-hours = producible_before_runout / current_item.get_rate_on_mchn(id)
+usable      = min((top_lbs_remaining - BEAM_FLOOR_LBS) / top_pct,
+                  (btm_lbs_remaining - BEAM_FLOOR_LBS) / btm_pct)
+n_rolls     = floor(usable / current_item.tgt_wt)   # whole rolls only, snapped for float drift
+hours       = n_rolls * current_item.tgt_wt / current_item.get_rate_on_mchn(id)
 next_runout = workcal.offset_work_hours(current_status.as_of, hours)
 ```
 
+When fewer than one whole roll fits above the floor (`n_rolls == 0`,
+including a bar already at or below the floor), `next_runout ==
+current_status.as_of` — the changeover is immediately due.
+
 `next_runout` is a **prediction**. The run-out is not necessarily reflected
 as activities on the machine's schedule yet — it just describes when the
-current beam state, run forward, would force a swap.
+current beam state, run forward in whole rolls, would force a swap. It shares
+the same whole-roll computation as the run-up (see "Run-up" above) so the
+predicted changeover time matches the activities a `'next_runout'` plan
+emits.
 
 ## File I/O
 

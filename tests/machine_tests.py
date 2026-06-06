@@ -122,11 +122,13 @@ class MachineConstructionTests(unittest.TestCase):
         self.assertEqual(m.schedule_tail, _START)
 
     def test_initial_next_runout(self):
-        # top=200, btm=300, top_pct=0.4, btm_pct=0.6, rate=100 lbs/h.
-        # top exhausts at 200/0.4 = 500 lbs; btm at 300/0.6 = 500 lbs.
-        # Simultaneous, 500 lbs / 100 lbs/h = 5h after _START.
+        # top=200, btm=300, top_pct=0.4, btm_pct=0.6, rate=100, tgt_wt=100,
+        # BEAM_FLOOR_LBS=5. Usable fabric: top (200-5)/0.4=487.5, btm
+        # (300-5)/0.6=491.67 -> top limits at 487.5 lbs. next_runout is the
+        # end of the last *whole* roll: floor(487.5/100)=4 rolls = 400 lbs,
+        # 400/100 = 4h after _START (not the 4.875h floor-crossing point).
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        self.assertEqual(m.next_runout, _START + timedelta(hours=5))
+        self.assertEqual(m.next_runout, _START + timedelta(hours=4))
 
 
 # --- 1.2 Per-activity-type status update --------------------------------
@@ -158,21 +160,43 @@ class ActivityStatusUpdateTests(unittest.TestCase):
         )
         self.assertEqual(s, m.status_at(end))
 
-    def test_waste_consumes_lbs_but_keeps_current_item(self):
-        # 25 lbs of A as waste: 10 top, 15 btm. current_item still A.
+    def test_waste_top_empties_named_bar_and_keeps_item(self):
+        # Waste('top') discards top's residue unknit: top beam -> None and
+        # top lbs -> 0; btm untouched; current_item stays A. Zero duration
+        # (start == end), so as_of is unchanged.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        end = _START + timedelta(minutes=15)
-        m.add_activities([Waste(start=_START, end=end, item=_ITEM_A, lbs=25.0)])
+        m.add_activities([Waste(start=_START, end=_START, item=_ITEM_A,
+                                bar='top', lbs=45.0)])
         s = m.current_status
         self._expect(
             s,
-            as_of=end,
-            top_lbs_remaining=190.0,
-            btm_lbs_remaining=285.0,
+            as_of=_START,
+            top_beam=None,
+            btm_beam=_BTM_BEAM,
+            top_lbs_remaining=0.0,
+            btm_lbs_remaining=300.0,
             current_item=_ITEM_A,
             is_idle=True,
         )
-        self.assertEqual(s, m.status_at(end))
+        self.assertEqual(s, m.status_at(_START))
+
+    def test_waste_btm_empties_named_bar_and_keeps_item(self):
+        # Symmetric: Waste('btm') clears btm only; top untouched.
+        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
+        m.add_activities([Waste(start=_START, end=_START, item=_ITEM_A,
+                                bar='btm', lbs=55.0)])
+        s = m.current_status
+        self._expect(
+            s,
+            as_of=_START,
+            top_beam=_TOP_BEAM,
+            btm_beam=None,
+            top_lbs_remaining=200.0,
+            btm_lbs_remaining=0.0,
+            current_item=_ITEM_A,
+            is_idle=True,
+        )
+        self.assertEqual(s, m.status_at(_START))
 
     def test_tape_out_top_only(self):
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
@@ -480,37 +504,45 @@ class StatusAtTests(unittest.TestCase):
 class NextRunoutTests(unittest.TestCase):
 
     def test_top_runs_out_first(self):
-        # top=200, btm=400: producible_top=500, producible_btm=666.67. Top wins.
-        # 500 / 100 = 5h.
+        # top=200, btm=400: usable top (200-5)/0.4=487.5, btm
+        # (400-5)/0.6=658.33 -> top limits. floor(487.5/100)=4 rolls ->
+        # 400/100 = 4h.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=400.0)
-        self.assertEqual(m.next_runout, _START + timedelta(hours=5))
-
-    def test_btm_runs_out_first(self):
-        # top=400, btm=240: producible_top=1000, producible_btm=400. Btm wins.
-        # 400 / 100 = 4h.
-        m = _make_machine(init_top_lbs=400.0, init_btm_lbs=240.0)
         self.assertEqual(m.next_runout, _START + timedelta(hours=4))
 
+    def test_btm_runs_out_first(self):
+        # top=400, btm=240: usable top (400-5)/0.4=987.5, btm
+        # (240-5)/0.6=391.67 -> btm limits. floor(391.67/100)=3 rolls ->
+        # 300/100 = 3h.
+        m = _make_machine(init_top_lbs=400.0, init_btm_lbs=240.0)
+        self.assertEqual(m.next_runout, _START + timedelta(hours=3))
+
     def test_simultaneous_runout(self):
-        # top=200, btm=300: both producible at 500 lbs.
-        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
+        # top=215, btm=320: usable top (215-5)/0.4=525, btm
+        # (320-5)/0.6=525 -> equal (simultaneous floor). floor(525/100)=5
+        # rolls -> 500/100 = 5h (the 5.25h floor-crossing rounds down).
+        m = _make_machine(init_top_lbs=215.0, init_btm_lbs=320.0)
         self.assertEqual(m.next_runout, _START + timedelta(hours=5))
 
-    def test_after_job_reflects_remaining_lbs(self):
-        # A Job that consumes proportionally to the item's pcts doesn't
-        # change *when* the beams will exhaust in absolute time — it just
-        # advances `as_of` by the time it took and shrinks the remaining
-        # lbs by exactly that much. So next_runout stays at +5h.
+    def test_after_knit_of_whole_roll_preserves_absolute_runout(self):
+        # Producing whole rolls of the current item doesn't change *when*
+        # the beams force a changeover in absolute time: a whole 100-lb roll
+        # advances as_of by 1h and drops the remaining whole-roll count by
+        # exactly one. Initial next_runout is +4h (4 rolls); after the roll
+        # (top-=40->160, btm-=60->240, as_of=+1h): usable
+        # min((160-5)/0.4,(240-5)/0.6)=387.5 -> floor(3.875)=3 rolls -> 3h,
+        # so +1h + 3h = +4h, unchanged.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        end = _START + timedelta(minutes=30)
+        end = _START + timedelta(hours=1)
         m.add_activities([Knit(start=_START, end=end,
-                              item=_ITEM_A, lbs=50.0)])
-        self.assertEqual(m.next_runout, _START + timedelta(hours=5))
+                              item=_ITEM_A, lbs=100.0)])
+        self.assertEqual(m.next_runout, _START + timedelta(hours=4))
 
     def test_after_beam_load_pushes_runout_later(self):
-        # TapeOut top 20 min, BeamLoad top → 500 lbs (30 min). After: top=500,
-        # btm=300, as_of=+50min. producible = min(500/0.4, 300/0.6) = 500.
-        # 500 / 100 = 5h → next_runout = +50min + 5h.
+        # TapeOut top, then BeamLoad top -> 500 lbs. After: top=500,
+        # btm=300, as_of=t2. usable min((500-5)/0.4,(300-5)/0.6)=
+        # min(1237.5, 491.67)=491.67 -> floor(4.9167)=4 rolls -> 4h.
+        # next_runout = t2 + 4h.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         t0 = _START
         t1 = t0 + timedelta(minutes=20)
@@ -520,12 +552,12 @@ class NextRunoutTests(unittest.TestCase):
             BeamLoad(start=t1, end=t2, bar='top',
                      beam=_TOP_BEAM, lbs=500.0),
         ])
-        self.assertEqual(m.next_runout, t2 + timedelta(hours=5))
+        self.assertEqual(m.next_runout, t2 + timedelta(hours=4))
 
     def test_after_style_change_uses_new_item_pcts_and_rate(self):
-        # StyleChange A→C. After change, top_pct=0.2, btm_pct=0.8, rate=50.
-        # producible = min(200/0.2, 300/0.8) = min(1000, 375) = 375.
-        # 375 / 50 = 7.5h.
+        # StyleChange A->C. C: top_pct=0.2, btm_pct=0.8, rate=50, tgt_wt=150.
+        # usable min((200-5)/0.2,(300-5)/0.8)=min(975,368.75)=368.75 ->
+        # floor(368.75/150)=2 rolls -> 2*150=300 lbs / 50 = 6h.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         end = _START + timedelta(minutes=15)
         m.add_activities([
@@ -533,22 +565,31 @@ class NextRunoutTests(unittest.TestCase):
                         from_item=_ITEM_A, to_item=_ITEM_C,
                         is_family_change=True),
         ])
-        self.assertEqual(m.next_runout,
-                         end + timedelta(hours=7, minutes=30))
+        self.assertEqual(m.next_runout, end + timedelta(hours=6))
 
     def test_after_tape_out_both_runout_is_immediate(self):
-        # Both bars at 0 → producible 0 → next_runout == as_of.
+        # Both bars at 0 -> usable negative -> n_rolls clamps to 0 ->
+        # next_runout == as_of (the changeover is immediately due).
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
         end = _START + timedelta(hours=1)
         m.add_activities([TapeOut(start=_START, end=end, bars='both')])
         self.assertEqual(m.next_runout, end)
 
+    def test_below_one_whole_roll_runout_is_immediate(self):
+        # Usable yarn above the floor but less than one whole roll: top=40
+        # -> usable (40-5)/0.4=87.5 fabric lbs < tgt_wt=100 (btm=300 slack).
+        # floor(87.5/100)=0 rolls -> next_runout == as_of even though the
+        # bar is well above the floor (distinguishes the whole-roll stopping
+        # point from the raw floor-crossing point).
+        m = _make_machine(init_top_lbs=40.0, init_btm_lbs=300.0)
+        self.assertEqual(m.next_runout, _START)
+
     def test_workcal_offset_crosses_non_work_hours(self):
-        # 9-hour workday (8:00–17:00), Mon-Fri. _START is Mon 9:00.
-        # Synthetic item: rate=1 lb/h, top_pct=1.0, btm_pct=1.0.
-        # top=10 lbs constrains; btm=100 lbs is slack.
-        # producible_before_runout = 10 lbs → 10 work-hours offset.
-        # offset(Mon 9:00, 10h): 8h fits Mon (until 17:00); 2h remaining →
+        # 9-hour workday (8:00-17:00), Mon-Fri. _START is Mon 9:00.
+        # Synthetic item: rate=1 lb/h, top_pct=1.0, btm_pct=1.0, tgt_wt=1.0.
+        # top=15 lbs constrains; btm=100 is slack. usable_top=(15-5)/1=10 ->
+        # floor(10/1)=10 rolls -> 10 lb / 1 = 10 work-hours offset.
+        # offset(Mon 9:00, 10h): 8h fits Mon (until 17:00); 2h remaining ->
         # Tue 8:00 + 2h = Tue 10:00.
         item = Greige(
             'TEST', family='X', tgt_wt=1.0,
@@ -557,7 +598,7 @@ class NextRunoutTests(unittest.TestCase):
             safety=1.0, machines={'M1': 1.0},
         )
         m = _make_machine(
-            init_item=item, init_top_lbs=10.0, init_btm_lbs=100.0,
+            init_item=item, init_top_lbs=15.0, init_btm_lbs=100.0,
             workcal=_WEEKDAY_9H,
         )
         self.assertEqual(m.next_runout, datetime(2026, 5, 19, 10, 0))
@@ -587,6 +628,17 @@ _ITEM_F = Greige(  # different yarn on both bars AND different family
     btm_beam='90D GREEN 1000X4', btm_pct=0.6,
     safety=1000.0, machines={'M1': 100.0},
 )
+# Large-roll item (same yarn/family as A) for the production-loop runout
+# cases: tgt_wt=300 makes the per-roll yarn draw (300*pct = 120 top / 180
+# btm) exceed MAX_BEAM_WASTE_LBS=100, so a bar can reach the floor exactly
+# at a roll boundary (clean reload, no Waste) instead of always passing
+# through the (0, MAX] waste window. Fresh beams: 40D->2800, 60D->1800.
+_ITEM_BIG = Greige(
+    'AU_BIG', family='A', tgt_wt=300.0,
+    top_beam='40D BLACK 1000X4', top_pct=0.4,
+    btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+    safety=1000.0, machines={'M1': 100.0},
+)
 
 
 def _shape(plan):
@@ -601,7 +653,7 @@ def _shape(plan):
         if isinstance(a, Knit):
             out.append(('Knit', a.lbs, a.item.id))
         elif isinstance(a, Waste):
-            out.append(('Waste', a.lbs, a.item.id))
+            out.append(('Waste', a.bar, a.lbs, a.item.id))
         elif isinstance(a, TapeOut):
             out.append(('TapeOut', a.bars))
         elif isinstance(a, BeamLoad):
@@ -708,118 +760,132 @@ class PlanProductionLoopTests(unittest.TestCase):
         _assert_single_job(self, plan, 'AU0001', 500.0, 5)
         self.assertEqual(_knit_count(plan), 1)
 
-    def test_top_exhausts_at_roll_boundary_no_waste(self):
-        # top=200, btm=2000(slack), top_pct=0.4 → top_capacity=500=5 rolls.
-        # 40D denier → fresh top is 2800 lbs.
-        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='schedule_tail')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
-            ('BeamLoad', 'top', 2800.0),
-            ('Knit', 200.0, 'AU0001'),
-        ])
-        # One Job spanning the beam swap, backed by two Knits.
-        _assert_single_job(self, plan, 'AU0001', 700.0, 7)
-        self.assertEqual(_knit_count(plan), 2)
-
-    def test_top_exhausts_mid_roll_emits_waste(self):
-        # Synthetic item with tgt_wt=300 (half-roll threshold = 150).
-        # init_top_lbs=160 ⇒ producible=400 = 1 roll + 100 partial.
-        # 100 < 150, so the partial is below the half-roll threshold
-        # and is discarded as Waste rather than folded into the Job.
-        item_big_roll = Greige(
-            'AU_BIG', family='A', tgt_wt=300.0,
-            top_beam='40D BLACK 1000X4', top_pct=0.4,
-            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
-            safety=1000.0, machines={'M1': 100.0},
-        )
-        m = _make_machine(init_item=item_big_roll,
-                          init_top_lbs=160.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(item_big_roll, lbs=600.0,
+    def test_exhaust_at_roll_boundary_no_waste(self):
+        # 2.3.3.1. _ITEM_BIG (tgt 300, top_pct 0.4 -> 120 yarn/roll). top=245
+        # so usable_top hits exactly 0 at the 3rd-roll boundary (knit=600:
+        # 245-240-5=0), having been 240 / 120 at the prior boundaries -- it
+        # jumps the (0, MAX] window, so the gate reloads with NO Waste.
+        # btm=3000 stays well above MAX throughout.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=245.0, init_btm_lbs=3000.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Knit', 300.0, 'AU_BIG'),     # 1 complete roll before top runs out
-            ('Waste', 100.0, 'AU_BIG'),   # sub-half partial, discarded
+            ('Knit', 600.0, 'AU_BIG'),       # 2 whole rolls before top floor
             ('BeamLoad', 'top', 2800.0),
-            ('Knit', 300.0, 'AU_BIG'),     # 1 more complete roll on the new beam
+            ('Knit', 300.0, 'AU_BIG'),       # final roll on the fresh beam
         ])
-        # One Job (2 whole rolls) across the swap; the Waste is excluded.
-        _assert_single_job(self, plan, 'AU_BIG', 600.0, 2)
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
         self.assertEqual(_knit_count(plan), 2)
 
-    def test_top_exhausts_mid_roll_yields_half_roll_plus_waste(self):
-        # tgt_wt=300 ⇒ half-roll target = 150 lbs. init_top_lbs=200 gives
-        # producible = 200/0.4 = 500 lbs = 1 whole roll (300) + 200 over.
-        # The over-200 partial doesn't fit a whole roll, and it's above
-        # the 150-lb half-roll target — so one half-roll of *exactly*
-        # 150 lbs is taken, and the remaining 50 lbs becomes Waste
-        # (yarn that fits in neither a full nor a half roll).
-        item_big_roll = Greige(
-            'AU_HALF', family='A', tgt_wt=300.0,
-            top_beam='40D BLACK 1000X4', top_pct=0.4,
-            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
-            safety=1000.0, machines={'M1': 100.0},
-        )
-        m = _make_machine(init_item=item_big_roll,
-                          init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(item_big_roll, lbs=600.0,
+    def test_exhaust_at_roll_boundary_coswaps_below_max_bar(self):
+        # 2.3.3.2. btm=365 hits exactly 0 at the 3rd-roll boundary (reload);
+        # top=305 has only 60 usable yarn there (305-240-5=60 < MAX), so the
+        # gate co-swaps it -> a zero-duration Waste(top,60) + BeamLoad(top)
+        # alongside btm's reload. (top boundary usables 300 / 180 stayed
+        # above MAX before, so it isn't swapped earlier.)
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=305.0, init_btm_lbs=365.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Knit', 450.0, 'AU_HALF'),    # 1 whole roll (300) + 1 half-roll (150)
-            ('Waste', 50.0, 'AU_HALF'),   # over-half yarn that doesn't fit
-            ('BeamLoad', 'top', 2800.0),
-            ('Knit', 150.0, 'AU_HALF'),    # final-leg half-roll for remaining 150
-        ])
-        # One Job across the swap: rolls (300, 150, 150) = 3 rolls / 600 lbs.
-        _assert_single_job(self, plan, 'AU_HALF', 600.0, 3)
-        self.assertEqual(_knit_count(plan), 2)
-
-    def test_btm_exhausts_at_roll_boundary(self):
-        # top=2000(slack), btm=300 → btm_capacity=500=5 rolls.
-        # 60D denier → fresh btm is 1800 lbs.
-        m = _make_machine(init_top_lbs=2000.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_A, lbs=700.0, start_at='schedule_tail')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
-            ('BeamLoad', 'btm', 1800.0),
-            ('Knit', 200.0, 'AU0001'),
-        ])
-        # One Job spanning the btm-bar swap, backed by two Knits.
-        _assert_single_job(self, plan, 'AU0001', 700.0, 7)
-        self.assertEqual(_knit_count(plan), 2)
-
-    def test_both_bars_exhaust_simultaneously(self):
-        # top=200, btm=300: top_lbs/top_pct == btm_lbs/btm_pct == 500.
-        # Both bars need a reload after the first 500 lbs.
-        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_A, lbs=800.0, start_at='schedule_tail')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
+            ('Knit', 600.0, 'AU_BIG'),
+            ('Waste', 'top', 60.0, 'AU_BIG'),   # co-swapped, below MAX
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
-            ('Knit', 300.0, 'AU0001'),
+            ('Knit', 300.0, 'AU_BIG'),
         ])
-        # One Job across the simultaneous swap, backed by two Knits.
-        _assert_single_job(self, plan, 'AU0001', 800.0, 8)
+        # The Waste lbs are not part of the Job.
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
+        self.assertEqual(_knit_count(plan), 2)
+
+    def test_exhaust_mid_roll_single_beam_load(self):
+        # 2.3.4.1 straddle (also the §2.3.5 single-btm case). btm=305 hits
+        # the floor 200 lbs into the 2nd roll (knit=500: 305-300-5=0);
+        # top=3000 stays above MAX, so only btm reloads and the roll
+        # continues on the fresh beam as one whole roll -- no Waste.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=3000.0, init_btm_lbs=305.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
+                                 start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 500.0, 'AU_BIG'),       # roll 1 + 200 lbs of roll 2
+            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 400.0, 'AU_BIG'),       # 100 lbs finishing roll 2 + roll 3
+        ])
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
+        self.assertEqual(_knit_count(plan), 2)
+
+    def test_exhaust_mid_roll_double_beam_load_coswap(self):
+        # 2.3.4.2 (other bar below MAX). btm=305 floors mid-roll-2 at
+        # knit=500; top=255 has 50 usable yarn there (255-200-5=50 < MAX),
+        # so the runout co-swaps top -> Waste(top,50) + BeamLoad(top) in
+        # addition to btm's reload. Two beam loads.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=255.0, init_btm_lbs=305.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
+                                 start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 500.0, 'AU_BIG'),
+            ('Waste', 'top', 50.0, 'AU_BIG'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 400.0, 'AU_BIG'),
+        ])
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
+        self.assertEqual(_knit_count(plan), 2)
+
+    def test_exhaust_mid_roll_both_bars_simultaneously(self):
+        # 2.3.4.2 (both at floor mid-roll). top=235, btm=350 both reach the
+        # floor 275 lbs into roll 2 (knit=575: 235-230-5=0 and
+        # 350-345-5=0). Two BeamLoads, no Waste.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=235.0, init_btm_lbs=350.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
+                                 start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 575.0, 'AU_BIG'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 325.0, 'AU_BIG'),
+        ])
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
+        self.assertEqual(_knit_count(plan), 2)
+
+    def test_both_bars_exhaust_simultaneously_at_boundary(self):
+        # 2.3.6. top=245, btm=365 both hit exactly 0 at the 3rd-roll
+        # boundary (knit=600). Two BeamLoads, no Waste (both at the floor,
+        # nothing above it to discard).
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=245.0, init_btm_lbs=365.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=900.0,
+                                 start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 600.0, 'AU_BIG'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 300.0, 'AU_BIG'),
+        ])
+        _assert_single_job(self, plan, 'AU_BIG', 900.0, 3)
         self.assertEqual(_knit_count(plan), 2)
 
     def test_cascading_exhaustion_loops_more_than_twice(self):
-        # After cycle 1 (Job 500 + reload both), cycle 2 produces 3000 lbs
-        # before btm runs out again at 1800/0.6=3000. Cycle 3 finishes the
-        # remaining 600.
-        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_A, lbs=4100.0,
+        # 2.3.7. top=365, btm=365: btm floors at the 3rd-roll boundary
+        # (reload btm), then top floors at the next boundary (reload top) --
+        # two reloads on different bars give three Knit segments. Clean
+        # boundaries throughout, so no Waste.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=365.0, init_btm_lbs=365.0)
+        plan = m.plan_production(_ITEM_BIG, lbs=1200.0,
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
+            ('Knit', 600.0, 'AU_BIG'),
+            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 300.0, 'AU_BIG'),
             ('BeamLoad', 'top', 2800.0),
-            ('BeamLoad', 'btm', 1800.0),
-            ('Knit', 3000.0, 'AU0001'),
-            ('BeamLoad', 'btm', 1800.0),
-            ('Knit', 600.0, 'AU0001'),
+            ('Knit', 300.0, 'AU_BIG'),
         ])
-        # One Job across three Knits (loop iterated more than twice).
-        _assert_single_job(self, plan, 'AU0001', 4100.0, 41)
+        _assert_single_job(self, plan, 'AU_BIG', 1200.0, 4)
         self.assertEqual(_knit_count(plan), 3)
 
 
@@ -843,102 +909,52 @@ class PlanProductionStartAtTests(unittest.TestCase):
         _assert_single_job(self, plan, 'AU0002', 200.0, 1)
 
     def test_next_runout_emits_run_up_before_changeover(self):
-        # Run-up emits Knits of current_item until exhaustion, then changeover,
-        # then new production.
+        # Run-up emits WHOLE rolls of the current item (no Waste, no beam
+        # work of its own), then the changeover, then new production.
+        # init 200/400: run-up usable min((200-5)/0.4, (400-5)/0.6) =
+        # min(487.5, 658.33) = 487.5 -> floor(4.875)=4 rolls = 400 lbs of A.
+        # After: top=40, btm=160 (leftover, same yarn as B). The preamble
+        # keeps both bars (matching yarn) so it emits only the StyleChange.
+        # B's loop then hits the pre-roll gate: top usable 35 < MAX ->
+        # Waste(top,35) + reload; btm usable 155 > MAX -> kept.
         m = _make_machine(init_item=_ITEM_A,
-                          init_top_lbs=200.0, init_btm_lbs=300.0)
+                          init_top_lbs=200.0, init_btm_lbs=400.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),       # run-up of current item
-            ('BeamLoad', 'top', 2800.0),
-            ('BeamLoad', 'btm', 1800.0),
+            ('Knit', 400.0, 'AU0001'),          # run-up: 4 whole rolls, no Waste
             ('StyleChange', 'AU0001', 'AU0002', False),
-            ('Knit', 200.0, 'AU0002'),       # new item production
+            ('Waste', 'top', 35.0, 'AU0002'),   # loop swaps the leftover top beam
+            ('BeamLoad', 'top', 2800.0),
+            ('Knit', 200.0, 'AU0002'),          # new item production
         ])
         # Two Jobs: run-up Job (current item) then the new item's Job.
         self.assertEqual(len(plan.jobs), 2)
         self.assertEqual(plan.jobs[0].item.id, 'AU0001')
         self.assertEqual(
-            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (5, 500.0),
+            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (4, 400.0),
         )
         self.assertEqual(plan.jobs[1].item.id, 'AU0002')
         self.assertEqual(
             (plan.jobs[1].total_rolls, plan.jobs[1].total_lbs), (1, 200.0),
         )
+        # The run-up itself produced no Waste of the current item.
+        self.assertFalse(any(
+            isinstance(a, Waste) and a.item is _ITEM_A
+            for a in plan.activities
+        ))
 
-    def test_next_runout_with_partial_roll_emits_waste_in_run_up(self):
-        # Current item has tgt_wt=300 (half-roll threshold = 150).
-        # init_top_lbs=160 ⇒ producible=400 = 1 roll + 100 partial.
-        # 100 < 150, so the partial discards as Waste in the run-up
-        # rather than folding into the Job. Only top exhausted ⇒ a
-        # single BeamLoad before the StyleChange.
-        item_big = Greige(
-            'AU_RUN', family='A', tgt_wt=300.0,
-            top_beam='40D BLACK 1000X4', top_pct=0.4,
-            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
-            safety=1000.0, machines={'M1': 100.0},
-        )
-        m = _make_machine(init_item=item_big,
-                          init_top_lbs=160.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 300.0, 'AU_RUN'),
-            ('Waste', 100.0, 'AU_RUN'),
-            ('BeamLoad', 'top', 2800.0),
-            ('StyleChange', 'AU_RUN', 'AU0001', False),
-            ('Knit', 100.0, 'AU0001'),
-        ])
-        # Run-up produced a whole roll → two Jobs (run-up + new item).
-        self.assertEqual(len(plan.jobs), 2)
-        self.assertEqual(plan.jobs[0].item.id, 'AU_RUN')
-        self.assertEqual(
-            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (1, 300.0),
-        )
-        self.assertEqual(plan.jobs[1].item.id, 'AU0001')
-
-    def test_next_runout_with_half_roll_partial_in_run_up(self):
-        # Same setup as above (tgt_wt=300, init_top=200 ⇒ producible=500).
-        # The 200-lb partial is split: 150-lb half-roll into the run-up
-        # Job, 50-lb over-half remainder into Waste before the changeover.
-        item_big = Greige(
-            'AU_HRUN', family='A', tgt_wt=300.0,
-            top_beam='40D BLACK 1000X4', top_pct=0.4,
-            btm_beam='60D WHITE 1000X4', btm_pct=0.6,
-            safety=1000.0, machines={'M1': 100.0},
-        )
-        m = _make_machine(init_item=item_big,
-                          init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 450.0, 'AU_HRUN'),    # 1 whole roll + 1 half-roll
-            ('Waste', 50.0, 'AU_HRUN'),   # over-half yarn that doesn't fit
-            ('BeamLoad', 'top', 2800.0),
-            ('StyleChange', 'AU_HRUN', 'AU0001', False),
-            ('Knit', 100.0, 'AU0001'),
-        ])
-        # Run-up produced 1.5 rolls → two Jobs (run-up + new item).
-        self.assertEqual(len(plan.jobs), 2)
-        self.assertEqual(plan.jobs[0].item.id, 'AU_HRUN')
-        self.assertEqual(
-            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (2, 450.0),
-        )
-        self.assertEqual(plan.jobs[1].item.id, 'AU0001')
-
-    def test_next_runout_run_up_below_half_roll_yields_one_job(self):
-        # Current item A (tgt 100, half-roll 50). producible = 16/0.4 = 40,
-        # below the 50-lb half-roll floor — so the run-up emits only a
-        # Waste of A (no Knit) and creates NO run-up Job. Exactly one Job
-        # is produced: the new item's.
+    def test_next_runout_run_up_below_one_roll_yields_one_job(self):
+        # Current item A (tgt 100). producible = (16-5)/0.4 = 27.5 fabric
+        # lbs < tgt_wt, so the run-up makes no whole roll: it emits NOTHING
+        # (no Knit, no Waste of A) and creates no run-up Job. Exactly one
+        # Job is produced -- the new item's. (The leftover A yarn is swapped
+        # later, inside B's production loop, recorded as a Waste of B.)
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=16.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
-        # No run-up Knit of the current item — only a Waste of it.
+        # The run-up emitted nothing for the current item.
         self.assertFalse(any(
-            isinstance(a, Knit) and a.item is _ITEM_A
-            for a in plan.activities
-        ))
-        self.assertTrue(any(
-            isinstance(a, Waste) and a.item is _ITEM_A
+            isinstance(a, (Knit, Waste)) and a.item is _ITEM_A
             for a in plan.activities
         ))
         # Exactly one Job — the new item's.
@@ -1186,72 +1202,163 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
             ('Knit', 100.0, 'AU0006'),
         ])
 
+    def test_mismatched_bar_below_max_is_wasted(self):
+        # 3.1.3. A -> D (top yarn differs 30D, btm matches 60D). top has only
+        # 50 lbs -> usable 45 <= MAX_BEAM_WASTE_LBS, so its mismatched residue
+        # is discarded as a zero-duration Waste(top,45) rather than preserved
+        # with a TapeOut. The Waste is attributed to the outgoing item A.
+        m = _make_machine(init_top_lbs=50.0, init_btm_lbs=2800.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('Waste', 'top', 45.0, 'AU0001'),
+            ('BeamLoad', 'top', 2800.0),
+            ('StyleChange', 'AU0001', 'AU0004', False),
+            ('Knit', 100.0, 'AU0004'),
+        ])
+
+    def test_empty_bar_gets_beam_load_only(self):
+        # 3.1.4. A -> D, top at the floor (5 lbs -> usable 0). An empty/at-
+        # floor bar is reloaded with NO TapeOut and NO Waste (nothing worth
+        # preserving or discarding). btm matches -> kept.
+        m = _make_machine(init_top_lbs=5.0, init_btm_lbs=2800.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('BeamLoad', 'top', 2800.0),
+            ('StyleChange', 'AU0001', 'AU0004', False),
+            ('Knit', 100.0, 'AU0004'),
+        ])
+
+    def test_mixed_tape_out_and_waste_no_both(self):
+        # 3.1.6. A -> G (both yarns differ). top is full (usable > MAX) so it
+        # tapes out to preserve; btm has only 50 lbs (usable 45 <= MAX) so it
+        # wastes. Only one bar tapes -> single TapeOut('top'), NOT 'both'.
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=50.0)
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'top'),
+            ('Waste', 'btm', 45.0, 'AU0001'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0007', False),
+            ('Knit', 100.0, 'AU0007'),
+        ])
+
+    def test_matching_near_empty_bar_kept_then_swapped_in_loop(self):
+        # 3.1.7. A -> E (top matches 40D, btm differs 90D). top has only 50
+        # lbs but its yarn MATCHES E, so the preamble keeps it (no Waste, no
+        # TapeOut) -- the near-empty swap is deferred to the production
+        # loop's pre-roll gate, which then wastes it as a Waste of E. btm
+        # (mismatched, full) tapes out in the preamble.
+        m = _make_machine(init_top_lbs=50.0, init_btm_lbs=2800.0)
+        plan = m.plan_production(_ITEM_E, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'btm'),                  # preamble: btm mismatched/full
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0005', False),
+            ('Waste', 'top', 45.0, 'AU0005'),    # loop: matching near-empty top
+            ('BeamLoad', 'top', 2800.0),
+            ('Knit', 100.0, 'AU0005'),
+        ])
+
 
 # --- 3.2 'next_runout' with non-trivial changeovers ---------------------
 
 class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
 
-    def test_one_bar_exhausted_other_yarn_matches(self):
-        # top=200, btm=2000 → top exhausts at producible=500 (clean roll
-        # boundary, no Waste). After run-up: top empty, btm has matching
-        # yarn (A → D shares btm yarn). Expect only BeamLoad(top, new_top).
+    def test_both_bars_mismatched_above_max_tape_out_both(self):
+        # 3.2.1 -- the headline case the OLD drain-to-empty model made
+        # impossible. Current _ITEM_BIG (tgt 300) run up from 485/665:
+        # usable min((485-5)/0.4, (665-5)/0.6)=min(1200,1100)=1100 ->
+        # floor(1100/300)=3 rolls (900 lbs). Both bars are left with 125 lbs
+        # (usable 120 > MAX) of MISMATCHED yarn (BIG is 40D/60D, F is
+        # 30D/90D), so the preamble tapes BOTH out together -> TapeOut('both')
+        # IS reachable in next_runout mode.
+        m = _make_machine(init_item=_ITEM_BIG,
+                          init_top_lbs=485.0, init_btm_lbs=665.0)
+        plan = m.plan_production(_ITEM_F, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 900.0, 'AU_BIG'),           # run-up: 3 whole rolls
+            ('TapeOut', 'both'),
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU_BIG', 'AU0006', True),
+            ('Knit', 100.0, 'AU0006'),
+        ])
+        self.assertEqual(len(plan.jobs), 2)
+        self.assertEqual(plan.jobs[0].item.id, 'AU_BIG')
+        self.assertEqual(
+            (plan.jobs[0].total_rolls, plan.jobs[0].total_lbs), (3, 900.0),
+        )
+        self.assertEqual(plan.jobs[1].item.id, 'AU0006')
+
+    def test_limiting_bar_wasted_other_bar_taped(self):
+        # 3.2.2. A (tgt 100) run up from 200/2000 -> 4 rolls (400 lbs),
+        # leaving top=40 (usable 35) and btm=1760 (usable 1755). A -> G both
+        # yarns differ: the limiting top (usable 35 <= MAX) is wasted, while
+        # the full btm (usable 1755 > MAX) is preserved with a single
+        # TapeOut('btm').
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 400.0, 'AU0001'),
+            ('TapeOut', 'btm'),                  # other bar preserved
+            ('Waste', 'top', 35.0, 'AU0001'),    # limiting bar discarded
+            ('BeamLoad', 'top', 2800.0),
+            ('BeamLoad', 'btm', 1800.0),
+            ('StyleChange', 'AU0001', 'AU0007', False),
+            ('Knit', 100.0, 'AU0007'),
+        ])
+
+    def test_one_bar_matches_is_kept(self):
+        # 3.2.3. A -> D (btm yarn matches 60D, top differs). Run up 200/2000
+        # -> 4 rolls; top leftover (usable 35, mismatched) is wasted, btm
+        # leftover (matching) is kept and carries into D's production.
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),               # run-up of current item
-            ('BeamLoad', 'top', 2800.0),            # exhausted bar reload
+            ('Knit', 400.0, 'AU0001'),
+            ('Waste', 'top', 35.0, 'AU0001'),
+            ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU0001', 'AU0004', False),
             ('Knit', 100.0, 'AU0004'),
         ])
 
-    def test_one_bar_exhausted_other_yarn_does_not_match(self):
-        # top=200, btm=2000 → top exhausts. A → G changes both yarns, so
-        # btm (still threaded with A's yarn) needs to be taped out single.
-        # Expect TapeOut('btm') + BeamLoad(top) + BeamLoad(btm) + StyleChange.
+    def test_leftover_bar_at_floor_gets_beam_load_only(self):
+        # 3.2.4. top=205 makes the run-up land top exactly at the floor:
+        # usable (205-5)/0.4=500 = 5 whole rolls; after, top=5 (usable 0).
+        # A -> D: the at-floor top is reloaded with NO Waste (nothing above
+        # the floor to discard); btm matches and is kept.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=205.0, init_btm_lbs=2000.0)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
+        self.assertEqual(_shape(plan), [
+            ('Knit', 500.0, 'AU0001'),           # 5 whole rolls
+            ('BeamLoad', 'top', 2800.0),         # at-floor reload, no Waste
+            ('StyleChange', 'AU0001', 'AU0004', False),
+            ('Knit', 100.0, 'AU0004'),
+        ])
+
+    def test_run_up_emits_whole_rolls_and_no_waste(self):
+        # 3.2.6 regression. The run-up itself is exactly whole rolls of the
+        # current item with no Waste: the first activity is a Knit(A) whose
+        # lbs is a multiple of tgt_wt, and the run-up Job's rolls are all
+        # whole tgt_wt rolls. (Any Waste in the plan belongs to the preamble
+        # or the new item's loop, never the run-up.)
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
-            ('TapeOut', 'btm'),                     # single, not 'both'
-            ('BeamLoad', 'top', 2800.0),
-            ('BeamLoad', 'btm', 1800.0),
-            ('StyleChange', 'AU0001', 'AU0007', False),
-            ('Knit', 100.0, 'AU0007'),
-        ])
-
-    def test_both_bars_exhaust_simultaneously_with_full_changeover(self):
-        # top=200, btm=300 → both exhaust at 500. After: both empty. A → G
-        # changes both yarns but no TapeOut is needed (bars empty). Two
-        # BeamLoads then StyleChange.
-        m = _make_machine(init_item=_ITEM_A,
-                          init_top_lbs=200.0, init_btm_lbs=300.0)
-        plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
-        self.assertEqual(_shape(plan), [
-            ('Knit', 500.0, 'AU0001'),
-            ('BeamLoad', 'top', 2800.0),
-            ('BeamLoad', 'btm', 1800.0),
-            ('StyleChange', 'AU0001', 'AU0007', False),
-            ('Knit', 100.0, 'AU0007'),
-        ])
-
-    def test_tape_out_both_never_appears_in_next_runout_mode(self):
-        # Whatever the new item, after the run-up at least one bar is
-        # empty, so TapeOut('both') cannot be emitted. Spot-check with
-        # several new items spanning the changeover-shape cases.
-        for new_item in (_ITEM_D, _ITEM_E, _ITEM_F, _ITEM_G, _ITEM_H):
-            with self.subTest(new_item=new_item.id):
-                m = _make_machine(init_item=_ITEM_A,
-                                  init_top_lbs=200.0, init_btm_lbs=2000.0)
-                plan = m.plan_production(
-                    new_item, lbs=100.0, start_at='next_runout',
-                )
-                bars = [a.bars for a in plan.activities if isinstance(a, TapeOut)]
-                self.assertNotIn('both', bars)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
+        first = plan.activities[0]
+        self.assertIsInstance(first, Knit)
+        self.assertIs(first.item, _ITEM_A)
+        self.assertEqual(first.lbs % _ITEM_A.tgt_wt, 0.0)
+        run_up_job = plan.jobs[0]
+        self.assertEqual(run_up_job.item.id, 'AU0001')
+        self.assertTrue(all(r.lbs == _ITEM_A.tgt_wt for r in run_up_job.rolls))
 
     def test_style_change_is_family_change_reflects_family_comparison(self):
-        # next_runout into a different-family item triggers
+        # next_runout into a different-family item (same yarn) triggers
         # is_family_change=True.
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=200.0, init_btm_lbs=2000.0)
@@ -1398,22 +1505,27 @@ class ProducibleLbsNoPreambleTests(unittest.TestCase):
         self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 16800.0)
 
     def test_beam_bound_single_cycle(self):
-        # 5h window remaining in the week; initial top=200 (with top_pct=0.4)
-        # exhausts at 500 lbs producible = 5h. Reload would start at week_end
-        # exactly, so it doesn't fit.
+        # 5h window remaining in the week. top=200 (top_pct=0.4): usable yarn
+        # drops below MAX_BEAM_WASTE_LBS at the 4th-roll boundary
+        # (200-3*40-5=75 < 100), so only 3 whole rolls (300 lbs = 3h) are
+        # produced before the max-waste gate swaps top. The reload then runs
+        # h=3..5, ending exactly at week_end, so no 4th roll fits -> 300 lbs.
+        # (Under the no-floor model this used to be 500.)
         as_of = _W21_END - timedelta(hours=5)
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0,
                           start=as_of)
-        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 500.0)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 300.0)
 
     def test_multiple_mid_stream_reloads_fit(self):
-        # top=200, btm=300 (simultaneous exhaustion at 500 lbs). 168h window.
-        # Plan trace: 7 full cycles produce 14500 lbs by hour 161; an 8th
-        # cycle starts at h=161 with 7h of window left, producing 700 more
-        # lbs (within the partial Job before week_end). 15200 lbs total.
+        # top=200, btm=300, 168h window. Production cascades through many
+        # beam swaps; each forced BeamLoad costs 2h and each near-empty bar
+        # is swapped (a zero-duration Waste) before it would strand a roll.
+        # The floor + max-waste model leaves 15000 lbs of whole rolls fitting
+        # in the week (vs 15200 under the old no-floor model -- the residue
+        # discarded at each swap and the floor on each beam trim the total).
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0,
                           start=_W21_START)
-        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 15200.0)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 15000.0)
 
 
 # --- 4.2 Preamble required ----------------------------------------------

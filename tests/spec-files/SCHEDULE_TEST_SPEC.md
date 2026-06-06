@@ -45,8 +45,13 @@ the cached tail matches the walked value.
     - `current_item == knit.item`
     - `as_of == knit.end`, `is_idle == True`
 2. `Waste`
-    - same consumption math as `Knit`
+    - empties the named `bar`: that bar's beam → None and its
+      `lbs_remaining` → 0; the **other** bar (beam + lbs) is unchanged
+      (no proportional consumption — the yarn is dropped unknit, not run)
     - `current_item` is unchanged — `Waste` does not switch the item
+    - `Waste` is zero-duration, so `as_of == waste.start == waste.end`
+    - one sub-case per `bar` value: `bar='top'` clears top, `bar='btm'`
+      clears btm
 3. `TapeOut`
     1. `bars='top'`: top beam → None, `top_lbs_remaining` → 0; btm unchanged
     2. `bars='btm'`: btm beam → None, `btm_lbs_remaining` → 0; top unchanged
@@ -98,17 +103,39 @@ the cached tail matches the walked value.
 
 ### 1.5 `next_runout`
 
-1. Computed against the initial state
-    1. top exhausts first: `top_lbs / top_pct < btm_lbs / btm_pct`
-    2. btm exhausts first
-    3. Both simultaneous (equal ratios)
+`next_runout` is the end of the **last whole roll** the current beams can
+finish above the floor — the same whole-roll stopping point the run-up uses,
+so the prediction matches the activities a `'next_runout'` plan emits. It is
+**not** the instant a beam first crosses the floor. The usable yarn on each
+bar is `lbs_remaining - BEAM_FLOOR_LBS`; the prediction is
+`floor(min(top_usable / top_pct, btm_usable / btm_pct) / tgt_wt) * tgt_wt /
+rate` work-hours past `as_of`. Every hand-computed expectation below
+subtracts `BEAM_FLOOR_LBS` from each bar's lbs, divides by its pct, then
+**rounds down to whole rolls** before converting to time.
+
+1. Computed against the initial state (choose lbs so the usable yarn is
+   **not** a whole-roll multiple, to distinguish the whole-roll boundary
+   from the raw floor-crossing point)
+    1. top limits: `top_usable / top_pct < btm_usable / btm_pct`; expect
+       `floor(top_usable / top_pct / tgt_wt)` whole rolls' worth of time
+    2. btm limits
+    3. Both simultaneous (equal ratios after the floor subtraction)
 2. After a `Knit` that updates lbs, `next_runout` reflects the new state
+   (whole-roll count recomputed from the reduced usable yarn)
 3. After a `BeamLoad` of one bar, `next_runout` reflects the refilled lbs
+   (less the floor, rounded down to whole rolls)
 4. After a `StyleChange` to a different item, `next_runout` is recomputed
-   at the **new** item's rate and pcts
-5. After a `TapeOut('both')` with no subsequent `BeamLoad`, both bars have
-   0 lbs and `next_runout == current_status.as_of` (immediate)
-6. Workcal interaction: if `as_of` is near the end of a workday, the offset
+   at the **new** item's rate, pcts, and `tgt_wt`
+5. Fewer than one whole roll fits above the floor (`n_rolls == 0`), so the
+   changeover is immediately due and the result is `current_status.as_of`:
+    1. a bar already at or below `BEAM_FLOOR_LBS` (e.g. both bars at 0 lbs
+       after a `TapeOut('both')` with no subsequent `BeamLoad`)
+    2. usable yarn above the floor but less than one whole roll
+       (`0 < usable / pct < tgt_wt`)
+6. Whole-roll agreement: `next_runout` equals the `end` of the run-up
+   `Knit`(s) emitted by `plan_production(other_item, …, 'next_runout')` from
+   the same state (the two share one whole-roll computation)
+7. Workcal interaction: if `as_of` is near the end of a workday, the offset
    crosses the gap to the next workday and the returned datetime is in
    that day
 
@@ -173,15 +200,41 @@ is checked separately per the Job-object rule below.
 1. Single roll, no mid-stream exhaustion: one `Knit` of the requested lbs
 2. Multiple rolls, no mid-stream exhaustion: one `Knit` for the full lbs
    (the loop does not split when beams have capacity)
-3. Mid-stream exhaustion exactly at a roll boundary
-    - `Knit(complete_rolls) + BeamLoad(top) + Knit(remaining)`
-    - no `Waste` emitted
-4. Mid-stream exhaustion mid-roll
-    - `Knit(complete_rolls) + Waste(partial) + BeamLoad(top) + Knit(remaining)`
+3. Mid-stream exhaustion exactly at a roll boundary (the pre-roll
+   max-waste gate, evaluated when `roll_filled == 0`)
+    1. The exhausted bar is reloaded and the other bar is still above
+       `MAX_BEAM_WASTE_LBS`:
+       `Knit(complete_rolls) + BeamLoad(exhausted) + Knit(remaining)`;
+       no `Waste`
+    2. The exhausted bar is reloaded **and** the other bar's usable has
+       fallen below `MAX_BEAM_WASTE_LBS` at the boundary, so the gate
+       co-swaps it: a zero-duration `Waste(other_bar)` (residue discarded)
+       plus a `BeamLoad(other_bar)`, in addition to the exhausted bar's
+       `BeamLoad`. `Waste.lbs` equals the other bar's usable residue
+       (`bar_lbs - BEAM_FLOOR_LBS`); it is not part of the `Job`.
+4. Mid-stream exhaustion mid-roll — the in-progress roll **straddles** the
+   swap: it keeps winding on the fresh beam and completes as one whole
+   roll, so **no `Waste` of the partial roll** is emitted (unlike the old
+   half-roll model). The `Knit` before the swap carries whatever lbs were
+   wound (not a whole-roll multiple); the straddling roll's
+   `completion_time` falls in the `Knit` after the swap.
+    1. Single beam load: one bar reaches `BEAM_FLOOR_LBS` mid-roll while
+       the other stays above `MAX_BEAM_WASTE_LBS`:
+       `Knit(partial) + BeamLoad(bar) + Knit(rest)`
+    2. Double beam load: the runout co-swaps the other bar in the same
+       operation (bars resolved top-then-btm):
+        - other bar below `MAX_BEAM_WASTE_LBS` but not yet at the floor:
+          a `BeamLoad` for the runout bar plus `Waste(other) +
+          BeamLoad(other)` for the co-swapped bar (its residue a
+          zero-duration `Waste`), then `Knit(rest)`
+        - both bars reach the floor simultaneously mid-roll: two
+          `BeamLoad`s and **no `Waste`**, then `Knit(rest)`
 5. Mid-stream exhaustion of the btm bar (single)
 6. Both bars exhaust simultaneously
-    - set top/btm lbs so `top_lbs / top_pct == btm_lbs / btm_pct`
-    - expect two `BeamLoad`s after the partial-roll/Waste (if any), then
+    - set top/btm lbs so they reach `BEAM_FLOOR_LBS` together
+      (`top_usable / top_pct == btm_usable / btm_pct`)
+    - expect two `BeamLoad`s and **no `Waste`** (both bars sit at the
+      floor, so there is no above-floor residue to discard), then
       continuation
 7. Cascading exhaustion: the freshly loaded beam also exhausts before the
    request is satisfied (loop iterates more than twice)
@@ -195,9 +248,12 @@ the no-reload and reload cases:
 - Cases 1–2 (no mid-job `BeamLoad`): exactly **one** `Knit` activity
   corresponds to the single `Job`.
 - Cases 3–7 (one or more mid-job `BeamLoad`s): **multiple** `Knit`
-  activities correspond to the single `Job` — the `Job`'s rolls span the
-  beam-swap boundary, with roll `completion_time`s strictly increasing
-  across it.
+  activities correspond to the single `Job`, with roll `completion_time`s
+  strictly increasing across the boundary. At a roll-boundary swap (3)
+  whole rolls complete on each side; at a mid-roll swap (4) a single roll
+  is wound across two `Knit`s and completes in the later one. Every
+  recorded `Roll` is a whole `tgt_wt` roll regardless of where the `Knit`s
+  split.
 
 ### 2.4 `start_at` mode behavior
 
@@ -206,18 +262,21 @@ the no-reload and reload cases:
     - no run-up activities of the current item
     - `plan.jobs` contains exactly one `Job` (the new item)
 2. `start_at='next_runout'`
-    - run-up emits `Knit`(s) of `current_item` for complete rolls until
-      beam exhaustion, plus a `Waste` of `current_item` for any partial
-    - then `BeamLoad` for the exhausted bar(s) (no `TapeOut`)
-    - then `StyleChange` if `to_item != current_item`
+    - run-up emits `Knit`(s) of `current_item` for **whole rolls only**,
+      stopping before any roll the beams can't finish above the floor; it
+      emits **no `Waste`** and **no beam work** of its own (each bar keeps
+      its leftover usable yarn)
+    - then, in Phase 2's same-yarn case, the preamble has no
+      `TapeOut`/`BeamLoad` — just a `StyleChange` if
+      `to_item != current_item`
     - then the new item's production loop
-    - **two `Job`s produced**: a run-up `Job` of `current_item` (its
-      complete rolls) followed by the new item's `Job`, in that order —
+    - **two `Job`s produced**: a run-up `Job` of `current_item` (its whole
+      rolls) followed by the new item's `Job`, in that order —
       `plan.jobs == (run_up_job, new_item_job)`
-3. `start_at='next_runout'`, run-up yields no whole/half roll
-    - the current item's remaining yarn is below half a roll
-      (`producible < tgt_wt / 2`), so the run-up emits only a `Waste`
-      (no `Knit`) and creates no run-up `Job`
+3. `start_at='next_runout'`, run-up yields no whole roll
+    - the current item's usable yarn is less than one whole roll
+      (`producible < tgt_wt`), so the run-up emits **nothing** (no `Knit`,
+      no `Waste`) and creates no run-up `Job`
     - **one `Job` produced**: `plan.jobs` contains only the new item's
       `Job`
 
@@ -241,7 +300,9 @@ the no-reload and reload cases:
 1. Each activity's `start` equals the previous activity's `end` (or
    `current_status.as_of` for the first activity)
 2. Durations match the design's duration table
-    - `Knit` / `Waste`: `lbs / item.get_rate_on_mchn(machine.id)`
+    - `Knit`: `lbs / item.get_rate_on_mchn(machine.id)`
+    - `Waste`: zero duration (`start == end`) — the yarn is swapped out
+      unknit, not run
     - `BeamLoad`: `BEAM_LOAD_DURATION`
     - `StyleChange`: `simple_change_duration` (Phase 2 only emits the
       simple variant)
@@ -264,36 +325,83 @@ the no-reload and reload cases:
 ## Phase 3 — Complete `plan_production`
 
 The yarn-and-family restriction is lifted. Behavior previously rejected now
-produces the appropriate `TapeOut` / `BeamLoad` / `StyleChange` sequence.
+produces the appropriate `TapeOut` / `Waste` / `BeamLoad` / `StyleChange`
+sequence, per the four-state per-bar preamble rule: each bar resolves from
+its `usable = bar_lbs - BEAM_FLOOR_LBS` and whether its yarn matches the new
+item.
 
-### 3.1 Inputs previously rejected, by changeover shape
+### 3.1 Changeover preamble — per-bar resolution
 
-1. Different yarn on top only, same family
-    - `TapeOut('top') + BeamLoad(top, new) + StyleChange(is_family_change=False)`
-2. Different yarn on btm only, same family
-3. Different yarn on both bars, same family
-    - `TapeOut('both') + BeamLoad(top) + BeamLoad(btm) + StyleChange(is_family_change=False)`
-4. Same yarn on both bars, different family
-    - `StyleChange(is_family_change=True)` only; no beam work
-5. Different top yarn only, different family
-6. Different yarn on both bars, different family
-    - `TapeOut('both') + BeamLoad(top) + BeamLoad(btm) + StyleChange(is_family_change=True)`
+Each bar resolves independently into one of four actions: load-only
+(empty), keep (matching yarn), tape-out + load (mismatch worth preserving),
+or waste + load (mismatch to discard). Cases 1–4 isolate one action by
+pairing a mismatched/empty bar with a matching one, all within the same
+family (`StyleChange(is_family_change=False)`):
+
+1. Top mismatched, `usable > MAX_BEAM_WASTE_LBS`; btm matches:
+   `TapeOut('top') + BeamLoad(top) + StyleChange(is_family_change=False)`
+2. Btm mismatched, `usable > MAX_BEAM_WASTE_LBS`; top matches: symmetric —
+   `TapeOut('btm') + BeamLoad(btm) + StyleChange(is_family_change=False)`
+3. Top mismatched, `usable <= MAX_BEAM_WASTE_LBS` (discard); btm matches:
+   `Waste('top') + BeamLoad(top) + StyleChange(is_family_change=False)` —
+   the `Waste` is zero-duration, `Waste.lbs == top_usable`
+   (`top_lbs - BEAM_FLOOR_LBS`), and `Waste.item == current_item` (the
+   outgoing item whose yarn is discarded)
+4. A mismatched bar that is empty / at the floor (`usable <= 0`):
+   `BeamLoad(bar)` only — no `TapeOut`, no `Waste`
+
+Cross-bar combinations:
+
+5. Both bars mismatched, both `usable > MAX_BEAM_WASTE_LBS`, same family:
+   one `TapeOut('both') + BeamLoad(top) + BeamLoad(btm) +
+   StyleChange(is_family_change=False)` (not two single tape-outs)
+6. Both bars mismatched, top `usable > MAX` (tape) and btm
+   `usable <= MAX` (waste): `TapeOut('top') + Waste('btm') +
+   BeamLoad(top) + BeamLoad(btm) + StyleChange` — **no** `TapeOut('both')`,
+   since only one bar tapes out
+7. A matching bar is never taped or wasted even when near-empty: pair a
+   matching bar with `0 < usable <= MAX_BEAM_WASTE_LBS` against a
+   mismatched bar — the matching bar gets **no** preamble activity (its
+   near-empty swap, if any, is deferred to the production loop's pre-roll
+   gate)
+
+Family dimension (beam work resolves as above; only the `StyleChange` flag
+differs):
+
+8. Same yarn on both bars, different family:
+   `StyleChange(is_family_change=True)` only; no beam work
+9. Different yarn on both bars, different family:
+   `TapeOut('both') + BeamLoad(top) + BeamLoad(btm) +
+   StyleChange(is_family_change=True)`
 
 ### 3.2 `start_at='next_runout'` with non-trivial changeovers
 
-After the run-up exhausts one (or both) bars, the changeover preamble
-encounters at least one empty bar. Verify:
+The run-up stops on a whole-roll boundary and emits no beam work, so **both**
+bars reach the preamble carrying leftover usable yarn (the limiting bar with
+less than one roll's worth, the other possibly more). The preamble then
+resolves each bar with the **same four-state rule as §3.1** — there is no
+guaranteed-empty bar as in the old drain-to-empty model. Verify:
 
-1. One bar exhausted, the other has matching yarn for the new item
-    - emit `BeamLoad(exhausted)` only — no `TapeOut`
-2. One bar exhausted, the other has non-matching yarn
-    - emit `TapeOut(other) + BeamLoad(other) + BeamLoad(exhausted)`
-3. Both bars exhaust simultaneously
-    - emit two `BeamLoad`s, no `TapeOut`
-4. `TapeOut('both')` is never emitted in `'next_runout'` mode
-   (impossible — at least one bar is empty after the run-up)
+1. Both bars' leftover yarn mismatches the new item and both are
+   `usable > MAX_BEAM_WASTE_LBS`:
+   `TapeOut('both') + BeamLoad(top) + BeamLoad(btm) + StyleChange` —
+   confirms `TapeOut('both')` **is** reachable in `'next_runout'` mode
+   (it was impossible under the old model, where a bar was always drained
+   empty by the run-up)
+2. The limiting bar's leftover is `usable <= MAX_BEAM_WASTE_LBS` (waste)
+   while the other bar is `usable > MAX` (tape): `TapeOut(single) +
+   Waste(other) + BeamLoad(top) + BeamLoad(btm) + StyleChange`
+3. One bar's leftover yarn matches the new item (same yarn), the other
+   mismatches: the matching bar is kept (no activity); the other resolves
+   per its state
+4. A bar whose leftover lands at or below the floor (`usable <= 0`) gets
+   `BeamLoad(bar)` only — possible when the run-up's limiting bar stops
+   right at the floor
 5. `StyleChange` is emitted whenever `to_item != current_item`, with
    `is_family_change` matching the family comparison
+6. Run-up regression: the run-up itself emits only whole-roll `Knit`(s) of
+   `current_item` — no `Waste`, no beam work; all leftover-yarn handling is
+   the preamble's job
 
 ### 3.3 `StyleChange` duration
 
@@ -323,17 +431,23 @@ A pure capacity-reporting query. Does not mutate state.
 1. Empty schedule, week entirely after `as_of`: capacity bounded by
    week-hours × rate, rounded down to whole rolls
 2. Beam capacity limits the count below the time-based maximum
-    - capacity reflects what would be produced before runout, with the
-      forced mid-stream `BeamLoad` time deducted from available hours,
-      rounded down to rolls
+    - capacity reflects what is producible before each bar reaches its
+      **floor** (`usable = lbs - BEAM_FLOOR_LBS`), with each forced
+      mid-stream `BeamLoad` time deducted from available hours, rounded
+      down to whole rolls
+    - a max-waste residue discard adds a zero-duration `Waste` (no machine
+      time beyond the `BeamLoad`), so swapping a near-empty bar early does
+      not change the time budget — only the `BeamLoad`s do
 3. Multiple mid-stream `BeamLoad`s fit within the week: returned capacity
    correctly subtracts each `BeamLoad` interval
 
 ### 4.2 Preamble required
 
-1. Different yarn / family preamble fits within the week and leaves time
-   for production: returned capacity = floor((available - preamble_time) ×
-   rate / tgt_wt) × tgt_wt
+1. A changeover preamble (yarn and/or family) fits within the week and
+   leaves time for production: returned capacity =
+   floor((available - preamble_time) × rate / tgt_wt) × tgt_wt, where
+   `preamble_time` counts `TapeOut` and `BeamLoad` durations — a `Waste`
+   residue discard is zero-duration and adds nothing
 2. Preamble alone exceeds the available work hours: returns 0
 3. Preamble fits but leaves less than one full roll of time: returns 0
 

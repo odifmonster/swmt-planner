@@ -71,10 +71,14 @@ current item, hits a beam runout, swaps to a new item, and produces the
 new item. The plan's **activity stream** (`plan.activities`) is, in
 order:
 
-- `Knit(A, run-up_lbs)` — produced before the beam exhaustion.
-- optional `Waste(A, partial_lbs)` — the partial roll discarded at the
-  runout.
-- `BeamLoad(...)` — for the bar(s) that exhausted.
+- `Knit(A, run-up_lbs)` — whole rolls of `A` produced before the
+  changeover. The run-up emits **whole rolls only** — no `Waste` of a
+  partial roll (unlike the old fabric-waste model where a sub-half roll
+  was discarded at the runout).
+- changeover preamble for the leftover bars — a `TapeOut` and/or a
+  zero-duration `Waste` (discarding a below-threshold yarn residue from a
+  bar) plus a `BeamLoad` for each bar whose leftover yarn doesn't match
+  `B`. Any preamble `Waste` is a yarn discard and produces **no** `Job`.
 - `StyleChange(from=A, to=B)` — transition to the new item.
 - `Knit(B, new_item_lbs)` — production of the new item.
 
@@ -82,8 +86,9 @@ and its **production records** (`plan.jobs`) are the run-up `Job(A)`
 (the whole rolls of `A`) followed by the new-item `Job(B)`.
 
 Built by calling `Machine.plan_production(B, lbs, start_at='next_runout')`
-on a machine whose initial state has beams arranged to force the
-exhaustion to occur partway through a roll.
+on a machine whose initial state has at least one whole roll of `A`
+producible above the floor, with leftover yarn on the bars that does not
+match `B` (so the changeover preamble does real beam work).
 
 After `commit_move`:
 
@@ -118,7 +123,7 @@ right weights and that `score_after_move` stays pure — not the
 underlying numerics themselves, which are covered by the demand-view
 and machine tests.
 
-A few scenarios suffice, arranged so each of the eight Phase-1 weights
+A few scenarios suffice, arranged so each of the nine Phase-1 weights
 produces a non-trivial contribution at least once. In each test below,
 the weights for *covered* components are set to distinguishable values
 (e.g., 1, 10, 100) so a misweighting shows up as a wrong total; the
@@ -154,19 +159,35 @@ Assert: `score(state)` equals `w_tape_out_both + w_family_change`.
 
 Components covered: `tape_out_both`, `family_change`.
 
-#### 1.2.3 Excess
+#### 1.2.3 Waste (discarded yarn)
+
+Setup:
+- A machine whose committed plan contains one or more `Waste` activities
+  with known `lbs` (e.g. a changeover preamble that discards a
+  below-threshold leftover bar, or a production-loop max-waste swap).
+- No other schedule-side contributions and no demand-side contributions
+  (every other covered weight set to 0).
+
+Assert: `score(state)` equals `w_waste_lbs × Σ Waste.lbs` summed across the
+machine's `Waste` activities. Because `Waste` is zero-duration, it
+contributes nothing to `idle_time` or any time-based term — only the per-lb
+charge.
+
+Components covered: `waste_lbs`.
+
+#### 1.2.4 Excess
 
 Setup:
 - An `RlsItem` whose committed jobs total more than weekly demand plus
   the safety target, so `safety_view.excess > 0`.
 - No schedule-side contributions (no `TapeOut`, no
-  `StyleChange(is_family_change=True)`, no `Idle`).
+  `StyleChange(is_family_change=True)`, no `Idle`, no `Waste`).
 
 Assert: `score(state)` equals `w_excess × safety_view.excess`.
 
 Components covered: `excess`.
 
-#### 1.2.4 Carrying
+#### 1.2.5 Carrying
 
 Setup:
 - An `RlsItem` with a committed `Job` whose rolls all complete well
@@ -178,7 +199,7 @@ Assert: `score(state)` equals `w_carrying × safety_view.carrying`.
 
 Components covered: `carrying`.
 
-#### 1.2.5 `score_after_move`
+#### 1.2.6 `score_after_move`
 
 For any of the above scenarios (or a similar one), with a chosen
 `Move`:
@@ -193,7 +214,7 @@ For any of the above scenarios (or a similar one), with a chosen
    view trackers (`raw_view.lateness`, `safety_view.drainage` /
    `carrying` / `excess` / `safety_pool`) are unchanged.
 
-#### 1.2.6 Priority cost
+#### 1.2.7 Priority cost
 
 The priority cost is the opportunity-cost estimate the cost layer
 charges per move for deferring higher-priority regular orders — see

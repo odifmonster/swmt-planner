@@ -150,21 +150,26 @@ class Machine(HasID[str]):
 
     @property
     def next_runout(self) -> datetime:
-        """Forward-extrapolated time at which top or btm beam will reach its
-        floor (`_BEAM_FLOOR_LBS`), assuming `current_status.current_item`
-        continues running from `current_status.as_of`. A beam is never knit
-        to zero, so the prediction is based on the usable yarn
-        (`lbs_remaining - _BEAM_FLOOR_LBS`) on each bar. Real greiges always
-        draw from both bars (top_pct, btm_pct > 0), so this is always
-        well-defined."""
+        """Forward-extrapolated time at which the machine would change over
+        after running `current_status.current_item` from
+        `current_status.as_of`. Matches `plan_production`'s whole-roll
+        behavior: the run-up produces whole rolls only, so this is the end of
+        the **last whole roll** that finishes above the floor
+        (`_BEAM_FLOOR_LBS`) — not the instant a beam first crosses the floor.
+        Real greiges always draw from both bars (top_pct, btm_pct > 0), so
+        this is always well-defined. When fewer than one whole roll fits
+        above the floor (including a bar already at or below it),
+        `next_runout == current_status.as_of` — the changeover is
+        immediately due."""
         s = self._current_status
         cfg = s.current_item.configuration
-        producible_before_runout = min(
-            (s.top_lbs_remaining - _BEAM_FLOOR_LBS) / cfg.top_pct,
-            (s.btm_lbs_remaining - _BEAM_FLOOR_LBS) / cfg.btm_pct,
+        item = s.current_item
+        n_rolls = _whole_rolls_before_floor(
+            s.top_lbs_remaining, cfg.top_pct,
+            s.btm_lbs_remaining, cfg.btm_pct, item.tgt_wt,
         )
-        rate = s.current_item.get_rate_on_mchn(self._id)
-        hours = producible_before_runout / rate
+        rate = item.get_rate_on_mchn(self._id)
+        hours = n_rolls * item.tgt_wt / rate
         return self._workcal.offset_work_hours(s.as_of, hours)
 
     def producible_lbs_through(
@@ -407,18 +412,11 @@ class Machine(HasID[str]):
         `current_item` unchanged."""
         cur = working.current_item
         cfg = cur.configuration
-        top_usable = working.top_lbs_remaining - _BEAM_FLOOR_LBS
-        btm_usable = working.btm_lbs_remaining - _BEAM_FLOOR_LBS
-        producible = min(top_usable / cfg.top_pct, btm_usable / cfg.btm_pct)
-
-        # Whole rolls only; snap a near-integer count (float drift from the
-        # usable/pct division) the way producible_lbs_through does.
-        n_rolls_exact = producible / cur.tgt_wt
-        n_rolls_rounded = round(n_rolls_exact)
-        if abs(n_rolls_rounded - n_rolls_exact) < _ROLL_TOLERANCE:
-            n_rolls = n_rolls_rounded
-        else:
-            n_rolls = math.floor(n_rolls_exact)
+        # Whole rolls only — the same stopping point next_runout predicts.
+        n_rolls = _whole_rolls_before_floor(
+            working.top_lbs_remaining, cfg.top_pct,
+            working.btm_lbs_remaining, cfg.btm_pct, cur.tgt_wt,
+        )
         if n_rolls <= 0:
             return working
 
@@ -760,3 +758,30 @@ class Machine(HasID[str]):
             is_family_change=is_family_change,
         ))
         return working.apply_activity(emitted[-1])
+
+
+def _whole_rolls_before_floor(
+    top_lbs: float, top_pct: float,
+    btm_lbs: float, btm_pct: float, tgt_wt: float,
+) -> int:
+    """Whole rolls of an item with these pcts and `tgt_wt` that the given
+    bar lbs can finish before either beam reaches `_BEAM_FLOOR_LBS`. Snaps a
+    near-integer count to absorb float drift from the usable/pct division,
+    then floors; never negative.
+
+    Shared by the run-up and `next_runout` so both stop at exactly the same
+    whole-roll boundary. The plant ships only whole rolls, so the runout
+    decision point is the end of the last whole roll — not the instant a
+    beam first crosses the floor — and the prediction must match the
+    activities a `'next_runout'` plan actually emits."""
+    usable = min(
+        (top_lbs - _BEAM_FLOOR_LBS) / top_pct,
+        (btm_lbs - _BEAM_FLOOR_LBS) / btm_pct,
+    )
+    n_exact = usable / tgt_wt
+    n_rounded = round(n_exact)
+    if abs(n_rounded - n_exact) < _ROLL_TOLERANCE:
+        n = n_rounded
+    else:
+        n = math.floor(n_exact)
+    return max(0, n)

@@ -190,7 +190,7 @@ def _weights(**overrides) -> CostWeights:
     defaults = dict(
         lateness=0.0, drainage=0.0, carrying=0.0, excess=0.0,
         tape_out_single=0.0, tape_out_both=0.0,
-        family_change=0.0, idle_time=0.0,
+        family_change=0.0, idle_time=0.0, waste_lbs=0.0,
         priority=0.0, level_loading=0.0, old_machine=0.0,
     )
     defaults.update(overrides)
@@ -295,8 +295,8 @@ class StateTests(unittest.TestCase):
         state = _make_state()
         rls = state.rls_items['AU0001']
         waste = Waste(
-            start=_START, end=_START + timedelta(minutes=30),
-            item=_ITEM_A, lbs=50.0,
+            start=_START, end=_START,
+            item=_ITEM_A, bar='top', lbs=50.0,
         )
         state.commit_move(_move_with_plan([waste]))
         self.assertEqual(state.machines['M1'].activities, (waste,))
@@ -625,7 +625,30 @@ class CostingTests(unittest.TestCase):
         expected = weights.tape_out_both * 1 + weights.family_change * 1
         self.assertAlmostEqual(costing.score(state), expected)
 
-    # ----- 1.2.3 excess -----
+    # ----- 1.2.3 waste (discarded yarn) -----
+
+    def test_waste_discarded_yarn(self):
+        # A plan with two zero-duration Waste activities (45 + 55 lbs).
+        # waste_lbs is the only non-zero weight, so the score reduces to
+        # w_waste_lbs * sum(Waste.lbs). Empty rls_items -> no demand-side
+        # contributions; Waste is zero-duration -> no idle/time term.
+        machine = _make_machine('M1')
+        plan = _plan(activities=[
+            Waste(start=_START, end=_START, item=_ITEM_A, bar='top', lbs=45.0),
+            Waste(start=_START, end=_START, item=_ITEM_A, bar='btm', lbs=55.0),
+        ])
+        state = _make_state(machines={'M1': machine}, rls_items={})
+        state.commit_move(Move(
+            machine_id='M1', item=_ITEM_A, lbs=0.0,
+            start_at='schedule_tail', idle_for=timedelta(0), plan=plan,
+        ))
+
+        weights = _weights(waste_lbs=2.0)
+        costing = Costing(weights)
+        expected = weights.waste_lbs * (45.0 + 55.0)
+        self.assertAlmostEqual(costing.score(state), expected)
+
+    # ----- 1.2.4 excess -----
 
     def test_excess(self):
         # On-hand 0; register a Job at start_date with 1500 lbs. Allocation:
@@ -652,7 +675,7 @@ class CostingTests(unittest.TestCase):
         expected = weights.excess * rls.safety_view.excess
         self.assertAlmostEqual(costing.score(state), expected)
 
-    # ----- 1.2.4 carrying -----
+    # ----- 1.2.5 carrying -----
 
     def test_carrying(self):
         # Job at start_date with 900 lbs = bucket 1 + bucket 2 + bucket 3.
@@ -678,7 +701,7 @@ class CostingTests(unittest.TestCase):
         expected = weights.carrying * rls.safety_view.carrying
         self.assertAlmostEqual(costing.score(state), expected)
 
-    # ----- 1.2.5 score_after_move (equivalence + purity) -----
+    # ----- 1.2.6 score_after_move (equivalence + purity) -----
 
     def test_score_after_move_equivalence_and_purity(self):
         rls = _make_rls_item(item=_ITEM_A, on_hand=0.0)
@@ -740,10 +763,10 @@ class CostingTests(unittest.TestCase):
         self.assertAlmostEqual(predicted, costing.score(state))
 
 
-# --- 1.2.6 Priority cost --------------------------------------------------
+# --- 1.2.7 Priority cost --------------------------------------------------
 
 class PriorityCostTests(unittest.TestCase):
-    """Section 1.2.6 of INF_PLAN_TEST_SPEC.md.
+    """Section 1.2.7 of INF_PLAN_TEST_SPEC.md.
 
     Verifies the opportunity-cost shape of `Costing._priority_cost`
     against four scenarios that span the three priority buckets
@@ -781,7 +804,7 @@ class PriorityCostTests(unittest.TestCase):
     )
 
     def setUp(self):
-        """Build the shared 1.2.6 state, derive priorities, pack a
+        """Build the shared 1.2.7 state, derive priorities, pack a
         `ScoringContext`, and build a `Costing` instance with
         `w.priority = 1.0` (all other weights 0). Stored on `self` for
         each test to read."""
@@ -868,21 +891,21 @@ class PriorityCostTests(unittest.TestCase):
 
     def test_setup_priority_ordering(self):
         # Pre-flight: confirm the four-item state sorts into the rank
-        # order the rest of section 1.2.6 relies on.
+        # order the rest of section 1.2.7 relies on.
         self.assertEqual(self.ctx.priorities[OrderKey('U_LOW', 1)], 1)
         self.assertEqual(self.ctx.priorities[OrderKey('U_HIGH', 1)], 2)
         self.assertEqual(self.ctx.priorities[OrderKey('SAFETY', None)], 3)
         self.assertEqual(self.ctx.priorities[OrderKey('FUTURE', 3)], 4)
 
     def test_highest_ranked_move_pays_no_priority_cost(self):
-        # 1.2.6.1: move targets U_LOW.reg (rank 1). No higher-priority
+        # 1.2.7.1: move targets U_LOW.reg (rank 1). No higher-priority
         # order exists → priority cost is 0.
         move = self._move(self.u_low_reg.item, self.u_low_reg.week_idx)
         bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
         self.assertEqual(bd.priority, 0.0)
 
     def test_same_urgency_less_depleted_pays_for_more_depleted(self):
-        # 1.2.6.2: move targets U_HIGH.reg (rank 2). Only U_LOW.reg is
+        # 1.2.7.2: move targets U_HIGH.reg (rank 2). Only U_LOW.reg is
         # higher-priority. floor binds → days_late=1 → factor=2.
         # Expected: w × U_LOW.lbs × 2 = 1.0 × 100 × 2 = 200.
         move = self._move(self.u_high_reg.item, self.u_high_reg.week_idx)
@@ -890,7 +913,7 @@ class PriorityCostTests(unittest.TestCase):
         self.assertAlmostEqual(bd.priority, self.u_low_reg.lbs * 2.0)
 
     def test_safety_move_pays_for_both_urgent_regulars(self):
-        # 1.2.6.3: move targets SAFETY.safety (rank 3). U_LOW.reg and
+        # 1.2.7.3: move targets SAFETY.safety (rank 3). U_LOW.reg and
         # U_HIGH.reg are higher-priority. Expected:
         # w × (U_LOW.lbs + U_HIGH.lbs) × 2 = 1.0 × (100+200) × 2 = 600.
         # week_idx=None marks a safety move.
@@ -900,7 +923,7 @@ class PriorityCostTests(unittest.TestCase):
         self.assertAlmostEqual(bd.priority, expected)
 
     def test_future_move_pays_same_as_safety_move(self):
-        # 1.2.6.4: move targets FUTURE.reg (rank 4). Higher-priority
+        # 1.2.7.4: move targets FUTURE.reg (rank 4). Higher-priority
         # entries are U_LOW.reg, U_HIGH.reg, and SAFETY.safety; the
         # safety order is filtered out by the regulars-only scope, so
         # priority cost matches scenario 3.
@@ -1070,7 +1093,10 @@ class CandidateEnumerationTests(unittest.TestCase):
         })
 
     def test_eligible_dps_multi_mix_of_dps(self):
-        # M1: both DPs in window (default beams, runout at +36h).
+        # M1: both DPs in window. Default beams (btm limits): usable
+        # (1800-5)/0.5=3590 -> floor(3590/100)=35 whole rolls -> 3500 lbs /
+        # 100 = next_runout at +35h (the whole-roll stopping point; under the
+        # old no-floor model this was +36h). Still inside the 36h window.
         # M2: only schedule_tail in window — huge beams push next_runout
         # far past window_end.
         # M3: out of window entirely (starts past window_end).
@@ -1087,7 +1113,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertEqual(set(eligible_decision_points(state)), {
             DecisionPoint('M1', 'schedule_tail', _START),
             DecisionPoint('M1', 'next_runout',
-                          _START + timedelta(hours=36)),
+                          _START + timedelta(hours=35)),
             DecisionPoint('M2', 'schedule_tail', _START),
         })
 
