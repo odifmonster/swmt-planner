@@ -52,11 +52,16 @@ the cached tail matches the walked value.
     - `Waste` is zero-duration, so `as_of == waste.start == waste.end`
     - one sub-case per `bar` value: `bar='top'` clears top, `bar='btm'`
       clears btm
+    - `Waste` carries `beam` (the discarded yarn SKU); it is stored data
+      and does not affect the status transition (which only empties `bar`)
 3. `TapeOut`
     1. `bars='top'`: top beam → None, `top_lbs_remaining` → 0; btm unchanged
     2. `bars='btm'`: btm beam → None, `btm_lbs_remaining` → 0; top unchanged
     3. `bars='both'`: both bars cleared
     - `current_item` unchanged in all three cases
+    - `TapeOut` carries `top_beam` / `btm_beam` (the SKU removed from each
+      affected bar, `None` for an untouched bar); stored data for future
+      inventory tracking, not consulted by the status transition
 4. `BeamLoad`
     1. `bar='top'`: `top_beam == activity.beam`, `top_lbs_remaining == activity.lbs`
     2. `bar='btm'`: same for btm
@@ -345,8 +350,9 @@ family (`StyleChange(is_family_change=False)`):
 3. Top mismatched, `usable <= MAX_BEAM_WASTE_LBS` (discard); btm matches:
    `Waste('top') + BeamLoad(top) + StyleChange(is_family_change=False)` —
    the `Waste` is zero-duration, `Waste.lbs == top_usable`
-   (`top_lbs - BEAM_FLOOR_LBS`), and `Waste.item == current_item` (the
-   outgoing item whose yarn is discarded)
+   (`top_lbs - BEAM_FLOOR_LBS`), and `Waste.beam` is the top bar's beam SKU
+   (the outgoing yarn being discarded — `Waste` stores the beam set, not the
+   greige)
 4. A mismatched bar that is empty / at the floor (`usable <= 0`):
    `BeamLoad(bar)` only — no `TapeOut`, no `Waste`
 

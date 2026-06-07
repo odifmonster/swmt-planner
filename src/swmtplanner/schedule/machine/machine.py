@@ -477,16 +477,16 @@ class Machine(HasID[str]):
         elif btm_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'btm')
 
-        # Waste phase — discard near-empty mismatched residue (the yarn
-        # belongs to the outgoing item). Zero duration; empties the bar.
+        # Waste phase — discard near-empty mismatched residue (the beam
+        # currently on the bar). Zero duration; empties the bar.
         if top_action == 'waste':
             working = self._emit_waste(
-                emitted, working, working.current_item, 'top',
+                emitted, working, 'top',
                 working.top_lbs_remaining - _BEAM_FLOOR_LBS,
             )
         if btm_action == 'waste':
             working = self._emit_waste(
-                emitted, working, working.current_item, 'btm',
+                emitted, working, 'btm',
                 working.btm_lbs_remaining - _BEAM_FLOOR_LBS,
             )
 
@@ -574,7 +574,7 @@ class Machine(HasID[str]):
                 elif u < _MAX_BEAM_WASTE_LBS:   # near-empty — swap, discard residue
                     flush()
                     working = self._emit_waste(
-                        emitted, working, item, bar, u,
+                        emitted, working, bar, u,
                     )
                     working = self._emit_beam_load(
                         emitted, working, bar, BeamSet(beam_id),
@@ -695,14 +695,17 @@ class Machine(HasID[str]):
 
     def _emit_waste(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', bar: Literal['top', 'btm'], lbs: float,
+        bar: Literal['top', 'btm'], lbs: float,
     ) -> Status:
         """Emit a zero-duration `Waste` discarding `lbs` of usable residue
-        from `bar`. The yarn is removed unknit, so the activity occupies no
-        machine time (`start == end`); applying it empties the named bar
-        (beam -> None, lbs -> 0) so a paired `BeamLoad` can refill it."""
+        from `bar`. The discarded yarn is the beam currently on that bar
+        (read from `working`). The yarn is removed unknit, so the activity
+        occupies no machine time (`start == end`); applying it empties the
+        named bar (beam -> None, lbs -> 0) so a paired `BeamLoad` can refill
+        it."""
         start = working.as_of
-        emitted.append(Waste(start=start, end=start, item=item,
+        beam = working.top_beam if bar == 'top' else working.btm_beam
+        emitted.append(Waste(start=start, end=start, beam=beam,
                              bar=bar, lbs=lbs))
         return working.apply_activity(emitted[-1])
 
@@ -710,13 +713,18 @@ class Machine(HasID[str]):
         self, emitted: list[Activity], working: Status,
         bars: Literal['top', 'btm', 'both'],
     ) -> Status:
+        """Emit a `TapeOut` of `bars`, recording the beam SKU(s) removed from
+        each affected bar (read from `working`) for inventory tracking."""
         duration = (TAPE_OUT_BOTH_DURATION if bars == 'both'
                     else TAPE_OUT_SINGLE_DURATION)
         start = working.as_of
         end = self._workcal.offset_work_hours(
             start, duration.total_seconds() / 3600,
         )
-        emitted.append(TapeOut(start=start, end=end, bars=bars))
+        top_beam = working.top_beam if bars in ('top', 'both') else None
+        btm_beam = working.btm_beam if bars in ('btm', 'both') else None
+        emitted.append(TapeOut(start=start, end=end, bars=bars,
+                               top_beam=top_beam, btm_beam=btm_beam))
         return working.apply_activity(emitted[-1])
 
     def _emit_beam_load(

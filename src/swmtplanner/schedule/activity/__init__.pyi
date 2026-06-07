@@ -30,7 +30,7 @@ class Knit(Activity):
 
 @dataclass(frozen=True)
 class Waste(Activity):
-    item: Greige
+    beam: BeamSet
     bar: Literal['top', 'btm']
     lbs: float
 
@@ -38,6 +38,8 @@ class Waste(Activity):
 @dataclass(frozen=True)
 class TapeOut(Activity):
     bars: Literal['top', 'btm', 'both']
+    top_beam: BeamSet | None = ...
+    btm_beam: BeamSet | None = ...
 
 
 @dataclass(frozen=True)

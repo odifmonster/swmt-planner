@@ -469,8 +469,10 @@ def _activity_desc(a: 'Activity') -> str:
     """Short text description for `ScheduleDetailRecord.description`.
     Mirrors `report._activity_desc` so the verbose TSV's activity
     descriptions match the headline XLSX schedule sheet."""
-    if isinstance(a, (Knit, Waste)):
+    if isinstance(a, Knit):
         return a.item.id
+    if isinstance(a, Waste):
+        return f'{a.beam.id} on {a.bar}'
     if isinstance(a, BeamLoad):
         return f'{a.beam.id} on {a.bar}'
     if isinstance(a, TapeOut):

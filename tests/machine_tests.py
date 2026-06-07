@@ -165,7 +165,7 @@ class ActivityStatusUpdateTests(unittest.TestCase):
         # top lbs -> 0; btm untouched; current_item stays A. Zero duration
         # (start == end), so as_of is unchanged.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        m.add_activities([Waste(start=_START, end=_START, item=_ITEM_A,
+        m.add_activities([Waste(start=_START, end=_START, beam=_TOP_BEAM,
                                 bar='top', lbs=45.0)])
         s = m.current_status
         self._expect(
@@ -183,7 +183,7 @@ class ActivityStatusUpdateTests(unittest.TestCase):
     def test_waste_btm_empties_named_bar_and_keeps_item(self):
         # Symmetric: Waste('btm') clears btm only; top untouched.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0)
-        m.add_activities([Waste(start=_START, end=_START, item=_ITEM_A,
+        m.add_activities([Waste(start=_START, end=_START, beam=_BTM_BEAM,
                                 bar='btm', lbs=55.0)])
         s = m.current_status
         self._expect(
@@ -653,7 +653,7 @@ def _shape(plan):
         if isinstance(a, Knit):
             out.append(('Knit', a.lbs, a.item.id))
         elif isinstance(a, Waste):
-            out.append(('Waste', a.bar, a.lbs, a.item.id))
+            out.append(('Waste', a.bar, a.lbs, a.beam.id))
         elif isinstance(a, TapeOut):
             out.append(('TapeOut', a.bars))
         elif isinstance(a, BeamLoad):
@@ -790,7 +790,7 @@ class PlanProductionLoopTests(unittest.TestCase):
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('Knit', 600.0, 'AU_BIG'),
-            ('Waste', 'top', 60.0, 'AU_BIG'),   # co-swapped, below MAX
+            ('Waste', 'top', 60.0, '40D BLACK 1000X4'),  # co-swapped, below MAX
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('Knit', 300.0, 'AU_BIG'),
@@ -827,7 +827,7 @@ class PlanProductionLoopTests(unittest.TestCase):
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('Knit', 500.0, 'AU_BIG'),
-            ('Waste', 'top', 50.0, 'AU_BIG'),
+            ('Waste', 'top', 50.0, '40D BLACK 1000X4'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('Knit', 400.0, 'AU_BIG'),
@@ -923,7 +923,7 @@ class PlanProductionStartAtTests(unittest.TestCase):
         self.assertEqual(_shape(plan), [
             ('Knit', 400.0, 'AU0001'),          # run-up: 4 whole rolls, no Waste
             ('StyleChange', 'AU0001', 'AU0002', False),
-            ('Waste', 'top', 35.0, 'AU0002'),   # loop swaps the leftover top beam
+            ('Waste', 'top', 35.0, '40D BLACK 1000X4'),  # loop swaps leftover top
             ('BeamLoad', 'top', 2800.0),
             ('Knit', 200.0, 'AU0002'),          # new item production
         ])
@@ -937,25 +937,29 @@ class PlanProductionStartAtTests(unittest.TestCase):
         self.assertEqual(
             (plan.jobs[1].total_rolls, plan.jobs[1].total_lbs), (1, 200.0),
         )
-        # The run-up itself produced no Waste of the current item.
+        # The run-up itself produced no Waste (it makes only whole rolls);
+        # A->B is same-yarn, so nothing is wasted before the changeover.
+        sc_idx = next(i for i, a in enumerate(plan.activities)
+                      if isinstance(a, StyleChange))
         self.assertFalse(any(
-            isinstance(a, Waste) and a.item is _ITEM_A
-            for a in plan.activities
+            isinstance(a, Waste) for a in plan.activities[:sc_idx]
         ))
 
     def test_next_runout_run_up_below_one_roll_yields_one_job(self):
         # Current item A (tgt 100). producible = (16-5)/0.4 = 27.5 fabric
         # lbs < tgt_wt, so the run-up makes no whole roll: it emits NOTHING
-        # (no Knit, no Waste of A) and creates no run-up Job. Exactly one
-        # Job is produced -- the new item's. (The leftover A yarn is swapped
-        # later, inside B's production loop, recorded as a Waste of B.)
+        # (no Knit, no Waste) and creates no run-up Job. Exactly one Job is
+        # produced -- the new item's. (The leftover top beam is swapped
+        # later, inside B's production loop, as a Waste of that beam.)
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=16.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
-        # The run-up emitted nothing for the current item.
+        # The run-up emitted nothing: A->B is same-yarn, so there is no
+        # Knit or Waste before the changeover.
+        sc_idx = next(i for i, a in enumerate(plan.activities)
+                      if isinstance(a, StyleChange))
         self.assertFalse(any(
-            isinstance(a, (Knit, Waste)) and a.item is _ITEM_A
-            for a in plan.activities
+            isinstance(a, (Knit, Waste)) for a in plan.activities[:sc_idx]
         ))
         # Exactly one Job — the new item's.
         _assert_single_job(self, plan, 'AU0002', 200.0, 1)
@@ -1210,7 +1214,7 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
         m = _make_machine(init_top_lbs=50.0, init_btm_lbs=2800.0)
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
-            ('Waste', 'top', 45.0, 'AU0001'),
+            ('Waste', 'top', 45.0, '40D BLACK 1000X4'),
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU0001', 'AU0004', False),
             ('Knit', 100.0, 'AU0004'),
@@ -1236,7 +1240,7 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
         plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), [
             ('TapeOut', 'top'),
-            ('Waste', 'btm', 45.0, 'AU0001'),
+            ('Waste', 'btm', 45.0, '60D WHITE 1000X4'),
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0007', False),
@@ -1255,7 +1259,7 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
             ('TapeOut', 'btm'),                  # preamble: btm mismatched/full
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0005', False),
-            ('Waste', 'top', 45.0, 'AU0005'),    # loop: matching near-empty top
+            ('Waste', 'top', 45.0, '40D BLACK 1000X4'),  # loop: matching near-empty top
             ('BeamLoad', 'top', 2800.0),
             ('Knit', 100.0, 'AU0005'),
         ])
@@ -1303,7 +1307,7 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
         self.assertEqual(_shape(plan), [
             ('Knit', 400.0, 'AU0001'),
             ('TapeOut', 'btm'),                  # other bar preserved
-            ('Waste', 'top', 35.0, 'AU0001'),    # limiting bar discarded
+            ('Waste', 'top', 35.0, '40D BLACK 1000X4'),  # limiting bar discarded
             ('BeamLoad', 'top', 2800.0),
             ('BeamLoad', 'btm', 1800.0),
             ('StyleChange', 'AU0001', 'AU0007', False),
@@ -1319,7 +1323,7 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), [
             ('Knit', 400.0, 'AU0001'),
-            ('Waste', 'top', 35.0, 'AU0001'),
+            ('Waste', 'top', 35.0, '40D BLACK 1000X4'),
             ('BeamLoad', 'top', 2800.0),
             ('StyleChange', 'AU0001', 'AU0004', False),
             ('Knit', 100.0, 'AU0004'),

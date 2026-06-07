@@ -74,8 +74,12 @@ class Waste(Activity):
     operator won't knit through a near-empty beam, so the residue is
     dropped and a paired `BeamLoad` refills the bar. Applying it empties
     the named `bar` (beam -> None, lbs -> 0). Never reaches the demand
-    layer; the cost layer charges it per-lb via the `waste_lbs` weight."""
-    item: 'Greige'
+    layer; the cost layer charges it per-lb via the `waste_lbs` weight.
+
+    `beam` is the yarn SKU being discarded (the beam that was on `bar`) —
+    what gets wasted is yarn, not a greige item; carried for future
+    beam-set inventory tracking."""
+    beam: 'BeamSet'
     bar: Literal['top', 'btm']
     lbs: float
     _count: int = field(default_factory=_WASTE_ID, init=False)
@@ -90,8 +94,15 @@ class TapeOut(Activity):
     """Forced removal of yarn from one or both bars before natural exhaustion.
     'both' is more expensive than two sequential singles because the floor
     cannot parallelize the cuts. When one bar has already exhausted, the
-    other is taped out as a single."""
+    other is taped out as a single.
+
+    `top_beam` / `btm_beam` record the yarn SKU(s) removed, per bar (`None`
+    for a bar this tape-out doesn't touch). Taped-out yarn is preserved for
+    re-use rather than discarded; the SKUs are carried for future beam-set
+    inventory tracking."""
     bars: Literal['top', 'btm', 'both']
+    top_beam: 'BeamSet | None' = None
+    btm_beam: 'BeamSet | None' = None
     _count: int = field(default_factory=_TAPE_OUT_ID, init=False)
 
     @property

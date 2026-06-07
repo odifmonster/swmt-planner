@@ -296,7 +296,7 @@ class StateTests(unittest.TestCase):
         rls = state.rls_items['AU0001']
         waste = Waste(
             start=_START, end=_START,
-            item=_ITEM_A, bar='top', lbs=50.0,
+            beam=_TOP_BEAM, bar='top', lbs=50.0,
         )
         state.commit_move(_move_with_plan([waste]))
         self.assertEqual(state.machines['M1'].activities, (waste,))
@@ -634,8 +634,8 @@ class CostingTests(unittest.TestCase):
         # contributions; Waste is zero-duration -> no idle/time term.
         machine = _make_machine('M1')
         plan = _plan(activities=[
-            Waste(start=_START, end=_START, item=_ITEM_A, bar='top', lbs=45.0),
-            Waste(start=_START, end=_START, item=_ITEM_A, bar='btm', lbs=55.0),
+            Waste(start=_START, end=_START, beam=_TOP_BEAM, bar='top', lbs=45.0),
+            Waste(start=_START, end=_START, beam=_BTM_BEAM, bar='btm', lbs=55.0),
         ])
         state = _make_state(machines={'M1': machine}, rls_items={})
         state.commit_move(Move(

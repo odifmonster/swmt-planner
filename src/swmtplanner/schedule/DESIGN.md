@@ -34,17 +34,14 @@ each roll lands, demand says *how expensive that when is*.
   yarn remaining on it.
 - `init_btm_beam`, `init_btm_lbs` — same for the bottom bar.
 - `workcal` — working-hours calendar; all activity start/end times respect it.
-- `simple_change_duration` — how long a within-config style change takes on
-  this machine.
-- `family_change_duration` — how long a family change takes on this machine.
-  Ignored when `is_new=True` (see below).
-- `is_new` — `True` for newer/digital machines where switching to a different
-  family takes the same brief reconfigure as a within-family style change.
-  Defaults to `False` (legacy pattern-wheel machine, family changes are more
-  expensive). New machines never emit `StyleChange(is_family_change=True)` —
-  every style transition is reported as `is_family_change=False` so the
-  costing layer doesn't apply a heavier weight to transitions that aren't
-  actually heavier in hardware terms.
+- `is_new` — `True` for newer/digital machines, where every changeover is a
+  single uniform reconfigure regardless of pattern family. Defaults to `False`
+  (legacy pattern-wheel machine). The flag selects the changeover activity
+  type: a new machine always emits a `StyleChange`; a legacy machine emits a
+  `RunnerChange` within a pattern family or a `PatternChange` across families
+  (see "Beam-swap decision"). Changeover durations are no longer per-machine —
+  they are module-level constants (see Constants), so the constructor no
+  longer takes `simple_change_duration` / `family_change_duration`.
 
 The constructor builds `initial_status` from these fields. The status is then
 exposed read-only.
@@ -54,8 +51,9 @@ Module-level function:
 - `fresh_beam_lbs(beam: BeamSet) -> float` — the lbs of yarn on a freshly
   loaded beam, by yarn-denier convention (the threshold and per-denier lbs
   are module-level constants — see the Constants section). Used by
-  `plan_production` whenever a `BeamLoad` is emitted; the values are a
-  plant-wide convention rather than per-machine config. Lives at module
+  `plan_production` whenever a fresh beam is threaded (a `Threading`) to set
+  that bar's lbs; the values are a plant-wide convention rather than
+  per-machine config. Lives at module
   level instead of on `BeamSet` because it is plant-specific operational
   knowledge (which beam stocks Shawmut keeps), and `BeamSet` is meant to
   stay plant-agnostic.
@@ -67,9 +65,11 @@ touch the activity list or status.
 ## Core objects
 
 A `Machine` carries two parallel schedules: an **activity schedule**
-(the timeline of physical machine activities — `Knit`, `Waste`,
-`TapeOut`, `BeamLoad`, `StyleChange`, `Idle`) and a **production
-schedule** (a list of `Job` records, each grouping the rolls produced
+(the timeline of physical machine activities — `Knit`, `Waste`, `Doff`,
+`TapeOut`, `Hanging`, `Threading`, the changeover activities
+(`StyleChange` / `RunnerChange` / `PatternChange`), and `Idle`) and a
+**production schedule** (a list of `Job` records, each grouping the rolls
+produced
 by one call to `plan_production`). The two are decoupled: only the
 activity schedule drives machine `Status`; only the production
 schedule is what the demand layer consumes.
@@ -82,7 +82,7 @@ Activity (abstract)               # anything that occupies machine time
   Knit(Activity)                  # a continuous block of fabric production at
                                   # the machine's current item rate — one
                                   # `Knit` per uninterrupted run between beam
-                                  # events. A roll may straddle a `BeamLoad`,
+                                  # events. A roll may straddle a beam swap,
                                   # so a `Knit` can end mid-roll.
     item: Greige
     lbs: float                    # arbitrary; bounded by the usable yarn knit
@@ -93,25 +93,65 @@ Activity (abstract)               # anything that occupies machine time
                                   # beam — removed unknit (zero machine time),
                                   # not fabric the machine ran. Applying it
                                   # empties the named `bar` (beam -> None,
-                                  # lbs -> 0); a paired `BeamLoad` refills it.
-    item: Greige
+                                  # lbs -> 0); a paired re-thread refills it.
+    beam: BeamSet                 # the yarn SKU being discarded (the beam that
+                                  # was on `bar`) — what's wasted is yarn, not a
+                                  # greige; relevant for future beam-set
+                                  # inventory tracking
     bar: Literal['top', 'btm']    # which bar's residual is discarded
     lbs: float                    # usable residue on `bar` (bar_lbs - floor),
                                   # below the max-waste threshold, discarded
                                   # unknit when the beam is swapped
 
-  TapeOut(Activity)
+  Doff(Activity)                  # removing one completed roll from the
+                                  # machine. Fieldless beyond start/end
+                                  # (mirrors `Idle`'s shape; a distinct class
+                                  # for readability). One `Doff` per completed
+                                  # roll; invariant: Doff.end == that roll's
+                                  # completion_time.
+
+  TapeOut(Activity)               # forced removal of yarn from one/both bars,
+                                  # preserved (not discarded) for re-use. Also
+                                  # records the beam SKU(s) removed, per bar,
+                                  # for future beam-set inventory tracking.
+    bars: Literal['top', 'btm', 'both']
+    top_beam: BeamSet | None      # SKU removed from top (None if top untouched)
+    btm_beam: BeamSet | None      # SKU removed from btm (None if btm untouched)
+
+  Hanging(Activity)               # physically mounting fresh beam(s) onto the
+                                  # named bar(s). No yarn routing and no Status
+                                  # effect on its own — pairs with a Threading.
     bars: Literal['top', 'btm', 'both']
 
-  BeamLoad(Activity)
-    bar: Literal['top', 'btm']
-    beam: BeamSet
-    lbs: float                  # yarn on the freshly loaded beam
+  Threading(Activity)             # routing yarn from the mounted beam(s) into
+                                  # the machine. This is the activity that
+                                  # updates Status (sets each threaded bar's
+                                  # beam and lbs). Together, Hanging +
+                                  # Threading replace the old single `BeamLoad`.
+    bars: Literal['top', 'btm', 'both']  # which bar(s) this threads
+    top_beam: BeamSet | None      # beam now threaded on top (None if untouched)
+    top_lbs: float                # yarn on the freshly threaded top beam
+    btm_beam: BeamSet | None
+    btm_lbs: float
 
-  StyleChange(Activity)
+  # Changeovers — replace the single `StyleChange`. The class itself carries
+  # the changeover semantic (there is no is_family_change flag); which one is
+  # emitted depends on `machine.is_new` and the pattern-family comparison
+  # (see "Beam-swap decision"). All three share the same two fields.
+  StyleChange(Activity)           # new machine (is_new): one uniform
+                                  # reconfigure regardless of pattern family
     from_item: Greige
     to_item: Greige
-    is_family_change: bool        # to_item.family != from_item.family
+
+  RunnerChange(Activity)          # legacy machine, same pattern family —
+                                  # the lighter runner reconfigure
+    from_item: Greige
+    to_item: Greige
+
+  PatternChange(Activity)         # legacy machine, different pattern family —
+                                  # the heavier pattern-wheel rework
+    from_item: Greige
+    to_item: Greige
 
   Idle(Activity)                  # deliberate gap; machine committed to
                                   # not running due to staffing limits
@@ -162,8 +202,8 @@ Machine (HasID)
   activities: tuple[Activity, ...]  # activity schedule; append-only
   jobs: tuple[Job, ...]             # production schedule; append-only
   current_status: Status            # status at the activity-schedule tail
-  simple_change_duration, family_change_duration
-  is_new: bool                      # default False; True ⇒ no family changes emitted
+  is_new: bool                      # default False; selects StyleChange (new)
+                                    # vs RunnerChange / PatternChange (legacy)
   status_at(t) -> Status
   duration_of(spec) -> timedelta
   plan_production(item, lbs, start_at, idle_for=timedelta(0)) -> ProductionPlan
@@ -186,10 +226,10 @@ returns a `Job` whose `rolls` list captures every roll that the
 call produced (the call also returns the activity-schedule
 additions separately as part of the `ProductionPlan`). Unlike a
 `Knit` activity — which is a single uninterrupted run on the
-machine — a `Job` can span one or more `BeamLoad`s: when a beam
-exhausts mid-production, the current `Knit` ends, a `BeamLoad`
-fires, the next `Knit` begins, and rolls completed across the
-sequence all land on the same `Job`. The same plan_production
+machine — a `Job` can span one or more beam swaps: when a beam
+exhausts mid-production, the current `Knit` ends, the bar is
+re-threaded (a `Hanging` + `Threading`), the next `Knit` begins,
+and rolls completed across the sequence all land on the same `Job`. The same plan_production
 call may also yield a second `Job` in `'next_runout'` mode (the
 run-up's whole rolls of the current item, distinct from the new
 item's `Job`).
@@ -225,19 +265,27 @@ All durations are deterministic given (machine, activity spec).
 | Activity | Duration |
 |---|---|
 | `Knit(item, lbs)` | `lbs / item.get_rate_on_mchn(machine.id)` |
-| `Waste(item, bar, lbs)` | `timedelta(0)` — yarn is swapped out unknit, not run |
+| `Waste(beam, bar, lbs)` | `timedelta(0)` — yarn is swapped out unknit, not run |
+| `Doff` | `DOFF_DURATION` |
 | `TapeOut('top')` or `TapeOut('btm')` | `TAPE_OUT_SINGLE_DURATION` |
 | `TapeOut('both')` | `TAPE_OUT_BOTH_DURATION` |
-| `BeamLoad(...)` | `BEAM_LOAD_DURATION` |
-| `StyleChange(..., is_family_change=False)` | `machine.simple_change_duration` |
-| `StyleChange(..., is_family_change=True)` | `machine.family_change_duration` |
+| `Hanging('top')` or `Hanging('btm')` | `HANGING_SINGLE_DURATION` |
+| `Hanging('both')` | `HANGING_BOTH_DURATION` |
+| `Threading('top')` or `Threading('btm')` | `THREADING_SINGLE_DURATION` |
+| `Threading('both')` | `THREADING_BOTH_DURATION` |
+| `StyleChange` | `STYLE_CHANGE_DURATION` |
+| `RunnerChange` | `RUNNER_CHANGE_DURATION` |
+| `PatternChange` | `PATTERN_CHANGE_DURATION` |
 | `Idle` | caller-supplied via `plan_production(..., idle_for=...)` |
 
 Production rate is machine × item specific (via `Greige.get_rate_on_mchn`).
-The two style-change durations are machine-specific because different
-machines (manual pattern-wheel vs. digitally programmed) take different
-amounts of time to reconfigure. Tape-out and beam-load are physical-handling
-operations whose time does not vary meaningfully by machine.
+Every other duration is now a plant-wide module-level constant (see
+Constants) — including the three changeover durations, which used to be
+per-machine. The `is_new` flag and the pattern-family comparison select
+*which* changeover activity is emitted (and hence which duration constant
+applies), rather than scaling a per-machine value. Tape-out, hanging,
+threading, and doff are physical-handling operations whose time does not vary
+meaningfully by machine.
 
 ## Constants
 
@@ -250,7 +298,25 @@ above):
 - **`TAPE_OUT_SINGLE_DURATION = 4h`** — a single-bar `TapeOut`.
 - **`TAPE_OUT_BOTH_DURATION = 6h`** — a `TapeOut('both')`; more than two
   singles because the floor can't parallelize the cuts.
-- **`BEAM_LOAD_DURATION = 2h`** — mounting one fresh beam.
+- **`HANGING_SINGLE_DURATION`** / **`HANGING_BOTH_DURATION`** — physically
+  mounting a fresh beam on one bar / both bars. (Values TBD from floor
+  measurements.)
+- **`THREADING_SINGLE_DURATION`** / **`THREADING_BOTH_DURATION`** — routing
+  yarn into the machine for one bar / both bars. (Values TBD.) `Hanging` +
+  `Threading` together replace the old single `BEAM_LOAD_DURATION = 2h`.
+- **`DOFF_DURATION = 20min`** — removing one completed roll.
+
+**Changeover durations** (Step 3) — plant-wide, previously the per-machine
+`simple_change_duration` / `family_change_duration`. The `is_new` flag and
+the pattern-family comparison pick which one applies (see "Beam-swap
+decision"):
+
+- **`STYLE_CHANGE_DURATION`** — a new machine's uniform reconfigure.
+- **`RUNNER_CHANGE_DURATION`** — a legacy machine's within-pattern-family
+  runner change (the lighter case; same magnitude as the old
+  `simple_change_duration`).
+- **`PATTERN_CHANGE_DURATION`** — a legacy machine's cross-pattern-family
+  pattern-wheel rework (the heavier case; the old `family_change_duration`).
 
 **Fresh-beam yarn** — plant-wide convention for how much yarn a freshly loaded
 beam holds, by yarn denier (used by `fresh_beam_lbs`):
@@ -286,21 +352,30 @@ get drawn at different ratios for the new item. So
 `top_lbs_remaining` / `btm_lbs_remaining` carry across same-yarn transitions
 unchanged, and the next `Knit` consumes them at the new item's ratios.
 
-`StyleChange.is_family_change` is computed from family names and the
-machine's `is_new` flag:
+When the item changes, *which* changeover activity is emitted is selected
+from `machine.is_new` and the pattern-family comparison. The activity class
+carries the semantic directly — there is no `is_family_change` flag:
 
 ```
-is_family_change = (not machine.is_new) and (from_item.family != to_item.family)
+if machine.is_new:
+    change = StyleChange(from_item, to_item)      # uniform reconfigure
+elif from_item.family == to_item.family:
+    change = RunnerChange(from_item, to_item)     # legacy, same pattern family
+else:
+    change = PatternChange(from_item, to_item)    # legacy, cross pattern family
 ```
 
-On a legacy machine (`is_new=False`), a family change with shared yarns
-produces a `StyleChange(is_family_change=True)` with no surrounding beam work;
-the machine still pays `family_change_duration` for the pattern-wheel /
-programming reconfiguration. On a new machine (`is_new=True`), the same
-transition is reported as `StyleChange(is_family_change=False)` — the
-hardware reconfigure is the same brief setup as any other style change, so
-flagging it as a family change would double-charge under any cost weight
-that distinguishes family changes from simple ones.
+A **new** machine always emits a `StyleChange`, regardless of family: its
+hardware reconfigure is the same brief setup either way, so it never incurs
+the heavier cross-family rework. A **legacy** machine emits a `RunnerChange`
+within a pattern family (the lighter runner reconfigure) or a `PatternChange`
+across pattern families (the heavier pattern-wheel rework). Each activity's
+duration is its own module-level constant (see Constants); the *selection* —
+not a per-machine duration — is what distinguishes the cases, and the cost
+layer weights the three activity types independently. A changeover with
+shared yarns emits its change activity with no surrounding beam work; only a
+yarn mismatch (per the yarn-equality check above) adds tape-out / re-thread
+work.
 
 ## Roll-level production
 
