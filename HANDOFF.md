@@ -10,12 +10,13 @@ patches — it does *not* follow the design-driven-python plugin's templates;
 the other branches do). Layout:
 
 - `src/swmtplanner/schedule/` — per-machine activity scheduling
-  (`Machine`, `Activity` subclasses, `Status`; plus the new `job/`
-  submodule with the `Job`/`Roll` records).
+  (`Machine`, `Activity` subclasses, `Status`; `job/` submodule with the
+  `Job`/`Roll` records). The activity set is now the Step-3 set (see below).
 - `src/swmtplanner/demand/` — per-item demand/fulfillment views
-  (`RlsItem`, raw + safety-aware views).
+  (`RlsItem`, raw + safety-aware views). Untouched by Steps 2–3.
 - `src/swmtplanner/planners/infinite/` — the greedy planner that
-  composes the two; CLI + dashboard generator live here.
+  composes the two; CLI + dashboard generator live here (`costing/`,
+  `iterlog.py`, `report.py`).
 - `tests/` — `*_tests.py` modules; coverage specs in
   `tests/spec-files/` (`SCHEDULE_TEST_SPEC.md`, `DEMAND_TEST_SPEC.md`,
   `COORD_TEST_SPEC.md`, `INF_PLAN_TEST_SPEC.md`).
@@ -26,175 +27,144 @@ structure before implementation.
 **Running tests / Python:** the project virtualenv is `.dev-venv` (has
 pandas/numpy; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
-(e.g. `tests.machine_tests`). Full suite currently: **278 tests, all
-passing.**
+(e.g. `tests.machine_tests`).
+
+> **Suite state:** through Step 2 the suite was **285 tests, all passing**.
+> The Step-3 *code* rework has landed but the **tests have NOT been updated
+> yet** — the suite is currently **stale and will fail** (it references the
+> old `Status` structure, `BeamLoad`, `family_change`, and Step-2
+> mechanics). The `swmtplanner` package itself **imports cleanly** and the
+> schedule layer is smoke-verified; the costing layer is verified in
+> isolation. Updating the tests is the remaining work (see "Next").
 
 ## Preferred workflow
 
-For any significant change:
-
-1. **DESIGN.md first** — edit the relevant DESIGN.md, iterating over
-   multiple turns until aligned, before any code.
-2. **COVERAGE next** — update the relevant `tests/spec-files/*_SPEC.md`
-   before writing test code.
-3. **Then code, then tests, then run.** Small, reviewable diffs; don't
-   sweep multiple subsystems at once.
-
-Keep DESIGN/spec edits narrow per turn (one section or concept). The user
-prefers leaving the doc temporarily inconsistent across sections rather
-than a big sweep:
-
-- "update Core objects" → do *only* Core objects, leave the rest stale.
-- "through the plan_production walk section" → inclusive of that section,
-  not beyond.
-- They'll explicitly call out sections to skip.
-
-The user reviews each section before moving on; surface design gaps/conflicts
-rather than papering over them (this has caught real issues).
+For any significant change: **DESIGN.md first** (iterate over multiple turns,
+one section/concept per turn — the user reviews each before moving on), then
+**coverage spec**, then **code**, then **test code**, then run. Small,
+reviewable diffs; don't sweep multiple subsystems at once. The user tolerates
+the docs/code being temporarily inconsistent across sections rather than a
+big sweep, and explicitly calls out which sections to do or skip. Surface
+design gaps/conflicts rather than papering over them — this has repeatedly
+caught real issues (e.g. the smoke test that caught `next_runout` not folding
+in doff time). Commits are the user's to make.
 
 ## The refactor: 4-step rework of the schedule layer
 
-The textile-floor team gave updated information prompting a substantial
-rework. Tracked as 4 tasks in the Claude Code task list (`TaskList` /
-`TaskGet` / `TaskUpdate`):
+| Step | Scope | State |
+|---|---|---|
+| **1** | Separate production from schedule activities (`Job`/`Roll`, `ProductionPlan`) | ✅ complete + committed |
+| **2** | Runout logic (`BEAM_FLOOR_LBS`, mid-roll beam loads, max-waste, yarn `Waste`) | ✅ complete + committed |
+| **3** | Add `Doff`, split `BeamLoad`→`Hanging`/`Threading`, split changeover | 🟡 design ✅ + **all `src/` code ✅ committed**; **tests remaining** |
+| **4** | Expand verbose audit (more FK links, consolidate `*_detail_id`, log all candidates) | ⏸ pending (blocked by #3) |
 
-- **#1 Step 1: Separate production from schedule activities** — ✅ CODE +
-  TESTS COMPLETE.
-- **#2 Step 2: New runout logic (BEAM_FLOOR + mid-roll loads + max-waste)**
-  — 🔵 DESIGN COMPLETE; coverage/code/tests remaining.
-- **#3 Step 3: Add Doff, Hanging, Threading; split style-change** — pending
-  (blocked by #2).
-- **#4 Step 4: Expand verbose audit — more FK links + log all candidates**
-  — pending (blocked by #3; concretely couples to the Step-1 verbose
-  tables).
-
-> Commits are the user's to make. DESIGN.md changes were committed earlier;
-> confirm the working-tree state of the Step-1 code/tests and Step-2 design
-> before continuing.
+A cross-cutting **`Status` accessor refactor** was also done during Step 3
+(see below) — it touched the same files and is committed alongside the
+Step-3 code.
 
 ---
 
-### Step 1 — Separate production from schedule activities  ✅ COMPLETE
+### Steps 1 & 2 — ✅ complete (committed, were fully tested)
 
-A `Machine` carries two parallel schedules:
+Step 1 split the activity schedule (`Machine.activities`) from the
+production schedule (`Machine.jobs` — `Job(item, rolls)` records);
+`plan_production` returns a `ProductionPlan(activities, jobs)`;
+`next_job_end`→`schedule_tail`.
 
-- **Activity schedule** (`Machine.activities`) — `Knit` (was
-  `Job(Activity)`; fields `item`, `lbs`), `Waste`, `TapeOut`, `BeamLoad`,
-  `StyleChange`, `Idle`.
-- **Production schedule** (`Machine.jobs`) — `Job` records (HasID): `item`,
-  `rolls: tuple[Roll(lbs, completion_time)]`, computed `total_rolls` /
-  `total_lbs`. No start/end; one per `plan_production` call (a `Job` can
-  span multiple `BeamLoad`s; `'next_runout'` yields up to two Jobs).
-- **`ProductionPlan(activities, jobs)`** — return of `plan_production`;
-  committed via `add_activities(plan.activities)` + `add_jobs(plan.jobs)`.
-- `Machine.next_job_end` → `Machine.schedule_tail` (literal
-  `'next_job_end'` → `'schedule_tail'`), renamed across all code + tests.
-- Costing consumes `Machine.jobs` / `move.plan.jobs` directly.
+Step 2 added the runout model: `BEAM_FLOOR_LBS = 5` (usable =
+`bar_lbs - floor`), mid-roll beam swaps (rolls straddle), `MAX_BEAM_WASTE_LBS
+= 100` (near-empty bars swapped before a roll), and the half-roll rule
+removed. `Waste` became *unknit discarded yarn* (zero duration, empties a
+bar), charged per-lb via a new `waste_lbs` cost weight. A later refinement:
+`Waste` and `TapeOut` store the **`BeamSet`** (yarn SKU) being
+discarded/removed, not the `Greige`.
 
-Done: all three DESIGN.md docs; `schedule/job/` submodule; `Knit` rename;
-`ProductionPlan` in `machine.py`; `plan_production` populates
-`ProductionPlan.jobs` (real `Job`/`Roll` records, straddling beam loads);
-all consumers migrated (`status.py`, `state.commit_move`, `costing.py`,
-`report.py`, `iterlog.py`, `demand/view.py`, `demand/rlsitem.py`); `.pyi`
-stubs; full test suite + coverage specs updated and green (278 tests).
+### Step 3 — design ✅, code ✅ (committed), tests remaining
 
-Note: the verbose-log `cost_id`+`sched_id` were consolidated into a single
-`move_id`; the five `*_detail_id` counters were **left as-is** (their
-consolidation is part of **Step 4**). `job_id` = `Job.id`.
+**Design** (both `schedule/DESIGN.md` and `planners/infinite/DESIGN.md`) is
+fully updated. **All `src/` code is implemented and committed**; the package
+imports and the schedule layer is smoke-clean. What was built:
 
-### Step 2 — New runout logic  🔵 DESIGN COMPLETE (coverage/code/tests next)
+**New activity set** (`schedule/activity/activity.py`), `BeamLoad` removed:
+- **`Doff`** — fieldless (like `Idle`); one per completed roll. A roll's
+  `completion_time` is its `Doff.end` (the roll is "ready" when off the
+  machine).
+- **`Hanging(bars, top_beam, top_lbs, btm_beam, btm_lbs)`** + **`Threading(bars)`**
+  replace `BeamLoad`. **`Hanging` loads the physical set** (sets each bar's
+  beam + lbs, leaves it un-threaded); **`Threading` flips `threaded`→True**
+  and nothing else.
+- **`StyleChange` / `RunnerChange` / `PatternChange`** (each just
+  `from_item`/`to_item`; the `is_family_change` flag is gone). Selection:
+  new machine → `StyleChange`; legacy same pattern family → `RunnerChange`;
+  legacy cross-family → `PatternChange`.
+- Duration constants are now **floats (work-hours)**, passed straight to
+  `WorkCal.offset_work_hours`: `TAPE_OUT_SINGLE=2`/`BOTH=3`,
+  `HANGING_SINGLE=1`/`BOTH=1.5`, `THREADING_SINGLE=2`/`BOTH=3.5`,
+  `DOFF=20/60`, `STYLE_CHANGE=5/60`, `RUNNER_CHANGE=45/60`,
+  `PATTERN_CHANGE=1.5`. `BEAM_FLOOR_LBS`/`MAX_BEAM_WASTE_LBS` also moved here
+  (so `status.py` can share them without a circular import).
 
-Operational facts that change the runout model:
+**`Status` accessor refactor** (`schedule/machine/status.py`): per-bar state
+is private (`_bars: dict[str, _BarState]`); the **only** read API is
+`status.beam(bar)` / `lbs_remaining(bar)` / `threaded(bar)` (`bar` is
+`'top'`/`'btm'`) — the old `top_*`/`btm_*` fields are gone. Construct via the
+**`Status.create(...)`** factory (per-bar primitives). `Greige`/activities
+were intentionally **left as plain fields** (only `Status` got accessors).
 
-1. Beams can't be knit to zero — residue floor **`BEAM_FLOOR_LBS = 5`**
-   (tunable). Usable yarn on a bar = `bar_lbs - BEAM_FLOOR_LBS`.
-2. Beam loads can happen **mid-roll** — a roll continues on the fresh beam.
-   The half-roll fallback is **gone**; rolls are always whole (~`tgt_wt`),
-   but a `Knit` can end mid-roll with a partial-roll weight (rolls straddle
-   `BeamLoad`s). `Knit.lbs` is no longer constrained to whole rolls.
-3. Operators won't knit through a near-empty beam:
-   **`MAX_BEAM_WASTE_LBS = 100`** (tunable) — usable below this and the bar
-   gets swapped before the next roll.
+**Beam-swap sequencing guard rails** (`status.apply_activity`): a swap is
+**remove → hang → thread**. Per bar, `removed` = `beam(bar) is None or
+lbs_remaining(bar) <= BEAM_FLOOR_LBS`; `hung` = `not removed and not
+threaded`. `Hanging` requires the bar **removed** (else raises) and sets
+`threaded=False`; `Threading` requires the bar **hung** (else raises) and
+sets `threaded=True`; `TapeOut`/`Waste` remove (beam→None, lbs→0,
+threaded→False).
 
-Mechanics (all in the schedule/machine logic; demand layer is unaffected —
-it only cares when lbs land):
+**`machine.py` emission**: run-up emits a `Knit`+`Doff` per whole roll;
+preamble does tape/waste then re-thread (`Hanging`+`Threading`, `'both'`
+batched) then the changeover; production loop emits `Knit`+`Doff` per roll
+with `resolve()` re-threading on runout (`'both'` co-swap). Helpers:
+`_emit_doff`/`_emit_hanging`/`_emit_threading`/`_emit_rethread`/`_emit_changeover`
+(removed `_emit_beam_load`/`_emit_rolls`/`_emit_roll`/`_emit_style_change`).
+**`next_runout` folds in per-roll doff time** (`per_roll = tgt_wt/rate +
+DOFF_DURATION`) so it equals the run-up's last `Doff.end`. The constructor
+**no longer takes `simple_change_duration`/`family_change_duration`** (and
+`io.py` no longer reads `style_change_time`/`family_change_time`).
 
-- **`Waste(item, bar, lbs)`** — now *unknit* discarded yarn from a
-  swapped-out beam (was knit sub-half fabric). **Zero duration.** Applying
-  it empties the named `bar` (beam→None, lbs→0); a paired `BeamLoad`
-  refills. Cost layer charges per-lb via a new **`waste_lbs`** weight.
-- **Run-up** — produces whole rolls only; emits no `Waste` and no beam
-  work; leaves leftover yarn for the preamble.
-- **Changeover preamble** — uniform per-bar rule on
-  `usable = bar_lbs - BEAM_FLOOR_LBS`: empty/floor→`BeamLoad`; yarn
-  matches→keep; mismatch & `usable > MAX`→`TapeOut`+`BeamLoad` (preserve,
-  machine reverses, preserved beam not tracked yet); mismatch &
-  `usable <= MAX`→`Waste(bar)`+`BeamLoad` (discard). `TapeOut('both')`
-  possible in both modes.
-- **Production loop** — `resolve()` per bar (`usable<=0`→`BeamLoad`;
-  `0<usable<MAX`→`Waste`+`BeamLoad`); pre-roll max-waste gate; mid-roll
-  runout + co-swap of the other bar; rolls straddle; one `Knit` spans
-  consecutive rolls until a beam event. (`_split_roll`/half-roll removed.)
-- **`next_runout`** stops at `BEAM_FLOOR` (`usable = bar_lbs - floor`).
+**Costing** (`costing.py`, `iterlog.py`, `report.py`): the `family_change`
+weight split into **`style_change` / `runner_change` / `pattern_change`**
+(CostBreakdown/CostDetailRecord/`cost_detail.tsv` now **fourteen** weighted
+components). `Knit`/`Doff`/`Hanging`/`Threading` are **unweighted**.
+`_activity_desc`: `Hanging` shows the beam SKU + lbs per affected bar (e.g.
+`"top 40D BLACK 1000X4 (2800 lbs), btm 60D WHITE 1000X4 (1800 lbs)"`),
+`Threading` shows the bar(s), `Doff` is blank.
 
-`BeamLoad` stays a single activity through Step 2; it splits in Step 3.
+### Step 4 — pending (blocked on Step 3)
 
-**DESIGN status:** `schedule/DESIGN.md` fully updated (Constants section
-now centralizes ALL module-level constants — durations, fresh-beam denier,
-`BEAM_FLOOR_LBS`, `MAX_BEAM_WASTE_LBS`). `planners/infinite/DESIGN.md`
-updated for the `waste_lbs` cost weight (CostWeights / CostBreakdown /
-CostDetailRecord / `cost_detail.tsv` / costing bullets / Phase-1 prose;
-"eleven"→"twelve" components throughout). `demand/DESIGN.md` unchanged.
-
-**Step 2 remaining:**
-
-1. **COVERAGE** — `SCHEDULE_TEST_SPEC.md` Step-2 additions (run-up
-   whole-rolls/no-Waste/no-beam-work; preamble per-bar tape/waste/keep/load
-   + `'both'`; production loop straddle / pre-roll gate / co-swap / floor;
-   `next_runout` floor; `Waste` status zeroes its bar; capacity with
-   floor). `INF_PLAN_TEST_SPEC.md` — the `waste_lbs` cost-weight case
-   (§1.2.x).
-2. **Code** — `machine.py` (constants, run-up, preamble, production loop,
-   `next_runout`, remove `_split_roll`); `status.py` (`Waste.apply_activity`
-   = empty the named bar); `costing.py` (`waste_lbs` weight + schedule
-   penalty term).
-3. **Test code** — update affected `*_tests.py`, then run the suite.
-
-### Step 3 (pending, blocked on Step 2) — New activity types
-
-- **`Doff`** — `DOFF_DURATION = 20 min`; fieldless beyond `start`/`end`
-  (matches `Idle`'s shape, distinct class for readability). One per
-  completed roll; invariant `Doff.end == Roll.completion_time`.
-- **`Hanging` + `Threading`** replace `BeamLoad`:
-  - `Hanging(bars: 'top'|'btm'|'both')` — physical beam mount only.
-  - `Threading(bars, top_beam, top_lbs, btm_beam, btm_lbs)` — yarn routing;
-    updates machine status.
-  - New durations `HANGING_SINGLE/BOTH_DURATION`,
-    `THREADING_SINGLE/BOTH_DURATION` (values TBD from floor measurements).
-- **`StyleChange` splits into three**: old machine + same family →
-  `RunnerChange` (`simple_change_duration`); old machine + different family
-  → `WheelChange` (`family_change_duration`); new machine, any →
-  `StyleChange` (`simple_change_duration`). `is_family_change` flag goes
-  away — the class carries the semantic.
-- Knits strictly bounded by `(0, item.tgt_wt]` (every roll ends in a Doff).
-- Cost layer: split `family_change` into `runner_change`/`wheel_change`
-  (+ a `style_change` for new machines).
-
-### Step 4 (pending, blocked on Step 3) — Expand verbose audit
-
-- Add more FK links across the verbose detail tables, and consolidate the
-  five `*_detail_id` counters to key off `move_id` (deferred from Step 1).
-- Possibly add a true knit-start to the production sheet / `job_detail`
-  via a job→activity link (a `Job` currently has no start).
-- Expand the iteration log to include **all** considered candidates per
-  iteration (remove the top-4-items × top-4-candidates / 16-row
-  truncation).
+More FK links across the verbose detail tables; consolidate the five
+`*_detail_id` counters to key off `move_id`; possibly a job→activity link
+for a true knit-start; expand the iteration log to log **all** considered
+candidates (remove the 16-row truncation).
 
 ## Next concrete action
 
-Start **Step 2 coverage**: add the Step-2 cases to
-`tests/spec-files/SCHEDULE_TEST_SPEC.md` (run-up, preamble, production loop,
-`next_runout`, `Waste` status, capacity), plus the `waste_lbs` cost-weight
-case in `INF_PLAN_TEST_SPEC.md`. Then code (`machine.py`, `status.py`,
-`costing.py`), then test code, then run the suite. DESIGN-first, narrow per
-turn; the user reviews each section.
+**Update the Step-3 tests + coverage specs** (the package imports and the
+schedule layer is smoke-verified, so the suite can actually run again):
+
+1. **Coverage specs first** — bring `SCHEDULE_TEST_SPEC.md` and
+   `INF_PLAN_TEST_SPEC.md` to the Step-3 model: `Doff` per roll +
+   `completion_time == Doff.end`; `Hanging`/`Threading` (and the guard
+   rails / remove→hang→thread sequencing); the three changeover types;
+   the `Status` accessor API + `Status.create`; doff-aware `next_runout`;
+   costing `style_change`/`runner_change`/`pattern_change` (fourteen
+   components); `_activity_desc` for the new activities.
+2. **Test code** — rework `tests/machine_tests.py` (biggest: `Status(...)`
+   → `Status.create(...)`, `.top_beam`→`.beam('top')`, all activity-sequence
+   assertions for `Doff`/`Hanging`/`Threading`/changeovers, per-roll doffs,
+   `next_runout` math, guard-rail raises), `tests/inf_plan_tests.py`
+   (`CostWeights` three changeover weights; `_activity_desc`; `cost_detail`
+   columns; any `Status` construction), and `tests/coord_tests.py` (check
+   any machines-file fixtures for dropped `style_change_time` /
+   `family_change_time` keys — they're now ignored, so harmless, but verify).
+3. Run each module, then the full suite, until green.
+
+DESIGN/spec-first, narrow per turn; the user reviews each section.
