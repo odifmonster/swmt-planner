@@ -104,7 +104,13 @@ one number:
    - One `tape_out_single` per `TapeOut(bars='top')` or
      `TapeOut(bars='btm')`.
    - One `tape_out_both` per `TapeOut(bars='both')`.
-   - One `family_change` per `StyleChange(is_family_change=True)`.
+   - One per changeover activity, by type (the activity class carries the
+     semantic — there is no `is_family_change` flag): `style_change` per
+     `StyleChange` (a new machine's uniform reconfigure), `runner_change`
+     per `RunnerChange` (a legacy machine's within-pattern-family change),
+     `pattern_change` per `PatternChange` (a legacy machine's
+     cross-pattern-family rework). These three replace the old single
+     `family_change`.
    - `idle_time × hours` per `Idle` activity, where `hours` is the
      activity's work-hour duration. Discourages letting a machine sit
      unstaffed longer than necessary — including the carrying-avoidance
@@ -112,6 +118,10 @@ one number:
    - `waste_lbs × lbs` per `Waste` activity, charging each lb of yarn the
      plan discards at a beam swap. `Waste` is zero-duration, so this per-lb
      charge is its only contribution to the score.
+
+   `Knit`, `Doff`, `Hanging`, and `Threading` carry **no** schedule weight:
+   their time is reflected in downstream start times (and a doff attends
+   every roll, so it isn't avoidable), but they incur no extra penalty.
 
    The time these activities consume is *already* reflected in
    downstream activity start times. These weights are extra
@@ -150,7 +160,8 @@ CostWeights
   # per-item demand weights (Phase 1)
   lateness, drainage, carrying, excess: float
   # per-machine schedule weights (Phase 1)
-  tape_out_single, tape_out_both, family_change: float   # per occurrence
+  tape_out_single, tape_out_both: float                  # per occurrence
+  style_change, runner_change, pattern_change: float     # per changeover, by type
   idle_time: float                                       # per work-hour
   waste_lbs: float                                       # per lb of discarded Waste
   # cross-cutting weights (Phase 2)
@@ -175,14 +186,15 @@ CostBreakdown                                            # plain named record re
   excess: float
   excess_by_item: dict[str, float]
   # schedule weighted scalars (no per-item structure — these are not summed across items)
-  tape_out_single, tape_out_both, family_change: float
+  tape_out_single, tape_out_both: float
+  style_change, runner_change, pattern_change: float
   idle_time: float
   waste_lbs: float
   # cross-cutting weighted scalars; priority gets an absolute per-item breakdown (not delta), since priority cost is per-move and does not exist in the baseline
   priority: float
   priority_by_item: dict[str, PriorityContribution]      # absolute weighted per-item contribution; at most one entry per item (each item contributes at most one regular order to the candidate pool per iteration, so its higher-priority counterpart is unique); empty for cost_breakdown(state)
   level_loading, old_machine: float                      # no per-item structure (level_loading is per-machine; old_machine is a flat per-move flag)
-  total: float                                           # sum of the twelve weighted components above
+  total: float                                           # sum of the fourteen weighted components above
 
 PriorityContribution                                     # value type for CostBreakdown.priority_by_item; the item_id is the enclosing dict key
   week_idx: int                                          # week (0..3) of the item's deferred regular order
@@ -336,9 +348,10 @@ CostDetailRecord                                # one row of cost_detail.tsv; on
   move_id: int                                  # primary key; matches iteration_log.move_id
   # weighted scalars (same numeric values as the CostBreakdown totals)
   lateness, drainage, carrying, excess: float
-  tape_out_single, tape_out_both, family_change, idle_time, waste_lbs: float
+  tape_out_single, tape_out_both: float
+  style_change, runner_change, pattern_change, idle_time, waste_lbs: float
   priority, level_loading, old_machine: float
-  total: float                                  # sum of the twelve weighted components above
+  total: float                                  # sum of the fourteen weighted components above
   # foreign keys into the per-cost detail tables; None when no item contributes to the corresponding cost
   lateness_detail_id: int | None
   drainage_detail_id: int | None
@@ -379,7 +392,7 @@ ScheduleDetailRecord                            # one row of schedule_detail.tsv
   machine_id: str
   start: datetime
   end: datetime
-  description: str                              # human-readable rendering of the activity and its key fields (e.g. "Knit item=ABC lbs=1400", "TapeOut both", "StyleChange ABC→XYZ family_change=True")
+  description: str                              # human-readable rendering of the activity and its key fields (e.g. "Knit item=ABC lbs=1400", "TapeOut both", "PatternChange ABC→XYZ", "Doff", "Threading both")
 
 JobDetailRecord                                 # one row of job_detail.tsv; one record per Job in a candidate's move.plan.jobs
   move_id: int                                  # foreign key into iteration_log; groups all jobs from one candidate (a move yields 1 or 2 jobs)
@@ -457,7 +470,7 @@ calls `Costing.cost_breakdown_after_move(state, move, ctx)` and,
 using the baseline, emits in addition to the candidate's
 `IterationLogRecord`:
 
-- one `CostDetailRecord` holding the twelve weighted post-commit
+- one `CostDetailRecord` holding the fourteen weighted post-commit
   scalars and per-cost detail-table FKs;
 - one row per `item_id` whose contribution to a given demand-side
   cost would *change* from baseline (`after_move.{cost}_by_item -
@@ -525,7 +538,8 @@ production could begin:
 
 - **`schedule_tail`** — the schedule tail (`current_status.as_of`).
   Starts production sooner but pays the full changeover preamble
-  (`TapeOut` + `BeamLoad`s + `StyleChange` as needed).
+  (`TapeOut` + re-threads (`Hanging` + `Threading`) + the changeover
+  activity as needed).
 - **`next_runout`** — the forward-extrapolated time at which the
   current item's beam(s) would exhaust if the machine kept running.
   Waits out the current beam but avoids the `TapeOut` for the
@@ -1100,13 +1114,15 @@ joining `job_detail.tsv` on `move_id` and `roll_detail.tsv` on
 | `excess`              | float        | Weighted total from per-item `safety_view.excess` (summed).                                    |
 | `tape_out_single`     | float        | Weighted count of `TapeOut(bars='top'|'btm')` in the affected machine's combined activities.   |
 | `tape_out_both`       | float        | Weighted count of `TapeOut(bars='both')`.                                                      |
-| `family_change`       | float        | Weighted count of `StyleChange(is_family_change=True)`.                                        |
+| `style_change`        | float        | Weighted count of `StyleChange` (new-machine changeover).                                      |
+| `runner_change`       | float        | Weighted count of `RunnerChange` (legacy, within pattern family).                              |
+| `pattern_change`      | float        | Weighted count of `PatternChange` (legacy, cross pattern family).                              |
 | `idle_time`           | float        | Weighted sum of `Idle` work-hour durations.                                                    |
 | `waste_lbs`           | float        | Weighted sum of `Waste.lbs` (discarded yarn) in the affected machine's combined activities.    |
 | `priority`            | float        | Cross-cutting: `w.priority × sum_O O.lbs × 2^days_late(O)` over higher-priority regular orders — see "Priority cost". |
 | `level_loading`       | float        | Cross-cutting: `work_hours_delta × w.level_loading` per "Level-loading".                       |
 | `old_machine`         | float        | Cross-cutting: `w.old_machine` when applicable, else 0; see "New-machine preference".          |
-| `total`               | float        | Sum of the twelve weighted components above; equals `iteration_log.total_score`.               |
+| `total`               | float        | Sum of the fourteen weighted components above; equals `iteration_log.total_score`.               |
 | `lateness_detail_id`  | int \| blank | Foreign key into `lateness_detail.tsv`. Blank when no item has a non-zero `lateness` delta from baseline. |
 | `drainage_detail_id`  | int \| blank | Foreign key into `drainage_detail.tsv`. Blank when no item has a non-zero `drainage` delta from baseline. |
 | `carrying_detail_id`  | int \| blank | Foreign key into `carrying_detail.tsv`. Blank when no item has a non-zero `carrying` delta from baseline. |
@@ -1172,7 +1188,7 @@ produces no row.
 | `machine_id`   | str      | The candidate's machine.                                                                       |
 | `start`        | datetime | Activity start.                                                                                |
 | `end`          | datetime | Activity end.                                                                                  |
-| `description`  | str      | Human-readable rendering of the activity and its key fields (e.g. `"Knit item=ABC lbs=1400"`, `"TapeOut both"`, `"StyleChange ABC→XYZ family_change=True"`). |
+| `description`  | str      | Human-readable rendering of the activity and its key fields (e.g. `"Knit item=ABC lbs=1400"`, `"TapeOut both"`, `"PatternChange ABC→XYZ"`, `"Doff"`, `"Threading both"`). |
 
 #### `job_detail.tsv` columns (in order)
 
@@ -1354,7 +1370,7 @@ under the CLI section for the file layout.
   CostBreakdown` (current-state baseline; per-move cross-cutting
   costs are 0 and `priority_by_item` is empty) and
   `cost_breakdown_after_move(state, move, ctx) -> CostBreakdown`
-  (same total as `score_after_move`, broken into the twelve
+  (same total as `score_after_move`, broken into the fourteen
   weighted scalars). Both return CostBreakdowns whose
   `lateness_by_item`, `drainage_by_item`, `carrying_by_item`, and
   `excess_by_item` dicts hold *absolute* weighted per-item

@@ -1,11 +1,23 @@
 #!/usr/bin/env python
 
 from .activity import (
-    Activity, Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
-    TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION, BEAM_LOAD_DURATION,
+    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    StyleChange, RunnerChange, PatternChange, Idle,
+    TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
+    HANGING_SINGLE_DURATION, HANGING_BOTH_DURATION,
+    THREADING_SINGLE_DURATION, THREADING_BOTH_DURATION,
+    DOFF_DURATION,
+    STYLE_CHANGE_DURATION, RUNNER_CHANGE_DURATION, PATTERN_CHANGE_DURATION,
+    BEAM_FLOOR_LBS, MAX_BEAM_WASTE_LBS,
 )
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'TapeOut', 'BeamLoad', 'StyleChange', 'Idle',
-    'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION', 'BEAM_LOAD_DURATION',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
+    'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',
+    'HANGING_SINGLE_DURATION', 'HANGING_BOTH_DURATION',
+    'THREADING_SINGLE_DURATION', 'THREADING_BOTH_DURATION',
+    'DOFF_DURATION',
+    'STYLE_CHANGE_DURATION', 'RUNNER_CHANGE_DURATION', 'PATTERN_CHANGE_DURATION',
+    'BEAM_FLOOR_LBS', 'MAX_BEAM_WASTE_LBS',
 ]

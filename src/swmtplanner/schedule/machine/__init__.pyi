@@ -23,6 +23,8 @@ class Status:
     btm_beam: BeamSet | None
     top_lbs_remaining: float
     btm_lbs_remaining: float
+    top_threaded: bool
+    btm_threaded: bool
     current_item: Greige
     is_idle: bool
     @property

@@ -51,9 +51,9 @@ Module-level function:
 - `fresh_beam_lbs(beam: BeamSet) -> float` — the lbs of yarn on a freshly
   loaded beam, by yarn-denier convention (the threshold and per-denier lbs
   are module-level constants — see the Constants section). Used by
-  `plan_production` whenever a fresh beam is threaded (a `Threading`) to set
-  that bar's lbs; the values are a plant-wide convention rather than
-  per-machine config. Lives at module
+  `plan_production` whenever a fresh beam is hung (a `Hanging`) to set that
+  bar's lbs; the values are a plant-wide convention rather than per-machine
+  config. Lives at module
   level instead of on `BeamSet` because it is plant-specific operational
   knowledge (which beam stocks Shawmut keeps), and `BeamSet` is meant to
   stay plant-agnostic.
@@ -118,21 +118,25 @@ Activity (abstract)               # anything that occupies machine time
     top_beam: BeamSet | None      # SKU removed from top (None if top untouched)
     btm_beam: BeamSet | None      # SKU removed from btm (None if btm untouched)
 
-  Hanging(Activity)               # physically mounting fresh beam(s) onto the
-                                  # named bar(s). No yarn routing and no Status
-                                  # effect on its own — pairs with a Threading.
-    bars: Literal['top', 'btm', 'both']
-
-  Threading(Activity)             # routing yarn from the mounted beam(s) into
-                                  # the machine. This is the activity that
-                                  # updates Status (sets each threaded bar's
-                                  # beam and lbs). Together, Hanging +
-                                  # Threading replace the old single `BeamLoad`.
-    bars: Literal['top', 'btm', 'both']  # which bar(s) this threads
-    top_beam: BeamSet | None      # beam now threaded on top (None if untouched)
-    top_lbs: float                # yarn on the freshly threaded top beam
+  Hanging(Activity)               # mounting fresh beam set(s) onto the named
+                                  # bar(s) — this is what loads the physical
+                                  # set, so it sets each bar's beam and lbs and
+                                  # leaves the bar un-threaded. Requires the
+                                  # old set already gone (see "Beam-swap
+                                  # sequencing"). Pairs with a Threading.
+    bars: Literal['top', 'btm', 'both']  # which bar(s) this loads
+    top_beam: BeamSet | None      # beam now loaded on top (None if untouched)
+    top_lbs: float                # yarn on the freshly loaded top beam
     btm_beam: BeamSet | None
     btm_lbs: float
+
+  Threading(Activity)             # routing the loaded yarn into the machine.
+                                  # Flips the bar(s) to threaded — sets
+                                  # `<bar>_threaded = True` and nothing else.
+                                  # Requires the bar(s) already hung (loaded
+                                  # but not yet threaded). Together, Hanging +
+                                  # Threading replace the old single `BeamLoad`.
+    bars: Literal['top', 'btm', 'both']  # which bar(s) this threads
 
   # Changeovers — replace the single `StyleChange`. The class itself carries
   # the changeover semantic (there is no is_family_change flag); which one is
@@ -191,6 +195,10 @@ Status                            # snapshot at a moment in time
   btm_beam: BeamSet | None
   top_lbs_remaining: float
   btm_lbs_remaining: float
+  top_threaded: bool                # the set on top is threaded (routed) and
+                                    # ready to knit — set True by Threading,
+                                    # reset False by Hanging (and by removal)
+  btm_threaded: bool                # same for btm
   current_item: Greige              # never None — machines are always
                                     # programmed to produce *something*
   is_idle: bool
@@ -258,6 +266,42 @@ with the "any activity in progress" semantic but worth flagging since the
 naming reads backwards in that case. The planner doesn't care; only
 consumers reading `Status` directly need to be aware.
 
+### Beam-swap sequencing (guard rails)
+
+Splitting a beam swap into three steps — **remove** the old set (`TapeOut`,
+`Waste`, or knitting it down to the floor), **hang** the fresh set
+(`Hanging`, which loads the new beam + lbs), then **thread** it (`Threading`,
+which routes the yarn) — means those steps must occur in order on a given
+bar. `Status.apply_activity` enforces the order and raises if an activity is
+applied out of sequence, so a malformed activity list can't silently produce
+an impossible machine state.
+
+Per bar, predicates of the (pre-activity) status drive the checks:
+
+- **removed** — the old set is gone or spent: `bar_beam is None` (after an
+  explicit `TapeOut` / `Waste`) **or** `bar_lbs_remaining <= BEAM_FLOOR_LBS`
+  (knit down to the floor at a run-out). A removed bar is ready to hang.
+- **threaded** — `bar_threaded` is set: the loaded set's yarn is routed and
+  ready to knit. A bar holding a freshly hung set that isn't yet threaded
+  (`not removed and not threaded`) is **hung**.
+
+The per-bar transitions and their guards:
+
+- **`Hanging(bar, beam, lbs)`** — requires the bar **removed**; otherwise
+  raises (hanging onto a bar that still holds a usable set, or hanging
+  twice). Effect: loads the fresh set — `bar_beam = beam`,
+  `bar_lbs_remaining = lbs` — and leaves it un-threaded
+  (`bar_threaded = False`), since a newly mounted set hasn't been routed yet.
+- **`Threading(bar)`** — requires the bar **hung** (`not removed and not
+  threaded`); otherwise raises (threading before hanging, or threading an
+  already-threaded bar). Effect: `bar_threaded = True`, nothing else.
+- **`TapeOut(bar)` / `Waste(bar)`** — remove the old set: `bar_beam = None`,
+  `bar_lbs_remaining = 0`, `bar_threaded = False`.
+
+The `'both'` variants apply the same per-bar checks to each bar. A
+freshly-constructed machine is threaded and running, so both `*_threaded`
+start `True`.
+
 ## Activity durations
 
 All durations are deterministic given (machine, activity spec).
@@ -295,14 +339,14 @@ Module-level constants (defined in `activity.py` / `machine.py`).
 not vary meaningfully by machine (referenced by name in the durations table
 above):
 
-- **`TAPE_OUT_SINGLE_DURATION = 4h`** — a single-bar `TapeOut`.
-- **`TAPE_OUT_BOTH_DURATION = 6h`** — a `TapeOut('both')`; more than two
-  singles because the floor can't parallelize the cuts.
-- **`HANGING_SINGLE_DURATION`** / **`HANGING_BOTH_DURATION`** — physically
-  mounting a fresh beam on one bar / both bars. (Values TBD from floor
-  measurements.)
-- **`THREADING_SINGLE_DURATION`** / **`THREADING_BOTH_DURATION`** — routing
-  yarn into the machine for one bar / both bars. (Values TBD.) `Hanging` +
+- **`TAPE_OUT_SINGLE_DURATION = 2h`** — a single-bar `TapeOut`.
+- **`TAPE_OUT_BOTH_DURATION = 3h`** — a `TapeOut('both')`; cheaper than two
+  separate singles (shared setup) but more than one, since the floor can't
+  fully parallelize the cuts.
+- **`HANGING_SINGLE_DURATION = 1h`** / **`HANGING_BOTH_DURATION = 1.5h`** —
+  physically mounting a fresh beam on one bar / both bars.
+- **`THREADING_SINGLE_DURATION = 2h`** / **`THREADING_BOTH_DURATION = 3.5h`**
+  — routing yarn into the machine for one bar / both bars. `Hanging` +
   `Threading` together replace the old single `BEAM_LOAD_DURATION = 2h`.
 - **`DOFF_DURATION = 20min`** — removing one completed roll.
 
@@ -311,12 +355,11 @@ above):
 the pattern-family comparison pick which one applies (see "Beam-swap
 decision"):
 
-- **`STYLE_CHANGE_DURATION`** — a new machine's uniform reconfigure.
-- **`RUNNER_CHANGE_DURATION`** — a legacy machine's within-pattern-family
-  runner change (the lighter case; same magnitude as the old
-  `simple_change_duration`).
-- **`PATTERN_CHANGE_DURATION`** — a legacy machine's cross-pattern-family
-  pattern-wheel rework (the heavier case; the old `family_change_duration`).
+- **`STYLE_CHANGE_DURATION = 5min`** — a new machine's uniform reconfigure.
+- **`RUNNER_CHANGE_DURATION = 45min`** — a legacy machine's
+  within-pattern-family runner change (the lighter case).
+- **`PATTERN_CHANGE_DURATION = 1.5h`** — a legacy machine's
+  cross-pattern-family pattern-wheel rework (the heavier case).
 
 **Fresh-beam yarn** — plant-wide convention for how much yarn a freshly loaded
 beam holds, by yarn denier (used by `fresh_beam_lbs`):
@@ -383,46 +426,58 @@ The plant ships **whole rolls** of ~`Greige.tgt_wt` lbs (within tolerance of
 the target weight). `plan_production` is called with `lbs` already a multiple
 of `tgt_wt` (the demand layer plans in whole-roll quantities, since all real
 orders are for full rolls), so every roll a call produces is a whole roll.
-There are no half rolls and no run-out-induced partials — the half-roll rule
-of the previous model is gone.
+There are no half rolls and no run-out-induced partials.
 
-**Rolls straddle beam loads.** A beam is never knit to zero, and a roll is
+**A `Knit` is one uninterrupted run of knitting** — the fabric wound between
+two consecutive interruptions (a doff, a beam swap, or the start/end of the
+run). It is bounded above by a single roll (`0 < Knit.lbs <= tgt_wt`):
+knitting stops at every roll boundary for a `Doff`, and can also stop
+mid-roll for a beam swap. A `Knit` no longer spans multiple rolls the way it
+did before doffs were modeled.
+
+**Every completed roll ends in a `Doff`.** Once a roll's final lbs are wound,
+a `Doff` (`DOFF_DURATION`) takes it off the machine before the next roll
+starts. A roll is "ready to ship" when it comes off, so its `completion_time`
+is the **`Doff`'s end** (`Doff.end == Roll.completion_time`) — not the moment
+its last lb was knit. Exactly one `Doff` is emitted per completed roll,
+regardless of how many `Knit`s produced it. Because each doff occupies machine
+time, it pushes every subsequent roll (and the schedule tail) later.
+
+**Rolls straddle beam swaps.** A beam is never knit to zero, and a roll is
 never cut short at a runout. When a bar reaches `BEAM_FLOOR_LBS` partway
-through a roll, the machine swaps that beam (a `BeamLoad`) and the *same*
-roll keeps winding on the fresh beam up to its full `tgt_wt`. So a roll can be
-produced across two `Knit`s separated by a `BeamLoad`:
+through a roll, that bar is re-threaded (a `Hanging` + `Threading`) and the
+*same* roll keeps winding on the fresh beam up to its full `tgt_wt`:
 
-- A `Knit` is one uninterrupted run between beam events, so it can end
-  mid-roll — its `lbs` is whatever was wound before the swap, **not**
-  constrained to whole rolls (nor halves). Example: `tgt_wt=700`, a bar with
-  430 usable lbs of capacity left mid-roll ⇒ a `Knit` of 430 lbs, a
-  `BeamLoad`, then a `Knit` that finishes the roll's remaining 270 lbs and
-  continues.
-- The roll itself is still a whole roll (~`tgt_wt`); only its production is
-  split across the swap. Its `completion_time` is when its final lbs are
-  wound, in whichever `Knit` completes it.
+- Example (`tgt_wt = 700`): a bar with 430 usable lbs of capacity left
+  mid-roll ⇒ `Knit(430)`, then `Hanging` + `Threading`, then `Knit(270)`
+  finishing the roll, then a `Doff`. Both `Knit`s lie within `(0, tgt_wt]`.
+- A roll that needs no mid-roll swap is simply `Knit(tgt_wt)` + `Doff`.
+- The roll is still a whole roll (~`tgt_wt`); only its winding is split
+  across the swap. Its `completion_time` is its `Doff.end`.
 
-`Waste` is no longer knitted fabric. It is the **usable residue on a beam the
+`Waste` is not knitted fabric. It is the **usable residue on a beam the
 planner swaps early** — when a bar's `usable` (`bar_lbs - BEAM_FLOOR_LBS`)
 falls below `MAX_BEAM_WASTE_LBS`, that yarn is discarded unknit (see the
-max-waste rule in the production loop). `Waste` therefore carries the `bar`
-whose residue is discarded and has zero duration; no doffing / cleanup
-activity is emitted.
+max-waste rule in the production loop). `Waste` carries the discarded `beam`
+SKU and its `bar`, has zero duration, and emits **no `Doff`** — a doff
+attends a completed roll, not discarded yarn.
 
 Across a single `plan_production` call, every (whole) roll produced is
-recorded as a `Roll(lbs, completion_time)` entry on the same `Job` record,
-which the call returns alongside the activity list.
+recorded as a `Roll(lbs, completion_time)` entry on the same `Job` record
+(its `completion_time` being the roll's `Doff.end`), which the call returns
+alongside the activity list.
 
-Only `Job` records reach the demand layer. `Knit`, `Waste`, and the other
-activity types affect machine occupation and end-time calculation but are
-never registered with an `RlsItem`.
+Only `Job` records reach the demand layer. `Knit`, `Doff`, `Waste`, and the
+other activity types affect machine occupation and end-time calculation but
+are never registered with an `RlsItem`.
 
 ## The `plan_production` walk
 
 Given `(item, lbs, start_at, idle_for)` and `current_status`, build a
 `ProductionPlan` carrying both the activity-schedule additions
-(`Knit`s, `Waste`s, `BeamLoad`s, etc.) and the production-schedule
-additions (one or two `Job` records). `start_at` is one of:
+(`Knit`s, `Doff`s, `Hanging`s, `Threading`s, `Waste`s, etc.) and the
+production-schedule additions (one or two `Job` records). `start_at` is one
+of:
 
 - `'schedule_tail'` — production of the new item begins at
   `current_status.as_of` (the activity-schedule tail). The activity
@@ -430,8 +485,8 @@ additions (one or two `Job` records). `start_at` is one of:
   production loop, and the call yields one `Job` for the new item.
 - `'next_runout'` — the machine continues running its current item until
   the next beam exhausts, *then* changes over to the new item. The
-  activity list begins with `Knit`s of `current_item`, followed by the
-  changeover preamble and the
+  activity list begins with the run-up's `Knit`/`Doff` pairs of
+  `current_item`, followed by the changeover preamble and the
   new-item production loop. The call yields one `Job` for the
   current item's run-up rolls plus one for the new item (or only the
   new-item `Job` if the run-up produced no whole rolls).
@@ -477,11 +532,17 @@ btm_usable = current_status.btm_lbs_remaining - BEAM_FLOOR_LBS
 producible = min(top_usable / current_item.top_pct,
                  btm_usable / current_item.btm_pct)
 n_rolls    = producible // current_item.tgt_wt
-if n_rolls > 0: emit Knit(current_item, n_rolls * current_item.tgt_wt)
+for _ in range(n_rolls):                  # each run-up roll is a clean roll
+    emit Knit(current_item, current_item.tgt_wt)
+    emit Doff                             # ends the roll
+    record Roll(current_item.tgt_wt, completion_time = Doff.end)
 ```
 
-Each whole roll is appended as a `Roll` entry on the run-up's `Job` record
-for `current_item`; the call yields that `Job` alongside the new-item `Job`
+Because `n_rolls * tgt_wt <= producible`, no bar reaches the floor partway
+through a run-up roll, so each roll is a single `Knit(tgt_wt)` followed by a
+`Doff` — no mid-roll swap. Each roll is appended as a `Roll` entry on the
+run-up's `Job` record for `current_item` (its `completion_time` is the
+roll's `Doff.end`); the call yields that `Job` alongside the new-item `Job`
 from phase 3 (no run-up `Job` when `n_rolls == 0`). **No `Waste` is emitted
 here** — the run-up never knits a partial, so there is no runout fabric to
 discard.
@@ -504,34 +565,40 @@ yarn and the bar's `usable = bar_lbs - BEAM_FLOOR_LBS` — the preamble emits:
 
 | Bar state | Activities for that bar |
 |---|---|
-| Empty / at the floor (`usable <= 0`) | `BeamLoad` only |
+| Empty / at the floor (`usable <= 0`) | re-thread (`Hanging` + `Threading`) only |
 | Yarn matches the new item | (none) — the beam and its leftover carry over; the new item draws it at its own pct |
-| Yarn doesn't match, `usable > MAX_BEAM_WASTE_LBS` | `TapeOut` + `BeamLoad` — preserve the worthwhile yarn (machine reverses; preserved beam not tracked in inventory yet) |
-| Yarn doesn't match, `usable <= MAX_BEAM_WASTE_LBS` | `Waste(bar)` + `BeamLoad` — discard the residue |
+| Yarn doesn't match, `usable > MAX_BEAM_WASTE_LBS` | `TapeOut` + re-thread (`Hanging` + `Threading`) — preserve the worthwhile yarn (machine reverses; preserved beam not tracked in inventory yet) |
+| Yarn doesn't match, `usable <= MAX_BEAM_WASTE_LBS` | `Waste(bar)` + re-thread (`Hanging` + `Threading`) — discard the residue |
 
-The bottom two rows are the new runout-model behavior. Previously a beam
-runout left the bar empty, so the preamble only ever loaded it. Now the
-run-up stops on a whole-roll boundary, leaving the bar with **post-run-out
-yarn**: usable that's less than one roll's worth but, when above
-`MAX_BEAM_WASTE_LBS`, still worth preserving with a `TapeOut` rather than
-discarding. A bar whose yarn matches is never taped out or wasted — the
+Mounting a fresh beam is now two activities — a `Hanging` (physical mount)
+then a `Threading` (yarn routing, which is what updates `Status`) — replacing
+the old single `BeamLoad`. The bottom two rows are the runout-model behavior:
+the run-up stops on a whole-roll boundary, leaving the bar with
+**post-run-out yarn** — usable that's less than one roll's worth but, when
+above `MAX_BEAM_WASTE_LBS`, still worth preserving with a `TapeOut` rather
+than discarding. A bar whose yarn matches is never taped out or wasted — the
 machine doesn't drop yarn without reason.
 
-When both bars are taped out together, emit a single `TapeOut('both')` rather
-than two singles (cheaper per the duration table). Since the run-up emits no
-beam work, this applies in both modes — a `'next_runout'` run can leave both
-bars carrying mismatched yarn above the threshold, exactly the `'both'` case.
+When **both** bars need the same operation together, emit the `'both'`
+variant rather than two singles (cheaper per the duration table): a single
+`TapeOut('both')` when both tape out, and a single `Hanging('both')` +
+`Threading('both')` when both are re-threaded. Since the run-up emits no beam
+work, the `'both'` tape-out applies in either mode — a `'next_runout'` run can
+leave both bars carrying mismatched yarn above the threshold, exactly the
+`'both'` case.
 
-After all beam work (if any), if `working_status.current_item != item`,
-emit `StyleChange(from_item=working_status.current_item, to_item=item,
-is_family_change=((not machine.is_new) and
-working_status.current_item.family != item.family))`.
+After all beam work (if any), if `working_status.current_item != item`, emit
+the changeover activity selected per "Beam-swap decision":
+`StyleChange` on a new machine, else `RunnerChange` within the pattern family
+or `PatternChange` across it. The activity type carries the semantic — there
+is no `is_family_change` flag.
 
 ### 3. Production loop
 
 `plan_production` is called with `lbs` a multiple of `tgt_wt`, so the loop
-owes `rolls_left = lbs / item.tgt_wt` whole rolls. It winds them continuously,
-breaking the run into separate `Knit`s only at beam events. Each bar's
+owes `rolls_left = lbs / item.tgt_wt` whole rolls. It produces them one roll
+at a time: a `Doff` ends each roll, and a mid-roll beam swap can split a roll,
+so each `Knit` covers at most one roll (`0 < Knit.lbs <= tgt_wt`). Each bar's
 `usable = bar_lbs - BEAM_FLOOR_LBS`; a bar is exhausted at `usable <= 0`.
 
 There are two swap triggers, both routed through one `resolve` step:
@@ -540,7 +607,7 @@ There are two swap triggers, both routed through one `resolve` step:
   `usable` is below `MAX_BEAM_WASTE_LBS` (discard its residue as `Waste`)
   rather than knit through a near-empty beam.
 - **Mid-roll runout + co-swap** — if a bar reaches the floor partway through a
-  roll, reload it (the roll continues on the fresh beam) and, in the same
+  roll, re-thread it (the roll continues on the fresh beam) and, in the same
   operation, co-swap the *other* bar when it has also fallen below the
   threshold.
 
@@ -551,15 +618,18 @@ knit        = 0.0                      # lbs in the current (unflushed) Knit
 
 flush():   if knit > 0: emit Knit(item, knit); knit = 0
 
-# reload any exhausted bar; swap (and discard the residue of) any near-empty
-# bar. Flushes the open Knit whenever it emits beam work.
+# Swap any bar at/below the floor (re-thread to continue) or near-empty
+# (discard its residue as Waste, then re-thread). Flush the open Knit once
+# before any beam work. Bars swapped together use the 'both' variants.
 resolve():
-    for bar in (top, btm):
-        u = usable(bar)                          # bar_lbs - BEAM_FLOOR_LBS
-        if u <= 0:                               # exhausted — reload to continue
-            flush(); emit BeamLoad(bar)
-        elif u < MAX_BEAM_WASTE_LBS:             # near-empty — swap, discard residue
-            flush(); emit Waste(bar, u); emit BeamLoad(bar)
+    top_swap = usable(top) < MAX_BEAM_WASTE_LBS
+    btm_swap = usable(btm) < MAX_BEAM_WASTE_LBS
+    if not (top_swap or btm_swap): return
+    flush()
+    if 0 < usable(top) < MAX_BEAM_WASTE_LBS: emit Waste(top, usable(top))
+    if 0 < usable(btm) < MAX_BEAM_WASTE_LBS: emit Waste(btm, usable(btm))
+    bars = 'both' if top_swap and btm_swap else ('top' if top_swap else 'btm')
+    emit Hanging(bars); emit Threading(bars)     # mount, then route yarn
 
 while rolls_left > 0:
     if roll_filled == 0:
@@ -569,24 +639,25 @@ while rolls_left > 0:
     step = min(item.tgt_wt - roll_filled, producible)
     knit += step; roll_filled += step            # draws both bars at their pcts
     if roll_filled >= item.tgt_wt:               # roll complete
-        record Roll(item.tgt_wt, completion_time = end of this step)
+        flush()                                  # end the roll's final Knit
+        emit Doff                                # takes the roll off (DOFF_DURATION)
+        record Roll(item.tgt_wt, completion_time = Doff.end)
         roll_filled = 0; rolls_left -= 1
     else:                                        # a bar hit BEAM_FLOOR mid-roll
-        resolve()                                # reload it; co-swap the other if near-empty
-
-flush()                                          # final Knit
+        resolve()                                # re-thread it; co-swap the other if near-empty
 ```
 
-A `Knit` spans as many consecutive rolls as one beam state allows and ends
-mid-roll when a swap intervenes — its `lbs` is whatever was wound since the
-previous beam event, not a whole-roll multiple. Every roll is a whole `tgt_wt`
-roll; a roll that straddles a `BeamLoad` is wound partly before and partly
-after the swap, completing in the later `Knit`.
+A `Knit` is one uninterrupted run of knitting, ending at the roll's `Doff` or
+at a mid-roll swap — its `lbs` is whatever was wound in that segment, within
+`(0, tgt_wt]`. Every roll is a whole `tgt_wt` roll, ends in exactly one
+`Doff`, and a roll that straddles a swap is wound partly before and partly
+after it, completing in the later `Knit`. There is no trailing `flush` after
+the loop — each roll already flushes at its `Doff`.
 
 Every completed roll is appended as a `Roll(lbs, completion_time)` entry on the
-new-item `Job` record. When the loop terminates, that `Job` (and the run-up
-`Job` from phase 1, if any) is bundled into the `ProductionPlan` the call
-returns.
+new-item `Job` record, its `completion_time` being the roll's `Doff.end`. When
+the loop terminates, that `Job` (and the run-up `Job` from phase 1, if any) is
+bundled into the `ProductionPlan` the call returns.
 
 Unlike the previous model, the loop **does** co-swap a non-exhausted bar: when
 one bar runs out, the other is swapped too if it has fallen below
@@ -615,10 +686,15 @@ produce in the window `[start, end)`, starting at `start` (if provided)
 or `current_status.as_of` and ending at `end`. Accounts for:
 
 - Required changeover preamble if the machine's threaded state doesn't
-  already match `item` (tape-outs, beam-loads, style-change).
-- Mid-stream beam swaps within the window (each adds `BEAM_LOAD_DURATION`;
-  mid-stream swaps never tape out, and a max-waste residue discard is a
-  zero-duration `Waste`, so neither adds machine time beyond the load).
+  already match `item` (tape-outs, re-threads — `Hanging` + `Threading` — and
+  the changeover activity).
+- A `Doff` per completed roll (`DOFF_DURATION` each): every roll ends in a
+  doff, so that overhead is part of each roll's cost and materially lowers how
+  many rolls fit in the window.
+- Mid-stream beam swaps within the window (each adds a re-thread,
+  `HANGING_* + THREADING_*`; swaps never tape out, and a max-waste residue
+  discard is a zero-duration `Waste`, so neither adds machine time beyond the
+  re-thread).
 - `workcal` — only counts actual work hours in the window.
 - Rounds down to a whole multiple of `item.tgt_wt`.
 
@@ -655,8 +731,8 @@ on the reports.
 
 Two read-only properties expose moments when the machine is at a low-cost
 transition boundary. The scheduler uses these to align placement decisions
-with the floor's natural rhythm (don't cut into a roll, don't interrupt
-mid-knit).
+with the floor's natural rhythm (don't cut into a roll, interrupt mid-knit, or
+break before a roll is doffed off).
 
 ```
 machine.schedule_tail: datetime
@@ -676,9 +752,11 @@ Forward-extrapolated time at which the machine would change over after
 running `current_status.current_item` from `current_status.as_of`. This must
 agree with what `plan_production` actually does in `'next_runout'` mode: the
 run-up produces **whole rolls only** and stops before any roll the beams
-can't finish above the floor (`BEAM_FLOOR_LBS`). So `next_runout` is the end
-of that **last whole roll**, not the instant a beam first crosses the floor —
-the two would otherwise disagree by up to a partial roll. Always
+can't finish above the floor (`BEAM_FLOOR_LBS`), and each of those rolls ends
+in a `Doff`. So `next_runout` is the end of that **last whole roll** — i.e.
+after its `Doff` — not the instant a beam first crosses the floor. Each roll
+costs its knit time **plus** a `DOFF_DURATION` doff; folding in the doffs is
+what keeps the prediction equal to the run-up's last `Doff.end`. Always
 well-defined: `current_item` is never `None`, and real greiges always draw
 from both bars (`top_pct, btm_pct > 0`).
 
@@ -686,8 +764,9 @@ from both bars (`top_pct, btm_pct > 0`).
 usable      = min((top_lbs_remaining - BEAM_FLOOR_LBS) / top_pct,
                   (btm_lbs_remaining - BEAM_FLOOR_LBS) / btm_pct)
 n_rolls     = floor(usable / current_item.tgt_wt)   # whole rolls only, snapped for float drift
-hours       = n_rolls * current_item.tgt_wt / current_item.get_rate_on_mchn(id)
-next_runout = workcal.offset_work_hours(current_status.as_of, hours)
+per_roll    = current_item.tgt_wt / current_item.get_rate_on_mchn(id)  # knit hours
+            + DOFF_DURATION                          # one doff per roll
+next_runout = workcal.offset_work_hours(current_status.as_of, n_rolls * per_roll)
 ```
 
 When fewer than one whole roll fits above the floor (`n_rolls == 0`,
@@ -696,10 +775,10 @@ current_status.as_of` — the changeover is immediately due.
 
 `next_runout` is a **prediction**. The run-out is not necessarily reflected
 as activities on the machine's schedule yet — it just describes when the
-current beam state, run forward in whole rolls, would force a swap. It shares
-the same whole-roll computation as the run-up (see "Run-up" above) so the
-predicted changeover time matches the activities a `'next_runout'` plan
-emits.
+current beam state, run forward in whole rolls (each with its doff), would
+force a swap. It shares the same whole-roll-plus-doff computation as the
+run-up (see "Run-up" above) so the predicted changeover time matches the
+activities a `'next_runout'` plan emits.
 
 ## File I/O
 
@@ -771,8 +850,9 @@ records** — one per distinct item that gets rolls in this call:
 
 - **`'schedule_tail'` mode** yields exactly one `Job` (for the new
   item). All rolls produced during the call are entries on that
-  `Job`'s `rolls`, whether they came from one continuous `Knit` or
-  from several `Knit`s separated by mid-call `BeamLoad`s.
+  `Job`'s `rolls`, however the underlying `Knit`s fell — a `Knit` + `Doff`
+  per roll, with the occasional roll split across a mid-call beam swap
+  (`Hanging` + `Threading`).
 - **`'next_runout'` mode** can yield two `Job`s: one for the run-up
   rolls of the current item and one for the new item's
   post-changeover production. If the run-up produced no whole rolls,

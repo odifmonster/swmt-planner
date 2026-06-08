@@ -1,19 +1,34 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 
 from swmtplanner.support import HasID
 from swmtplanner.products import Greige, BeamSet
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'TapeOut', 'BeamLoad', 'StyleChange', 'Idle',
-    'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION', 'BEAM_LOAD_DURATION',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
+    'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',
+    'HANGING_SINGLE_DURATION', 'HANGING_BOTH_DURATION',
+    'THREADING_SINGLE_DURATION', 'THREADING_BOTH_DURATION',
+    'DOFF_DURATION',
+    'STYLE_CHANGE_DURATION', 'RUNNER_CHANGE_DURATION', 'PATTERN_CHANGE_DURATION',
+    'BEAM_FLOOR_LBS', 'MAX_BEAM_WASTE_LBS',
 ]
 
 
-TAPE_OUT_SINGLE_DURATION: timedelta
-TAPE_OUT_BOTH_DURATION: timedelta
-BEAM_LOAD_DURATION: timedelta
+TAPE_OUT_SINGLE_DURATION: float
+TAPE_OUT_BOTH_DURATION: float
+HANGING_SINGLE_DURATION: float
+HANGING_BOTH_DURATION: float
+THREADING_SINGLE_DURATION: float
+THREADING_BOTH_DURATION: float
+DOFF_DURATION: float
+STYLE_CHANGE_DURATION: float
+RUNNER_CHANGE_DURATION: float
+PATTERN_CHANGE_DURATION: float
+BEAM_FLOOR_LBS: float
+MAX_BEAM_WASTE_LBS: float
 
 
 @dataclass(frozen=True)
@@ -36,6 +51,11 @@ class Waste(Activity):
 
 
 @dataclass(frozen=True)
+class Doff(Activity):
+    pass
+
+
+@dataclass(frozen=True)
 class TapeOut(Activity):
     bars: Literal['top', 'btm', 'both']
     top_beam: BeamSet | None = ...
@@ -43,17 +63,35 @@ class TapeOut(Activity):
 
 
 @dataclass(frozen=True)
-class BeamLoad(Activity):
-    bar: Literal['top', 'btm']
-    beam: BeamSet
-    lbs: float
+class Hanging(Activity):
+    bars: Literal['top', 'btm', 'both']
+    top_beam: BeamSet | None = ...
+    top_lbs: float = ...
+    btm_beam: BeamSet | None = ...
+    btm_lbs: float = ...
+
+
+@dataclass(frozen=True)
+class Threading(Activity):
+    bars: Literal['top', 'btm', 'both']
 
 
 @dataclass(frozen=True)
 class StyleChange(Activity):
     from_item: Greige
     to_item: Greige
-    is_family_change: bool
+
+
+@dataclass(frozen=True)
+class RunnerChange(Activity):
+    from_item: Greige
+    to_item: Greige
+
+
+@dataclass(frozen=True)
+class PatternChange(Activity):
+    from_item: Greige
+    to_item: Greige
 
 
 @dataclass(frozen=True)
