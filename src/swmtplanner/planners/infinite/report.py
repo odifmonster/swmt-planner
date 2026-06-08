@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from swmtplanner.schedule import (
-    Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    StyleChange, RunnerChange, PatternChange, Idle,
 )
 
 if TYPE_CHECKING:
@@ -47,12 +48,14 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
     Columns:
 
     - `start`, `end` — `datetime`s.
-    - `lbs` — populated for `Knit`, `Waste`, and `BeamLoad`; `NaN` for
-      everything else so the cell renders blank in Excel.
+    - `lbs` — populated for `Knit` and `Waste`; `NaN` for everything else
+      (including `Hanging`, whose per-bar lbs go in `desc`) so the cell
+      renders blank in Excel.
     - `desc` — short human-readable description, dispatched on type:
-      Knit/Waste show the greige item id, BeamLoad shows
-      `'<beam> on <bar>'`, TapeOut shows the bar(s), StyleChange shows
-      `'from <item> to <item>'`, Idle is blank.
+      Knit shows the greige item id, Waste shows `'<beam> on <bar>'`,
+      Hanging shows each loaded bar's `'<bar> <beam> (<lbs> lbs)'`,
+      Threading shows the bar(s), TapeOut shows the bar(s), the changeover
+      activities show `'from <item> to <item>'`, Doff/Idle are blank.
 
     Within each machine, rows are in chronological order (the order
     `Machine.add_activities` appended them)."""
@@ -176,7 +179,7 @@ def iteration_log_dataframe(report: 'PlanReport') -> pd.DataFrame:
 
 def cost_detail_dataframe(report: 'PlanReport') -> pd.DataFrame:
     """One row per record in `report.cost_detail`. Columns mirror
-    `CostDetailRecord` — 11 weighted scalars, `total`, and the five
+    `CostDetailRecord` — 14 weighted scalars, `total`, and the five
     `*_detail_id` foreign keys (nullable, blank in the TSV when the
     cost has no contributing detail rows).
 
@@ -196,7 +199,9 @@ def cost_detail_dataframe(report: 'PlanReport') -> pd.DataFrame:
             'excess': r.excess,
             'tape_out_single': r.tape_out_single,
             'tape_out_both': r.tape_out_both,
-            'family_change': r.family_change,
+            'style_change': r.style_change,
+            'runner_change': r.runner_change,
+            'pattern_change': r.pattern_change,
             'idle_time': r.idle_time,
             'waste_lbs': r.waste_lbs,
             'priority': r.priority,
@@ -214,7 +219,8 @@ def cost_detail_dataframe(report: 'PlanReport') -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=[
         'cost_id',
         'lateness', 'drainage', 'carrying', 'excess',
-        'tape_out_single', 'tape_out_both', 'family_change', 'idle_time',
+        'tape_out_single', 'tape_out_both',
+        'style_change', 'runner_change', 'pattern_change', 'idle_time',
         'waste_lbs',
         'priority', 'level_loading', 'old_machine',
         'total',
@@ -388,7 +394,7 @@ def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
 def _round_int(s: pd.Series) -> pd.Series:
     """Round a numeric column to the nearest integer, preserving NaN via
     pandas' nullable `Int64` dtype. The schedule's `lbs` column has NaN
-    for non-Job activities (Idle / TapeOut / StyleChange); Int64
+    for non-Job activities (Idle / TapeOut / changeovers); Int64
     preserves those as `pd.NA`, which `to_excel` renders as a blank
     cell. For columns without NaN this still produces clean integer
     output (no trailing `.0`)."""
@@ -398,10 +404,10 @@ def _round_int(s: pd.Series) -> pd.Series:
 # ----- Per-activity helpers -----------------------------------------------
 
 def _activity_lbs(a: 'Activity') -> float:
-    """`lbs` cell value for `a`. Only Job/Waste/BeamLoad have a
-    meaningful lbs quantity; everything else is NaN (renders blank in
-    Excel)."""
-    if isinstance(a, (Knit, Waste, BeamLoad)):
+    """`lbs` cell value for `a`. Only Knit/Waste have a single meaningful
+    lbs quantity; everything else is NaN (renders blank in Excel).
+    `Hanging`'s per-bar lbs go in its `desc` instead."""
+    if isinstance(a, (Knit, Waste)):
         return a.lbs
     return math.nan
 
@@ -412,13 +418,20 @@ def _activity_desc(a: 'Activity') -> str:
         return a.item.id
     if isinstance(a, Waste):
         return f'{a.beam.id} on {a.bar}'
-    if isinstance(a, BeamLoad):
-        return f'{a.beam.id} on {a.bar}'
+    if isinstance(a, Hanging):
+        parts = []
+        if a.bars in ('top', 'both'):
+            parts.append(f'top {a.top_beam.id} ({a.top_lbs:g} lbs)')
+        if a.bars in ('btm', 'both'):
+            parts.append(f'btm {a.btm_beam.id} ({a.btm_lbs:g} lbs)')
+        return ', '.join(parts)
+    if isinstance(a, Threading):
+        return a.bars
     if isinstance(a, TapeOut):
         return a.bars
-    if isinstance(a, StyleChange):
+    if isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         return f'from {a.from_item.id} to {a.to_item.id}'
-    if isinstance(a, Idle):
+    if isinstance(a, (Doff, Idle)):
         return ''
     return ''
 

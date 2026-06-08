@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from swmtplanner.schedule.activity import (
     Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
@@ -12,18 +12,17 @@ from swmtplanner.schedule.activity import (
 if TYPE_CHECKING:
     from swmtplanner.products import Greige, BeamSet
 
-
-def _removed(beam: 'BeamSet | None', lbs: float) -> bool:
-    """A bar is 'removed' (old set gone or spent, ready to hang) when its beam
-    has been taken off (`beam is None`, via TapeOut/Waste) or it's been knit
-    down to the floor (`lbs <= BEAM_FLOOR_LBS`, a run-out)."""
-    return beam is None or lbs <= BEAM_FLOOR_LBS
+Bar = Literal['top', 'btm']
 
 
-def _hung(beam: 'BeamSet | None', lbs: float, threaded: bool) -> bool:
-    """A bar is 'hung' (a fresh set is loaded but not yet threaded) when it is
-    not removed and not threaded — exactly the post-`Hanging` state."""
-    return (not _removed(beam, lbs)) and (not threaded)
+@dataclass(frozen=True)
+class _BarState:
+    """Per-bar slice of a `Status`: the mounted beam, its remaining lbs, and
+    whether the set is threaded (routed) and ready to knit. Internal to
+    `Status` — read it through the bar accessors."""
+    beam: 'BeamSet | None'
+    lbs_remaining: float
+    threaded: bool
 
 
 @dataclass(frozen=True)
@@ -32,35 +31,99 @@ class Status:
     `Machine.initial_status` plus the machine's activity sequence; never
     mutated directly.
 
-    `current_item` is non-nullable — a machine is always programmed to
-    produce *something*; changing items only ever swaps that program, never
-    clears it. `top_beam` / `btm_beam` can be `None` after a `TapeOut`/`Waste`
-    before the matching re-thread.
+    Per-bar values are read through the `beam(bar)`, `lbs_remaining(bar)`, and
+    `threaded(bar)` accessors (`bar` is `'top'` or `'btm'`) rather than
+    separate top_*/btm_* fields; the underlying per-bar state (`_bars`) is
+    private.
 
-    `top_threaded` / `btm_threaded` report whether each bar's loaded set has
-    its yarn routed and is ready to knit. A beam swap moves a bar through
-    threaded -> removed -> hung (loaded, not threaded) -> threaded; see
-    `apply_activity` for the guard rails that keep those steps in order.
+    `current_item` is non-nullable — a machine is always programmed to
+    produce *something*. `beam(bar)` can be `None` after a `TapeOut`/`Waste`,
+    before the matching re-thread. A beam swap moves a bar through threaded ->
+    removed -> hung (loaded, not threaded) -> threaded; the `apply_activity`
+    guards keep those steps in order.
 
     `is_idle` reports whether an activity is in progress at `as_of`. It is
     informational only — the planner does not consult it when deciding on
     changeovers, since yarn stays threaded across idle gaps."""
     as_of: datetime
-    top_beam: 'BeamSet | None'
-    btm_beam: 'BeamSet | None'
-    top_lbs_remaining: float
-    btm_lbs_remaining: float
-    top_threaded: bool
-    btm_threaded: bool
+    _bars: 'dict[str, _BarState]'
     current_item: 'Greige'
     is_idle: bool
 
+    # ----- construction -------------------------------------------------
+
+    @classmethod
+    def create(
+        cls, *, as_of: datetime, current_item: 'Greige', is_idle: bool,
+        top_beam: 'BeamSet | None', top_lbs_remaining: float, top_threaded: bool,
+        btm_beam: 'BeamSet | None', btm_lbs_remaining: float, btm_threaded: bool,
+    ) -> 'Status':
+        """Build a `Status` from per-bar primitives, without callers having to
+        know the private per-bar storage. The accessors (`beam`, etc.) are the
+        read API; this is the matching write/construct API."""
+        return cls(
+            as_of=as_of,
+            _bars={
+                'top': _BarState(top_beam, top_lbs_remaining, top_threaded),
+                'btm': _BarState(btm_beam, btm_lbs_remaining, btm_threaded),
+            },
+            current_item=current_item, is_idle=is_idle,
+        )
+
+    # ----- per-bar accessors --------------------------------------------
+
+    def beam(self, bar: Bar) -> 'BeamSet | None':
+        """Mounted beam SKU on `bar` (None after a remove, before re-thread)."""
+        return self._bars[bar].beam
+
+    def lbs_remaining(self, bar: Bar) -> float:
+        """Yarn remaining on `bar`'s beam."""
+        return self._bars[bar].lbs_remaining
+
+    def threaded(self, bar: Bar) -> bool:
+        """Whether `bar`'s set is threaded (routed) and ready to knit."""
+        return self._bars[bar].threaded
+
     @property
     def current_family(self) -> str:
-        """Family of `current_item`. Derived rather than stored so the
-        record cannot be constructed in an inconsistent state where
-        `current_family` contradicts `current_item.family`."""
+        """Family of `current_item`. Derived rather than stored so the record
+        cannot be constructed in an inconsistent state where `current_family`
+        contradicts `current_item.family`."""
         return self.current_item.family
+
+    # ----- guard predicates ---------------------------------------------
+
+    def _removed(self, bar: Bar) -> bool:
+        """A bar is 'removed' (old set gone or spent, ready to hang) when its
+        beam has been taken off (`beam(bar) is None`, via TapeOut/Waste) or
+        knit down to the floor (`lbs_remaining(bar) <= BEAM_FLOOR_LBS`)."""
+        return self.beam(bar) is None or self.lbs_remaining(bar) <= BEAM_FLOOR_LBS
+
+    def _hung(self, bar: Bar) -> bool:
+        """A bar is 'hung' (a fresh set loaded but not yet threaded) when it is
+        not removed and not threaded — exactly the post-`Hanging` state."""
+        return (not self._removed(bar)) and (not self.threaded(bar))
+
+    # ----- evolution ----------------------------------------------------
+
+    def _evolve(
+        self, as_of: datetime, *,
+        current_item: 'Greige | None' = None, is_idle: bool = True,
+        top: 'dict | None' = None, btm: 'dict | None' = None,
+    ) -> 'Status':
+        """Build the next Status at `as_of`. `top` / `btm`, when given, are
+        dicts of `_BarState` field overrides for that bar (an omitted bar
+        carries over unchanged). Pure — `self` is untouched."""
+        bars = dict(self._bars)
+        if top is not None:
+            bars['top'] = replace(self._bars['top'], **top)
+        if btm is not None:
+            bars['btm'] = replace(self._bars['btm'], **btm)
+        return Status(
+            as_of=as_of, _bars=bars, is_idle=is_idle,
+            current_item=(self.current_item if current_item is None
+                          else current_item),
+        )
 
     def apply_activity(self, activity: Activity) -> 'Status':
         """Return the Status that results from completing `activity` against
@@ -76,96 +139,76 @@ class Status:
             # Continuous run: consumes yarn from each bar in proportion to the
             # item's pcts and sets current_item. Beam/threaded state unchanged.
             cfg = activity.item.configuration
-            return replace(
-                self,
-                as_of=activity.end,
-                top_lbs_remaining=self.top_lbs_remaining - activity.lbs * cfg.top_pct,
-                btm_lbs_remaining=self.btm_lbs_remaining - activity.lbs * cfg.btm_pct,
-                current_item=activity.item,
-                is_idle=True,
+            return self._evolve(
+                activity.end, current_item=activity.item,
+                top={'lbs_remaining':
+                     self.lbs_remaining('top') - activity.lbs * cfg.top_pct},
+                btm={'lbs_remaining':
+                     self.lbs_remaining('btm') - activity.lbs * cfg.btm_pct},
             )
         if isinstance(activity, Waste):
-            # Discards a beam's usable residue unknit, emptying the named bar
-            # (beam -> None, lbs -> 0, un-threaded); a paired re-thread refills
-            # it. current_item is unchanged — the yarn was dropped, never knit.
-            if activity.bar == 'top':
-                return replace(
-                    self, as_of=activity.end,
-                    top_beam=None, top_lbs_remaining=0.0, top_threaded=False,
-                    is_idle=True,
-                )
-            return replace(
-                self, as_of=activity.end,
-                btm_beam=None, btm_lbs_remaining=0.0, btm_threaded=False,
-                is_idle=True,
-            )
+            # Discards a beam's usable residue unknit, emptying the named bar;
+            # current_item unchanged. A paired re-thread refills it.
+            return self._evolve(activity.end, **{
+                activity.bar: {'beam': None, 'lbs_remaining': 0.0,
+                               'threaded': False},
+            })
         if isinstance(activity, Doff):
-            # Takes one completed roll off the machine. No beam/lbs/item or
-            # threaded change — only machine time (advancing as_of).
-            return replace(self, as_of=activity.end, is_idle=True)
+            # Takes one completed roll off the machine: machine time only.
+            return self._evolve(activity.end)
         if isinstance(activity, TapeOut):
-            # Removes the set on the named bar(s): beam -> None, lbs -> 0,
-            # un-threaded. current_item unchanged.
-            changes: dict = {'as_of': activity.end, 'is_idle': True}
-            if activity.bars in ('top', 'both'):
-                changes.update(top_beam=None, top_lbs_remaining=0.0,
-                               top_threaded=False)
-            if activity.bars in ('btm', 'both'):
-                changes.update(btm_beam=None, btm_lbs_remaining=0.0,
-                               btm_threaded=False)
-            return replace(self, **changes)
+            # Removes the set on the named bar(s).
+            gone = {'beam': None, 'lbs_remaining': 0.0, 'threaded': False}
+            return self._evolve(
+                activity.end,
+                top=gone if activity.bars in ('top', 'both') else None,
+                btm=gone if activity.bars in ('btm', 'both') else None,
+            )
         if isinstance(activity, Hanging):
             # Loads a fresh set onto the named bar(s): sets beam + lbs and
             # leaves the bar un-threaded. Requires the bar already removed.
-            changes = {'as_of': activity.end, 'is_idle': True}
+            top = btm = None
             if activity.bars in ('top', 'both'):
-                if not _removed(self.top_beam, self.top_lbs_remaining):
+                if not self._removed('top'):
                     raise ValueError(
                         'cannot hang top: it still holds a usable set — '
                         'remove the old set first'
                     )
-                changes.update(top_beam=activity.top_beam,
-                               top_lbs_remaining=activity.top_lbs,
-                               top_threaded=False)
+                top = {'beam': activity.top_beam,
+                       'lbs_remaining': activity.top_lbs, 'threaded': False}
             if activity.bars in ('btm', 'both'):
-                if not _removed(self.btm_beam, self.btm_lbs_remaining):
+                if not self._removed('btm'):
                     raise ValueError(
                         'cannot hang btm: it still holds a usable set — '
                         'remove the old set first'
                     )
-                changes.update(btm_beam=activity.btm_beam,
-                               btm_lbs_remaining=activity.btm_lbs,
-                               btm_threaded=False)
-            return replace(self, **changes)
+                btm = {'beam': activity.btm_beam,
+                       'lbs_remaining': activity.btm_lbs, 'threaded': False}
+            return self._evolve(activity.end, top=top, btm=btm)
         if isinstance(activity, Threading):
             # Routes the loaded yarn: flips the named bar(s) to threaded and
             # nothing else. Requires the bar already hung (loaded, unthreaded).
-            changes = {'as_of': activity.end, 'is_idle': True}
+            top = btm = None
             if activity.bars in ('top', 'both'):
-                if not _hung(self.top_beam, self.top_lbs_remaining,
-                             self.top_threaded):
+                if not self._hung('top'):
                     raise ValueError(
                         'cannot thread top: it is not hung — hang a fresh '
                         'set first'
                     )
-                changes.update(top_threaded=True)
+                top = {'threaded': True}
             if activity.bars in ('btm', 'both'):
-                if not _hung(self.btm_beam, self.btm_lbs_remaining,
-                             self.btm_threaded):
+                if not self._hung('btm'):
                     raise ValueError(
                         'cannot thread btm: it is not hung — hang a fresh '
                         'set first'
                     )
-                changes.update(btm_threaded=True)
-            return replace(self, **changes)
+                btm = {'threaded': True}
+            return self._evolve(activity.end, top=top, btm=btm)
         if isinstance(activity, (StyleChange, RunnerChange, PatternChange)):
             # Changeover: switches the item being run. No yarn, beam, or
             # threaded change — the three types differ only in duration/cost.
-            return replace(
-                self, as_of=activity.end,
-                current_item=activity.to_item, is_idle=True,
-            )
+            return self._evolve(activity.end, current_item=activity.to_item)
         if isinstance(activity, Idle):
             # Beams, lbs, current_item, threaded all unchanged; advance as_of.
-            return replace(self, as_of=activity.end, is_idle=True)
+            return self._evolve(activity.end)
         raise TypeError(f'unknown activity type: {type(activity).__name__}')

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -30,11 +30,13 @@ def machines_from_list(
     initial top and bottom beam yarns are taken from the resolved
     `Greige`'s `configuration` (a machine currently set up to run an
     item is by definition threaded with that item's beams).
-    `style_change_time` and `family_change_time` are decimal hours
-    (e.g. `0.1` ⇒ 6 minutes) and become `timedelta`s here.
     `init_top_lbs` and `init_btm_lbs` are the dynamic state — how
     much yarn is left on each bar at `start_date`. `start_date` and
-    `workcal` are plant-wide, applied uniformly to every machine."""
+    `workcal` are plant-wide, applied uniformly to every machine.
+    (Changeover durations are no longer per-machine — they are
+    module-level constants — so the file no longer carries
+    `style_change_time` / `family_change_time`; any such fields are
+    ignored.)"""
     if not isinstance(cfg, list):
         raise TypeError(f'{source} must be a list of machine objects')
     out: dict[str, Machine] = {}
@@ -54,12 +56,6 @@ def machines_from_list(
             init_btm_beam=BeamSet(item_cfg.btm_beam),
             init_btm_lbs=float(entry['init_btm_lbs']),
             workcal=workcal,
-            simple_change_duration=timedelta(
-                hours=float(entry['style_change_time']),
-            ),
-            family_change_duration=timedelta(
-                hours=float(entry['family_change_time']),
-            ),
             is_new=bool(entry['is_new']),
         )
         out[machine.id] = machine

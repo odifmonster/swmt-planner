@@ -17,16 +17,27 @@ class ProductionPlan:
 
 
 @dataclass(frozen=True)
+class _BarState:
+    beam: BeamSet | None
+    lbs_remaining: float
+    threaded: bool
+
+
+@dataclass(frozen=True)
 class Status:
     as_of: datetime
-    top_beam: BeamSet | None
-    btm_beam: BeamSet | None
-    top_lbs_remaining: float
-    btm_lbs_remaining: float
-    top_threaded: bool
-    btm_threaded: bool
+    _bars: dict[str, _BarState]
     current_item: Greige
     is_idle: bool
+    @classmethod
+    def create(
+        cls, *, as_of: datetime, current_item: Greige, is_idle: bool,
+        top_beam: BeamSet | None, top_lbs_remaining: float, top_threaded: bool,
+        btm_beam: BeamSet | None, btm_lbs_remaining: float, btm_threaded: bool,
+    ) -> Status: ...
+    def beam(self, bar: Literal['top', 'btm']) -> BeamSet | None: ...
+    def lbs_remaining(self, bar: Literal['top', 'btm']) -> float: ...
+    def threaded(self, bar: Literal['top', 'btm']) -> bool: ...
     @property
     def current_family(self) -> str: ...
     def apply_activity(self, activity: Activity) -> Status: ...
@@ -46,8 +57,6 @@ class Machine(HasID[str]):
         init_btm_beam: BeamSet,
         init_btm_lbs: float,
         workcal: WorkCal,
-        simple_change_duration: timedelta,
-        family_change_duration: timedelta,
         is_new: bool = ...,
     ) -> None: ...
     @property

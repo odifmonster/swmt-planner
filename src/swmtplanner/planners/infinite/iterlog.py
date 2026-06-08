@@ -33,7 +33,8 @@ from datetime import datetime
 from typing import Callable, Literal, TYPE_CHECKING
 
 from swmtplanner.schedule import (
-    Knit, Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    StyleChange, RunnerChange, PatternChange, Idle,
 )
 
 from swmtplanner.planners.infinite.costing import CostBreakdown
@@ -145,14 +146,14 @@ def build_iteration_log_record(
 class CostDetailRecord:
     """One row of `cost_detail.tsv`; one record per scored candidate.
 
-    Carries the full weighted cost breakdown — the same twelve scalars
+    Carries the full weighted cost breakdown — the same fourteen scalars
     `CostBreakdown` exposes — plus integer foreign keys into the five
     per-cost detail tables. A `*_detail_id` is `None` when the
     corresponding cost has no contributing rows for this candidate
     (no non-zero deltas for the four demand-side costs; no
     higher-priority skipped orders for priority).
 
-    `total` equals the sum of the twelve weighted components and
+    `total` equals the sum of the fourteen weighted components and
     matches the `total_score` field on the candidate's
     `IterationLogRecord`."""
     cost_id: int
@@ -163,7 +164,9 @@ class CostDetailRecord:
     excess: float
     tape_out_single: float
     tape_out_both: float
-    family_change: float
+    style_change: float
+    runner_change: float
+    pattern_change: float
     idle_time: float
     waste_lbs: float
     priority: float
@@ -422,7 +425,9 @@ def build_candidate_records(
         excess=breakdown.excess,
         tape_out_single=breakdown.tape_out_single,
         tape_out_both=breakdown.tape_out_both,
-        family_change=breakdown.family_change,
+        style_change=breakdown.style_change,
+        runner_change=breakdown.runner_change,
+        pattern_change=breakdown.pattern_change,
         idle_time=breakdown.idle_time,
         waste_lbs=breakdown.waste_lbs,
         priority=breakdown.priority,
@@ -473,13 +478,20 @@ def _activity_desc(a: 'Activity') -> str:
         return a.item.id
     if isinstance(a, Waste):
         return f'{a.beam.id} on {a.bar}'
-    if isinstance(a, BeamLoad):
-        return f'{a.beam.id} on {a.bar}'
+    if isinstance(a, Hanging):
+        parts = []
+        if a.bars in ('top', 'both'):
+            parts.append(f'top {a.top_beam.id} ({a.top_lbs:g} lbs)')
+        if a.bars in ('btm', 'both'):
+            parts.append(f'btm {a.btm_beam.id} ({a.btm_lbs:g} lbs)')
+        return ', '.join(parts)
+    if isinstance(a, Threading):
+        return a.bars
     if isinstance(a, TapeOut):
         return a.bars
-    if isinstance(a, StyleChange):
+    if isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         return f'from {a.from_item.id} to {a.to_item.id}'
-    if isinstance(a, Idle):
+    if isinstance(a, (Doff, Idle)):
         return ''
     return ''
 

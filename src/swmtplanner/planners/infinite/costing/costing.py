@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from swmtplanner.schedule import Job, TapeOut, StyleChange, Idle, Waste
+from swmtplanner.schedule import (
+    Job, TapeOut, StyleChange, RunnerChange, PatternChange, Idle, Waste,
+)
 
 from swmtplanner.planners.infinite.coordination import OrderKey, ScoringContext
 from swmtplanner.planners.infinite.state import Move, State
@@ -21,8 +23,8 @@ class CostWeights:
 
     Per-item demand weights apply to the unweighted `CostComponents`
     returned by `RlsItem.cost_if` / the demand views. Per-machine
-    schedule weights apply per occurrence (TapeOut, StyleChange), per
-    work-hour (Idle), or per lb (Waste). Phase 2 cross-cutting weights apply per move
+    schedule weights apply per occurrence (TapeOut, the changeover types),
+    per work-hour (Idle), or per lb (Waste). Phase 2 cross-cutting weights apply per move
     being scored — `priority` per rank step, `level_loading` per work-
     hour delta from the earliest decision point, `old_machine` per move
     that targets a legacy machine when a new one is candidate-available
@@ -36,7 +38,11 @@ class CostWeights:
     # per-machine schedule weights — per occurrence
     tape_out_single: float
     tape_out_both: float
-    family_change: float
+    # changeover weights, by type (StyleChange = new machine; RunnerChange =
+    # legacy within pattern family; PatternChange = legacy cross-family)
+    style_change: float
+    runner_change: float
+    pattern_change: float
     # per-machine schedule weight — per work-hour
     idle_time: float
     # per-machine schedule weight — per lb of discarded Waste
@@ -62,7 +68,7 @@ class PriorityContribution:
 @dataclass(frozen=True)
 class CostBreakdown:
     """Per-component weighted contributions for a single state. The sum
-    of the twelve scalar fields equals `Costing.score_after_move(state,
+    of the fourteen scalar fields equals `Costing.score_after_move(state,
     move, ctx)` when produced by `cost_breakdown_after_move`, or
     `Costing.score(state)` when produced by `cost_breakdown(state)`.
 
@@ -84,7 +90,9 @@ class CostBreakdown:
     # per-machine schedule contributions
     tape_out_single: float
     tape_out_both: float
-    family_change: float
+    style_change: float
+    runner_change: float
+    pattern_change: float
     idle_time: float
     waste_lbs: float
     # cross-cutting contributions
@@ -104,7 +112,8 @@ class CostBreakdown:
         return (
             self.lateness + self.drainage + self.carrying + self.excess
             + self.tape_out_single + self.tape_out_both
-            + self.family_change + self.idle_time + self.waste_lbs
+            + self.style_change + self.runner_change + self.pattern_change
+            + self.idle_time + self.waste_lbs
             + self.priority + self.level_loading + self.old_machine
         )
 
@@ -126,7 +135,7 @@ class Costing:
 
     `cost_breakdown(state)` and `cost_breakdown_after_move(state, move,
     ctx)` mirror the two `score*` methods but return a `CostBreakdown`
-    record — twelve weighted scalars plus per-item dicts for the four
+    record — fourteen weighted scalars plus per-item dicts for the four
     demand-side costs and for priority. Used by the verbose iteration
     log; the hot scoring loop stays on the scalar `score*` methods."""
 
@@ -232,14 +241,17 @@ class Costing:
                 carrying_by_item, excess_by_item,
             )
 
-        tos_q = tob_q = fc_q = it_q = wl_q = 0.0
+        tos_q = tob_q = sc_q = rc_q = pc_q = it_q = wl_q = 0.0
         for machine in state.machines.values():
-            stos, stob, sfc, sit, swl = self._schedule_quantities_for(
-                machine.activities, machine.workcal,
-            )
+            stos, stob, ssc, src, spc, sit, swl = \
+                self._schedule_quantities_for(
+                    machine.activities, machine.workcal,
+                )
             tos_q += stos
             tob_q += stob
-            fc_q += sfc
+            sc_q += ssc
+            rc_q += src
+            pc_q += spc
             it_q += sit
             wl_q += swl
 
@@ -250,7 +262,9 @@ class Costing:
             excess=w.excess * excess_q,
             tape_out_single=w.tape_out_single * tos_q,
             tape_out_both=w.tape_out_both * tob_q,
-            family_change=w.family_change * fc_q,
+            style_change=w.style_change * sc_q,
+            runner_change=w.runner_change * rc_q,
+            pattern_change=w.pattern_change * pc_q,
             idle_time=w.idle_time * it_q,
             waste_lbs=w.waste_lbs * wl_q,
             priority=0.0,
@@ -308,18 +322,21 @@ class Costing:
 
         # Schedule: combine the affected machine's activities with the
         # move's plan; use existing activities for the rest.
-        tos_q = tob_q = fc_q = it_q = wl_q = 0.0
+        tos_q = tob_q = sc_q = rc_q = pc_q = it_q = wl_q = 0.0
         for machine_id, machine in state.machines.items():
             if machine_id == move.machine_id:
                 activities = list(machine.activities) + list(move.plan.activities)
             else:
                 activities = machine.activities
-            stos, stob, sfc, sit, swl = self._schedule_quantities_for(
-                activities, machine.workcal,
-            )
+            stos, stob, ssc, src, spc, sit, swl = \
+                self._schedule_quantities_for(
+                    activities, machine.workcal,
+                )
             tos_q += stos
             tob_q += stob
-            fc_q += sfc
+            sc_q += ssc
+            rc_q += src
+            pc_q += spc
             it_q += sit
             wl_q += swl
 
@@ -346,7 +363,9 @@ class Costing:
             excess=w.excess * excess_q,
             tape_out_single=w.tape_out_single * tos_q,
             tape_out_both=w.tape_out_both * tob_q,
-            family_change=w.family_change * fc_q,
+            style_change=w.style_change * sc_q,
+            runner_change=w.runner_change * rc_q,
+            pattern_change=w.pattern_change * pc_q,
             idle_time=w.idle_time * it_q,
             waste_lbs=w.waste_lbs * wl_q,
             priority=priority_cost,
@@ -502,13 +521,13 @@ class Costing:
 
     def _schedule_quantities_for(
         self, activities, workcal: 'WorkCal',
-    ) -> tuple[float, float, float, float, float]:
-        """Unweighted (tape_out_single, tape_out_both, family_change,
-        idle_hours, waste_lbs) counts/hours/lbs for a sequence of
-        activities. Mirrors `_schedule_penalty_for` but returns the five
-        quantities separately so the breakdown methods can apply the
-        weights themselves."""
-        tos_q = tob_q = fc_q = it_q = wl_q = 0.0
+    ) -> tuple[float, float, float, float, float, float, float]:
+        """Unweighted (tape_out_single, tape_out_both, style_change,
+        runner_change, pattern_change, idle_hours, waste_lbs)
+        counts/hours/lbs for a sequence of activities. Mirrors
+        `_schedule_penalty_for` but returns the seven quantities separately
+        so the breakdown methods can apply the weights themselves."""
+        tos_q = tob_q = sc_q = rc_q = pc_q = it_q = wl_q = 0.0
         for a in activities:
             if isinstance(a, TapeOut):
                 if a.bars == 'both':
@@ -516,13 +535,16 @@ class Costing:
                 else:
                     tos_q += 1
             elif isinstance(a, StyleChange):
-                if a.is_family_change:
-                    fc_q += 1
+                sc_q += 1
+            elif isinstance(a, RunnerChange):
+                rc_q += 1
+            elif isinstance(a, PatternChange):
+                pc_q += 1
             elif isinstance(a, Idle):
                 it_q += workcal.get_work_hours_between(a.start, a.end)
             elif isinstance(a, Waste):
                 wl_q += a.lbs
-        return tos_q, tob_q, fc_q, it_q, wl_q
+        return tos_q, tob_q, sc_q, rc_q, pc_q, it_q, wl_q
 
     def _weighted_demand(
         self, lateness: float, drainage: float,
@@ -547,8 +569,11 @@ class Costing:
                 total += (w.tape_out_both if a.bars == 'both'
                           else w.tape_out_single)
             elif isinstance(a, StyleChange):
-                if a.is_family_change:
-                    total += w.family_change
+                total += w.style_change
+            elif isinstance(a, RunnerChange):
+                total += w.runner_change
+            elif isinstance(a, PatternChange):
+                total += w.pattern_change
             elif isinstance(a, Idle):
                 # Idle duration is in work hours (set via
                 # workcal.offset_work_hours when the activity was created);

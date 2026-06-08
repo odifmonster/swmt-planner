@@ -19,7 +19,9 @@ class CostWeights:
     excess: float
     tape_out_single: float
     tape_out_both: float
-    family_change: float
+    style_change: float
+    runner_change: float
+    pattern_change: float
     idle_time: float
     waste_lbs: float
     priority: float
@@ -42,7 +44,9 @@ class CostBreakdown:
     excess: float
     tape_out_single: float
     tape_out_both: float
-    family_change: float
+    style_change: float
+    runner_change: float
+    pattern_change: float
     idle_time: float
     waste_lbs: float
     priority: float

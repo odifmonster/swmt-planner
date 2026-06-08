@@ -99,7 +99,7 @@ Activity (abstract)               # anything that occupies machine time
                                   # greige; relevant for future beam-set
                                   # inventory tracking
     bar: Literal['top', 'btm']    # which bar's residual is discarded
-    lbs: float                    # usable residue on `bar` (bar_lbs - floor),
+    lbs: float                    # usable residue on `bar` (lbs_remaining(bar) - floor),
                                   # below the max-waste threshold, discarded
                                   # unknit when the beam is swapped
 
@@ -132,7 +132,7 @@ Activity (abstract)               # anything that occupies machine time
 
   Threading(Activity)             # routing the loaded yarn into the machine.
                                   # Flips the bar(s) to threaded — sets
-                                  # `<bar>_threaded = True` and nothing else.
+                                  # `threaded(bar) = True` and nothing else.
                                   # Requires the bar(s) already hung (loaded
                                   # but not yet threaded). Together, Hanging +
                                   # Threading replace the old single `BeamLoad`.
@@ -189,16 +189,17 @@ ProductionPlan                    # return value of plan_production —
   activities: tuple[Activity, ...]
   jobs: tuple[Job, ...]
 
-Status                            # snapshot at a moment in time
+Status                            # snapshot at a moment in time. Per-bar
+                                  # values are read through accessors taking a
+                                  # bar literal ('top' | 'btm') — there are no
+                                  # separate top_*/btm_* fields.
   as_of: datetime
-  top_beam: BeamSet | None
-  btm_beam: BeamSet | None
-  top_lbs_remaining: float
-  btm_lbs_remaining: float
-  top_threaded: bool                # the set on top is threaded (routed) and
+  beam(bar) -> BeamSet | None       # mounted beam SKU on `bar` (None after a
+                                    # remove, before the re-thread)
+  lbs_remaining(bar) -> float       # yarn left on `bar`'s beam
+  threaded(bar) -> bool             # `bar`'s set is threaded (routed) and
                                     # ready to knit — set True by Threading,
                                     # reset False by Hanging (and by removal)
-  btm_threaded: bool                # same for btm
   current_item: Greige              # never None — machines are always
                                     # programmed to produce *something*
   is_idle: bool
@@ -256,8 +257,8 @@ schedule (`jobs`) has no effect on `Status` and isn't consulted by
 `is_idle` is informational only — it reports whether any activity is in
 progress at `as_of`. **The planner does not consult `is_idle` when
 deciding on changeovers.** Yarn stays threaded across idle gaps, so
-changeover decisions depend purely on the threaded beam state (`top_beam`,
-`btm_beam`) and `current_item`, never on whether the machine is currently
+changeover decisions depend purely on the threaded beam state (`beam('top')`,
+`beam('btm')`) and `current_item`, never on whether the machine is currently
 running.
 
 Note: during an explicit `Idle` activity, `is_idle` is `False` because an
@@ -278,10 +279,10 @@ an impossible machine state.
 
 Per bar, predicates of the (pre-activity) status drive the checks:
 
-- **removed** — the old set is gone or spent: `bar_beam is None` (after an
-  explicit `TapeOut` / `Waste`) **or** `bar_lbs_remaining <= BEAM_FLOOR_LBS`
+- **removed** — the old set is gone or spent: `beam(bar) is None` (after an
+  explicit `TapeOut` / `Waste`) **or** `lbs_remaining(bar) <= BEAM_FLOOR_LBS`
   (knit down to the floor at a run-out). A removed bar is ready to hang.
-- **threaded** — `bar_threaded` is set: the loaded set's yarn is routed and
+- **threaded** — `threaded(bar)` is set: the loaded set's yarn is routed and
   ready to knit. A bar holding a freshly hung set that isn't yet threaded
   (`not removed and not threaded`) is **hung**.
 
@@ -289,18 +290,18 @@ The per-bar transitions and their guards:
 
 - **`Hanging(bar, beam, lbs)`** — requires the bar **removed**; otherwise
   raises (hanging onto a bar that still holds a usable set, or hanging
-  twice). Effect: loads the fresh set — `bar_beam = beam`,
-  `bar_lbs_remaining = lbs` — and leaves it un-threaded
-  (`bar_threaded = False`), since a newly mounted set hasn't been routed yet.
+  twice). Effect: loads the fresh set — sets `beam(bar)` and
+  `lbs_remaining(bar)` — and leaves it un-threaded (`threaded(bar)` False),
+  since a newly mounted set hasn't been routed yet.
 - **`Threading(bar)`** — requires the bar **hung** (`not removed and not
   threaded`); otherwise raises (threading before hanging, or threading an
-  already-threaded bar). Effect: `bar_threaded = True`, nothing else.
-- **`TapeOut(bar)` / `Waste(bar)`** — remove the old set: `bar_beam = None`,
-  `bar_lbs_remaining = 0`, `bar_threaded = False`.
+  already-threaded bar). Effect: `threaded(bar)` becomes True, nothing else.
+- **`TapeOut(bar)` / `Waste(bar)`** — remove the old set: `beam(bar)` → None,
+  `lbs_remaining(bar)` → 0, `threaded(bar)` → False.
 
 The `'both'` variants apply the same per-bar checks to each bar. A
-freshly-constructed machine is threaded and running, so both `*_threaded`
-start `True`.
+freshly-constructed machine is threaded and running, so both bars start
+threaded (`threaded(bar)` is True).
 
 ## Activity durations
 
@@ -374,7 +375,7 @@ behavior:
 
 - **`BEAM_FLOOR_LBS = 5`** — residue that can't be knit off a beam. A beam is
   never run to zero; the usable yarn on a bar is
-  `usable = bar_lbs - BEAM_FLOOR_LBS`.
+  `usable = lbs_remaining(bar) - BEAM_FLOOR_LBS`.
 - **`MAX_BEAM_WASTE_LBS = 100`** — the operator won't knit through a
   near-empty beam: when a bar's `usable` falls below this, the bar is
   swapped — its residual discarded as `Waste` — before the next roll
@@ -392,8 +393,9 @@ no_swap_needed = (from_item.configuration.top_beam == to_item.configuration.top_
 
 `top_pct` / `btm_pct` differences do not trigger a swap — same yarn beams just
 get drawn at different ratios for the new item. So
-`top_lbs_remaining` / `btm_lbs_remaining` carry across same-yarn transitions
-unchanged, and the next `Knit` consumes them at the new item's ratios.
+`lbs_remaining('top')` / `lbs_remaining('btm')` carry across same-yarn
+transitions unchanged, and the next `Knit` consumes them at the new item's
+ratios.
 
 When the item changes, *which* changeover activity is emitted is selected
 from `machine.is_new` and the pattern-family comparison. The activity class
@@ -456,7 +458,7 @@ through a roll, that bar is re-threaded (a `Hanging` + `Threading`) and the
   across the swap. Its `completion_time` is its `Doff.end`.
 
 `Waste` is not knitted fabric. It is the **usable residue on a beam the
-planner swaps early** — when a bar's `usable` (`bar_lbs - BEAM_FLOOR_LBS`)
+planner swaps early** — when a bar's `usable` (`lbs_remaining(bar) - BEAM_FLOOR_LBS`)
 falls below `MAX_BEAM_WASTE_LBS`, that yarn is discarded unknit (see the
 max-waste rule in the production loop). `Waste` carries the discarded `beam`
 SKU and its `bar`, has zero duration, and emits **no `Doff`** — a doff
@@ -527,8 +529,8 @@ at the changeover:
 
 ```
 current_item = current_status.current_item
-top_usable = current_status.top_lbs_remaining - BEAM_FLOOR_LBS
-btm_usable = current_status.btm_lbs_remaining - BEAM_FLOOR_LBS
+top_usable = current_status.lbs_remaining('top') - BEAM_FLOOR_LBS
+btm_usable = current_status.lbs_remaining('btm') - BEAM_FLOOR_LBS
 producible = min(top_usable / current_item.top_pct,
                  btm_usable / current_item.btm_pct)
 n_rolls    = producible // current_item.tgt_wt
@@ -561,7 +563,7 @@ bars still carrying their leftover yarn.
 
 The run-up no longer drains a bar to empty, so a bar reaching the preamble
 can be in one of four states. For each bar — given the new `item`'s required
-yarn and the bar's `usable = bar_lbs - BEAM_FLOOR_LBS` — the preamble emits:
+yarn and the bar's `usable = lbs_remaining(bar) - BEAM_FLOOR_LBS` — the preamble emits:
 
 | Bar state | Activities for that bar |
 |---|---|
@@ -599,7 +601,7 @@ is no `is_family_change` flag.
 owes `rolls_left = lbs / item.tgt_wt` whole rolls. It produces them one roll
 at a time: a `Doff` ends each roll, and a mid-roll beam swap can split a roll,
 so each `Knit` covers at most one roll (`0 < Knit.lbs <= tgt_wt`). Each bar's
-`usable = bar_lbs - BEAM_FLOOR_LBS`; a bar is exhausted at `usable <= 0`.
+`usable = lbs_remaining(bar) - BEAM_FLOOR_LBS`; a bar is exhausted at `usable <= 0`.
 
 There are two swap triggers, both routed through one `resolve` step:
 
@@ -761,8 +763,8 @@ well-defined: `current_item` is never `None`, and real greiges always draw
 from both bars (`top_pct, btm_pct > 0`).
 
 ```
-usable      = min((top_lbs_remaining - BEAM_FLOOR_LBS) / top_pct,
-                  (btm_lbs_remaining - BEAM_FLOOR_LBS) / btm_pct)
+usable      = min((lbs_remaining('top') - BEAM_FLOOR_LBS) / top_pct,
+                  (lbs_remaining('btm') - BEAM_FLOOR_LBS) / btm_pct)
 n_rolls     = floor(usable / current_item.tgt_wt)   # whole rolls only, snapped for float drift
 per_roll    = current_item.tgt_wt / current_item.get_rate_on_mchn(id)  # knit hours
             + DOFF_DURATION                          # one doff per roll
@@ -794,9 +796,11 @@ read_machines(
 
 `path` points to a JSON file with one entry per machine. Per-entry
 fields: machine id, initial item (resolved against `greige_by_id`),
-the lbs remaining on each bar (`init_top_lbs`, `init_btm_lbs`),
-`style_change_time` and `family_change_time` (decimal hours), and
-`is_new`. The initial top and bottom beam yarns are *not* in the file
+the lbs remaining on each bar (`init_top_lbs`, `init_btm_lbs`), and
+`is_new`. (Changeover durations are no longer per-machine — they're
+module-level constants — so the file no longer carries
+`style_change_time` / `family_change_time`.) The initial top and
+bottom beam yarns are *not* in the file
 — they're derived from the resolved `Greige`'s `configuration`, since
 a machine currently set up to run an item is by definition threaded
 with that item's beams. `start_date` and `workcal` are plant-wide
