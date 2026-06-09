@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from swmtplanner.products import Greige, BeamSet
 from swmtplanner.schedule import (
     Machine, Knit, Job, Roll, ProductionPlan,
-    Waste, TapeOut, BeamLoad, StyleChange, Idle,
+    Waste, Doff, TapeOut, Hanging, Threading,
+    StyleChange, RunnerChange, PatternChange, Idle,
 )
 from swmtplanner.demand.rlsitem import RlsItem
 from swmtplanner.support import WorkCal
@@ -46,8 +47,6 @@ _TOP_BEAM = BeamSet('40D BLACK 1000X4')
 _BTM_BEAM = BeamSet('60D WHITE 1000X4')
 
 _START = datetime(2026, 5, 18, 0, 0)
-_SIMPLE_CHANGE = timedelta(minutes=15)
-_FAMILY_CHANGE = timedelta(hours=1)
 
 
 # --- 1.3 fixtures: items with safety=0 (so the safety pool is trivially
@@ -78,8 +77,8 @@ _TC = Greige(
 )
 # Family B item with different yarn on both bars — used as the
 # "current" item for the full-changeover preamble cap test, where the
-# preamble must include TapeOut('both') + two BeamLoads + a family
-# StyleChange.
+# preamble must include TapeOut('both') + a 'both' re-thread (Hanging +
+# Threading) + a PatternChange (legacy cross-family).
 _TD = Greige(
     'AU_TD', family='B', tgt_wt=100.0,
     top_beam='30D RED 1000X4', top_pct=0.5,
@@ -99,8 +98,7 @@ def _make_machine(
     return Machine(
         machine_id, init_item, start,
         _TOP_BEAM, init_top_lbs, _BTM_BEAM, init_btm_lbs,
-        _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
-        is_new=is_new,
+        _24_7, is_new=is_new,
     )
 
 
@@ -177,8 +175,7 @@ def _big_beam_machine(
     return Machine(
         machine_id, init_item, start,
         _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
-        _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
-        is_new=is_new,
+        _24_7, is_new=is_new,
     )
 
 
@@ -190,7 +187,8 @@ def _weights(**overrides) -> CostWeights:
     defaults = dict(
         lateness=0.0, drainage=0.0, carrying=0.0, excess=0.0,
         tape_out_single=0.0, tape_out_both=0.0,
-        family_change=0.0, idle_time=0.0, waste_lbs=0.0,
+        style_change=0.0, runner_change=0.0, pattern_change=0.0,
+        idle_time=0.0, waste_lbs=0.0,
         priority=0.0, level_loading=0.0, old_machine=0.0,
     )
     defaults.update(overrides)
@@ -332,54 +330,73 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.machines['M1'].activities, (tape_out,))
         self.assertEqual(rls.jobs, ())
 
-    def test_commit_move_with_beam_load_top(self):
-        # Start with empty top so the BeamLoad is consistent with state.
+    def test_commit_move_with_doff(self):
+        state = _make_state()
+        rls = state.rls_items['AU0001']
+        doff = Doff(start=_START, end=_START + timedelta(minutes=20))
+        state.commit_move(_move_with_plan([doff]))
+        self.assertEqual(state.machines['M1'].activities, (doff,))
+        self.assertEqual(rls.jobs, ())
+
+    def test_commit_move_with_hanging_top(self):
+        # Start with empty top so the Hanging is consistent with state.
         machine = _make_machine('M1', init_top_lbs=0.0, init_btm_lbs=1800.0)
         state = _make_state(machines={'M1': machine})
         rls = state.rls_items['AU0001']
-        bl = BeamLoad(
-            start=_START, end=_START + timedelta(hours=2),
-            bar='top', beam=_TOP_BEAM, lbs=2800.0,
+        h = Hanging(
+            start=_START, end=_START + timedelta(hours=1),
+            bars='top', top_beam=_TOP_BEAM, top_lbs=2800.0,
         )
-        state.commit_move(_move_with_plan([bl]))
-        self.assertEqual(state.machines['M1'].activities, (bl,))
+        state.commit_move(_move_with_plan([h]))
+        self.assertEqual(state.machines['M1'].activities, (h,))
         self.assertEqual(rls.jobs, ())
 
-    def test_commit_move_with_beam_load_btm(self):
+    def test_commit_move_with_hanging_threading_btm(self):
         machine = _make_machine('M1', init_top_lbs=2800.0, init_btm_lbs=0.0)
         state = _make_state(machines={'M1': machine})
         rls = state.rls_items['AU0001']
-        bl = BeamLoad(
-            start=_START, end=_START + timedelta(hours=2),
-            bar='btm', beam=_BTM_BEAM, lbs=1800.0,
+        h = Hanging(
+            start=_START, end=_START + timedelta(hours=1),
+            bars='btm', btm_beam=_BTM_BEAM, btm_lbs=1800.0,
         )
-        state.commit_move(_move_with_plan([bl]))
-        self.assertEqual(state.machines['M1'].activities, (bl,))
+        t = Threading(
+            start=h.end, end=h.end + timedelta(hours=2), bars='btm',
+        )
+        state.commit_move(_move_with_plan([h, t]))
+        self.assertEqual(state.machines['M1'].activities, (h, t))
         self.assertEqual(rls.jobs, ())
 
-    def test_commit_move_with_simple_style_change(self):
+    def test_commit_move_with_style_change(self):
         state = _make_state()
         rls = state.rls_items['AU0001']
         sc = StyleChange(
-            start=_START, end=_START + _SIMPLE_CHANGE,
-            from_item=_ITEM_A, to_item=_ITEM_B, is_family_change=False,
+            start=_START, end=_START + timedelta(minutes=5),
+            from_item=_ITEM_A, to_item=_ITEM_B,
         )
         state.commit_move(_move_with_plan([sc]))
         self.assertEqual(state.machines['M1'].activities, (sc,))
         self.assertEqual(rls.jobs, ())
 
-    def test_commit_move_with_family_style_change(self):
-        # _ITEM_B shares family with _ITEM_A here; what matters for the
-        # routing test is the is_family_change flag and that the
-        # activity flows through commit_move untouched.
+    def test_commit_move_with_runner_change(self):
         state = _make_state()
         rls = state.rls_items['AU0001']
-        sc = StyleChange(
-            start=_START, end=_START + _FAMILY_CHANGE,
-            from_item=_ITEM_A, to_item=_ITEM_B, is_family_change=True,
+        rc = RunnerChange(
+            start=_START, end=_START + timedelta(minutes=45),
+            from_item=_ITEM_A, to_item=_ITEM_B,
         )
-        state.commit_move(_move_with_plan([sc]))
-        self.assertEqual(state.machines['M1'].activities, (sc,))
+        state.commit_move(_move_with_plan([rc]))
+        self.assertEqual(state.machines['M1'].activities, (rc,))
+        self.assertEqual(rls.jobs, ())
+
+    def test_commit_move_with_pattern_change(self):
+        state = _make_state()
+        rls = state.rls_items['AU0001']
+        pc = PatternChange(
+            start=_START, end=_START + timedelta(hours=1, minutes=30),
+            from_item=_ITEM_A, to_item=_ITEM_B,
+        )
+        state.commit_move(_move_with_plan([pc]))
+        self.assertEqual(state.machines['M1'].activities, (pc,))
         self.assertEqual(rls.jobs, ())
 
     def test_commit_move_with_idle(self):
@@ -451,12 +468,12 @@ class StateTests(unittest.TestCase):
     # ----- 1.1.4 Canonical run-up + transition + new-item plan -----
 
     def test_canonical_run_up_transition_plan(self):
-        # Partial beams (top=180, btm=2000) with top_pct=btm_pct=0.5
-        # mean producible-to-runout = 360 lbs. With tgt_wt=100 that's 3
-        # complete rolls (Job A, 300 lbs) + a partial 60-lb roll
-        # (Waste A). Then BeamLoad top (natural exhaustion → no
-        # TapeOut), StyleChange A→B (same yarn, simple), Job B for the
-        # requested 100 lbs.
+        # Partial beams (top=180, btm=2000) with top_pct=btm_pct=0.5.
+        # Run-up usable top = (180-5)/0.5 = 350 fabric lbs -> 3 whole
+        # rolls (Job A, 300 lbs); the run-up emits whole rolls only (no
+        # partial-roll Waste). Then the same-yarn changeover A->B (a
+        # RunnerChange on this legacy machine) and Job B for the requested
+        # 100 lbs; the near-empty top is re-threaded inside B's loop.
         machine = _make_machine('M1', init_top_lbs=180.0,
                                 init_btm_lbs=2000.0)
         state = _make_state(
@@ -549,26 +566,29 @@ class CostingTests(unittest.TestCase):
         state = _make_state(
             machines={'M1': machine}, rls_items={'AU0001': rls},
         )
-        # Plan: TapeOut('top') 4h, BeamLoad(top) 2h, Idle 2h, Job 1h.
-        # The Job ends 9h past week-0 due (= START) → lateness > 0.
-        # rls's on_hand = 0 < safety target 500 → drainage > 0.
+        # Plan: TapeOut('top') 4h, re-thread top (Hanging + Threading,
+        # both unweighted), Idle 2h, Knit 1h. The Job ends past week-0 due
+        # (= START) → lateness > 0. rls's on_hand = 0 < safety target 500
+        # → drainage > 0.
         t0 = _START
-        t1 = t0 + timedelta(hours=4)
-        t2 = t1 + timedelta(hours=2)
-        t3 = t2 + timedelta(hours=2)
-        t4 = t3 + timedelta(hours=1)
+        t1 = t0 + timedelta(hours=4)      # TapeOut('top')
+        t2 = t1 + timedelta(hours=1)      # Hanging(top)
+        t3 = t2 + timedelta(hours=2)      # Threading(top)
+        t4 = t3 + timedelta(hours=2)      # Idle (2 work-hours)
+        t5 = t4 + timedelta(hours=1)      # Knit
         # Activity stream drives the schedule penalties (TapeOut, Idle);
-        # the Job record (its roll completing at t4, 9h past due) drives
-        # the demand-side lateness/drainage.
+        # the Job record (its roll completing at t5, past due) drives the
+        # demand-side lateness/drainage. The re-thread is unweighted.
         plan = _plan(
             activities=[
                 TapeOut(start=t0, end=t1, bars='top'),
-                BeamLoad(start=t1, end=t2, bar='top',
-                         beam=_TOP_BEAM, lbs=2800.0),
-                Idle(start=t2, end=t3),
-                Knit(start=t3, end=t4, item=_ITEM_A, lbs=100.0),
+                Hanging(start=t1, end=t2, bars='top',
+                        top_beam=_TOP_BEAM, top_lbs=2800.0),
+                Threading(start=t2, end=t3, bars='top'),
+                Idle(start=t3, end=t4),
+                Knit(start=t4, end=t5, item=_ITEM_A, lbs=100.0),
             ],
-            jobs=[_job_rec(_ITEM_A, lbs=100.0, completion_time=t4)],
+            jobs=[_job_rec(_ITEM_A, lbs=100.0, completion_time=t5)],
         )
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_A, lbs=100.0,
@@ -593,37 +613,63 @@ class CostingTests(unittest.TestCase):
         )
         self.assertAlmostEqual(costing.score(state), expected)
 
-    # ----- 1.2.2 tape_out_both + family_change -----
+    # ----- 1.2.2 changeover types + double tape-out -----
 
-    def test_cross_yarn_cross_family_transition(self):
+    def _commit_changeover_plan(self, activities):
+        """Commit a beam-work-only plan (no Jobs) onto an empty-demand
+        state and return it, so the score reduces to the schedule
+        penalties of `activities`."""
         machine = _make_machine('M1')
-        t0 = _START
-        t1 = t0 + timedelta(hours=6)     # TapeOut('both') = 6h
-        t2 = t1 + timedelta(hours=2)     # BeamLoad(top) = 2h
-        t3 = t2 + timedelta(hours=2)     # BeamLoad(btm) = 2h
-        t4 = t3 + _FAMILY_CHANGE         # StyleChange(family) = 1h
-        plan = _plan(activities=[
-            TapeOut(start=t0, end=t1, bars='both'),
-            BeamLoad(start=t1, end=t2, bar='top',
-                     beam=_TOP_BEAM, lbs=2800.0),
-            BeamLoad(start=t2, end=t3, bar='btm',
-                     beam=_BTM_BEAM, lbs=1800.0),
-            StyleChange(start=t3, end=t4,
-                        from_item=_ITEM_A, to_item=_ITEM_B,
-                        is_family_change=True),
-        ])
-        # Empty rls_items so there are no demand-side contributions.
         state = _make_state(machines={'M1': machine}, rls_items={})
         state.commit_move(Move(
             machine_id='M1', item=_ITEM_B, lbs=0.0,
-            start_at='schedule_tail', idle_for=timedelta(0), plan=plan,
+            start_at='schedule_tail', idle_for=timedelta(0),
+            plan=_plan(activities=activities),
         ))
+        return state
 
-        weights = _weights(tape_out_both=15.0, family_change=5.0)
-        costing = Costing(weights)
+    def test_legacy_cross_family_full_changeover(self):
+        # TapeOut('both') + a 'both' re-thread (Hanging + Threading,
+        # unweighted) + PatternChange. Covers tape_out_both, pattern_change.
+        t0 = _START
+        t1 = t0 + timedelta(hours=3)      # TapeOut('both')
+        t2 = t1 + timedelta(hours=1, minutes=30)   # Hanging('both')
+        t3 = t2 + timedelta(hours=3, minutes=30)   # Threading('both')
+        t4 = t3 + timedelta(hours=1, minutes=30)   # PatternChange
+        state = self._commit_changeover_plan([
+            TapeOut(start=t0, end=t1, bars='both'),
+            Hanging(start=t1, end=t2, bars='both',
+                    top_beam=_TOP_BEAM, top_lbs=2800.0,
+                    btm_beam=_BTM_BEAM, btm_lbs=1800.0),
+            Threading(start=t2, end=t3, bars='both'),
+            PatternChange(start=t3, end=t4,
+                          from_item=_ITEM_A, to_item=_ITEM_B),
+        ])
+        weights = _weights(tape_out_both=15.0, pattern_change=5.0)
+        expected = weights.tape_out_both * 1 + weights.pattern_change * 1
+        self.assertAlmostEqual(Costing(weights).score(state), expected)
 
-        expected = weights.tape_out_both * 1 + weights.family_change * 1
-        self.assertAlmostEqual(costing.score(state), expected)
+    def test_legacy_same_family_runner_change(self):
+        # A RunnerChange (legacy, same family) is the only weighted
+        # schedule activity; tape_out weights are 0. Covers runner_change.
+        state = self._commit_changeover_plan([
+            RunnerChange(start=_START, end=_START + timedelta(minutes=45),
+                         from_item=_ITEM_A, to_item=_ITEM_B),
+        ])
+        weights = _weights(runner_change=7.0)
+        self.assertAlmostEqual(Costing(weights).score(state),
+                               weights.runner_change * 1)
+
+    def test_new_machine_style_change(self):
+        # A StyleChange (the only class a new machine emits). Covers
+        # style_change.
+        state = self._commit_changeover_plan([
+            StyleChange(start=_START, end=_START + timedelta(minutes=5),
+                        from_item=_ITEM_A, to_item=_ITEM_B),
+        ])
+        weights = _weights(style_change=3.0)
+        self.assertAlmostEqual(Costing(weights).score(state),
+                               weights.style_change * 1)
 
     # ----- 1.2.3 waste (discarded yarn) -----
 
@@ -716,7 +762,8 @@ class CostingTests(unittest.TestCase):
         weights = _weights(
             lateness=10.0, drainage=1.0, carrying=2.0, excess=5.0,
             tape_out_single=100.0, tape_out_both=150.0,
-            family_change=50.0, idle_time=10.0,
+            style_change=50.0, runner_change=60.0, pattern_change=70.0,
+            idle_time=10.0,
         )
         costing = Costing(weights)
 
@@ -987,7 +1034,8 @@ class CandidateEnumerationTests(unittest.TestCase):
 
     def test_eligible_dps_both_in_window_distinct(self):
         # Default beams (top=2800, btm=1800, top_pct=btm_pct=0.5,
-        # rate=100) → next_runout = _START + 36h. With window_end at
+        # rate=100): btm limits at 35 whole rolls, each 4/3h (knit +
+        # doff), so next_runout ≈ _START + 46h40m. With window_end at
         # next_runout both DPs are in window and distinct.
         machine = _make_machine('M1')
         runout = machine.next_runout
@@ -1017,7 +1065,7 @@ class CandidateEnumerationTests(unittest.TestCase):
 
     def test_eligible_dps_only_schedule_tail_in_window(self):
         # Default beams; window covers schedule_tail (= _START) but ends
-        # before next_runout (= _START + 36h).
+        # well before next_runout (≈ _START + 46h40m).
         machine = _make_machine('M1')
         state = _make_state(
             machines={'M1': machine}, rls_items={},
@@ -1094,26 +1142,26 @@ class CandidateEnumerationTests(unittest.TestCase):
 
     def test_eligible_dps_multi_mix_of_dps(self):
         # M1: both DPs in window. Default beams (btm limits): usable
-        # (1800-5)/0.5=3590 -> floor(3590/100)=35 whole rolls -> 3500 lbs /
-        # 100 = next_runout at +35h (the whole-roll stopping point; under the
-        # old no-floor model this was +36h). Still inside the 36h window.
+        # (1800-5)/0.5=3590 -> floor(3590/100)=35 whole rolls, each 4/3h
+        # (knit + doff), so next_runout ≈ _START + 46h40m. window_end is
+        # set there so M1's next_runout just lands in window.
         # M2: only schedule_tail in window — huge beams push next_runout
         # far past window_end.
-        # M3: out of window entirely (starts past window_end).
+        # M3: out of window entirely (starts at +48h, past window_end).
         m1 = _make_machine('M1')
         m2 = _make_machine('M2', init_top_lbs=1e6, init_btm_lbs=1e6)
         m3 = _make_machine(
             'M3', init_item=_TC,
             start=_START + timedelta(hours=48),
         )
+        runout = m1.next_runout
         state = _make_state(
             machines={'M1': m1, 'M2': m2, 'M3': m3}, rls_items={},
-            window_end=_START + timedelta(hours=36),
+            window_end=runout,
         )
         self.assertEqual(set(eligible_decision_points(state)), {
             DecisionPoint('M1', 'schedule_tail', _START),
-            DecisionPoint('M1', 'next_runout',
-                          _START + timedelta(hours=35)),
+            DecisionPoint('M1', 'next_runout', runout),
             DecisionPoint('M2', 'schedule_tail', _START),
         })
 
@@ -1349,9 +1397,12 @@ class CandidateEnumerationTests(unittest.TestCase):
                 f'expected 1 candidate for ({programmed_mchn}, {item.id})',
             )
             mv = matching[0]
-            # One Knit activity and one Job record for the item.
-            self.assertEqual(len(mv.plan.activities), 1)
-            self.assertIsInstance(mv.plan.activities[0], Knit)
+            # One whole roll: a Knit + its Doff, and one Job record for
+            # the item (no run-up, no preamble).
+            self.assertEqual(
+                [type(a).__name__ for a in mv.plan.activities],
+                ['Knit', 'Doff'],
+            )
             self.assertEqual(mv.plan.activities[0].item, item)
             self.assertEqual(len(mv.plan.jobs), 1)
             self.assertEqual(mv.plan.jobs[0].item, item)
@@ -1448,14 +1499,14 @@ class CandidateEnumerationTests(unittest.TestCase):
     def test_enumerate_candidates_cap_mid_week_tail(self):
         # Machine running _T1 starts mid-Monday of ISO week 21 (Mon
         # 12:00). Beams of 1e6 each preclude any in-stream reloads, so
-        # the producible cap equals the spec's ideal formula:
-        # floor(156 work-hours × 100 lbs/h / 100 lbs/roll) × 100
-        # = 15600 lbs.
+        # the producible cap is the 156-hour window divided by the
+        # per-roll cost (knit + doff = 100/100 + 1/3 = 4/3h):
+        # floor(156 / (4/3)) = 117 rolls × 100 = 11700 lbs.
         start = _START + timedelta(hours=12)
         machine = Machine(
             'M1', _T1, start,
             _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
-            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+            _24_7,
         )
         rls = RlsItem(
             item=_T1, start_date=_START, on_hand_lbs=0.0,
@@ -1469,14 +1520,15 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         moves = enumerate_candidates(state)
         self.assertEqual(len(moves), 1)
-        self.assertEqual(moves[0].lbs, 15600.0)
+        self.assertEqual(moves[0].lbs, 11700.0)
 
     def test_enumerate_candidates_cap_full_changeover(self):
         # Machine starts at week_start running _TD (family B, 30D/90D)
         # with 1e6-each beams. Order is for _T1 (family A, 40D/60D) —
         # both yarns differ and families differ, so the preamble is the
-        # canonical full changeover:
-        #   TapeOut('both')=6h + 2×BeamLoad=4h + family_change=1h = 11h.
+        # canonical full changeover (legacy cross-family):
+        #   TapeOut('both')=3h + 'both' re-thread (Hanging 1.5h +
+        #   Threading 3.5h) + PatternChange=1.5h = 9.5h.
         # After the preamble, beams are reset to plant-standard fresh
         # lbs (2800 top low-denier, 1800 btm high-denier), so the
         # production loop will hit in-stream reloads. We assert
@@ -1487,7 +1539,7 @@ class CandidateEnumerationTests(unittest.TestCase):
             'M1', _TD, _START,
             BeamSet('30D RED 1000X4'), 1e6,
             BeamSet('90D GREEN 1000X4'), 1e6,
-            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+            _24_7,
         )
         rls = RlsItem(
             item=_T1, start_date=_START, on_hand_lbs=0.0,
@@ -1507,21 +1559,23 @@ class CandidateEnumerationTests(unittest.TestCase):
             _T1, 2026, 21, start=_START,
         )
         self.assertEqual(mv.lbs, expected_cap)
-        # Spec's ideal-formula upper bound: (week - preamble) × rate.
-        ideal_upper = (168 - 11) * 100  # 15700 lbs
+        # Ideal-formula upper bound: (week - preamble) × rate, ignoring
+        # both the per-roll doff and in-stream reloads (so the real cap
+        # sits below it). preamble = 9.5h → (168 - 9.5) × 100 = 15850.
+        ideal_upper = (168 - 9.5) * 100
         self.assertGreater(mv.lbs, 0)
         self.assertLessEqual(mv.lbs, ideal_upper)
-        # Preamble shape sanity: TapeOut('both'), two BeamLoads, family
-        # StyleChange — all present, in order, before the first Job.
+        # Preamble shape sanity: TapeOut('both'), a 'both' re-thread, and
+        # a PatternChange — all present, in order, before the first Knit.
         kinds = [type(a).__name__ for a in mv.plan.activities]
         first_job = kinds.index('Knit')
         preamble = mv.plan.activities[:first_job]
         self.assertEqual(
             [type(a).__name__ for a in preamble],
-            ['TapeOut', 'BeamLoad', 'BeamLoad', 'StyleChange'],
+            ['TapeOut', 'Hanging', 'Threading', 'PatternChange'],
         )
         self.assertEqual(preamble[0].bars, 'both')
-        self.assertTrue(preamble[-1].is_family_change)
+        self.assertIsInstance(preamble[-1], PatternChange)
 
     def test_enumerate_candidates_cap_carrying_avoidance_idle(self):
         # Order for week 2 (due _START + 14d) forces carrying-avoidance
@@ -1529,12 +1583,12 @@ class CandidateEnumerationTests(unittest.TestCase):
         # effective start lands in ISO week 22 (May 25 - Jun 1) with
         # only 24 work-hours remaining before week_end. Item matches
         # the machine's current item and beams are huge → no preamble
-        # and no in-stream reloads, so the cap matches the spec
-        # formula: 24 × 100 = 2400 lbs.
+        # and no in-stream reloads, so the cap is the 24h window over the
+        # per-roll cost: floor(24 / (4/3)) = 18 rolls × 100 = 1800 lbs.
         machine = Machine(
             'M1', _T1, _START,
             _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
-            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+            _24_7,
         )
         rls = RlsItem(
             item=_T1, start_date=_START, on_hand_lbs=0.0,
@@ -1549,35 +1603,38 @@ class CandidateEnumerationTests(unittest.TestCase):
         moves = enumerate_candidates(state)
         self.assertEqual(len(moves), 1)
         mv = moves[0]
-        self.assertEqual(mv.lbs, 2400.0)
+        self.assertEqual(mv.lbs, 1800.0)
         self.assertEqual(mv.idle_for, timedelta(hours=312))
-        # Plan: a single Idle of 312h, then directly into the
-        # production Job (no preamble since current item matches).
+        # Plan: a single Idle of 312h, then directly into production (no
+        # preamble since current item matches) — Knit/Doff pairs whose
+        # lbs total the cap, recorded on one Job of _T1.
         self.assertIsInstance(mv.plan.activities[0], Idle)
         self.assertEqual(mv.plan.activities[0].end - mv.plan.activities[0].start, mv.idle_for)
-        jobs = [a for a in mv.plan.activities if isinstance(a, Knit)]
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].item, _T1)
-        self.assertEqual(jobs[0].lbs, 2400.0)
+        knits = [a for a in mv.plan.activities if isinstance(a, Knit)]
+        self.assertTrue(all(k.item is _T1 for k in knits))
+        self.assertEqual(sum(k.lbs for k in knits), 1800.0)
+        self.assertEqual(len(mv.plan.jobs), 1)
+        self.assertEqual(mv.plan.jobs[0].item, _T1)
+        self.assertEqual(mv.plan.jobs[0].total_lbs, 1800.0)
 
     def test_enumerate_candidates_cap_next_runout_dp(self):
         # Partial beams (top=600, btm=1000 with top_pct=btm_pct=0.5,
-        # rate=100) force next_runout to fall 12 work-hours into ISO
-        # week 21: producible_before_runout = min(600/0.5, 1000/0.5) =
-        # 1200 lbs at rate 100 → 12h. Order is for _T2 (same yarn,
-        # same family as _T1), so the cap-simulation preamble is a
-        # single simple StyleChange.
+        # rate=100): top limits at floor((600-5)/0.5/100)=11 whole rolls,
+        # so next_runout falls ~14.7h (11 × 4/3h) into ISO week 21. Order
+        # is for _T2 (same yarn, same family as _T1), so the
+        # cap-simulation preamble is a single RunnerChange (legacy
+        # same-family).
         #
         # The cap simulation idles from as_of to next_runout (so the
         # beam state is unchanged from initial — top=600 partial,
         # btm=1000 partial), which forces in-stream reloads in the
-        # post-style-change production loop. We bound the cap against
-        # the spec's ideal-formula upper bound (which assumes no
-        # in-stream reloads) and verify the move's plan structure.
+        # post-changeover production loop. We bound the cap against a
+        # loose ideal upper bound (no doff, no in-stream reloads) and
+        # verify the move's plan structure.
         machine = Machine(
             'M1', _T1, _START,
             _TOP_BEAM, 600.0, _BTM_BEAM, 1000.0,
-            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+            _24_7,
         )
         rls = RlsItem(
             item=_T2, start_date=_START, on_hand_lbs=0.0,
@@ -1605,9 +1662,9 @@ class CandidateEnumerationTests(unittest.TestCase):
             start=machine.next_runout,
         )
         self.assertEqual(mv.lbs, expected_cap)
-        # Spec's ideal-formula upper bound: week_hours -
-        # to_next_runout_hours - simple_change_hours, in lbs.
-        # = (168 - 12 - 0.25) × 100, floored to whole rolls.
+        # Loose ideal upper bound: (week_hours - to_next_runout_hours -
+        # changeover_hours) × rate, ignoring doff and reloads, so the
+        # real cap sits below it. ~(168 - 14.7 - 0.75) × 100 < 15500.
         ideal_upper = 15500.0
         self.assertGreater(mv.lbs, 0)
         self.assertLessEqual(mv.lbs, ideal_upper)
@@ -1615,19 +1672,20 @@ class CandidateEnumerationTests(unittest.TestCase):
 
         # Plan structure: 'next_runout' mode emits a run-up Job of the
         # current item (_T1), then the preamble for _T2 (which here
-        # includes a BeamLoad for the bar emptied during run-up since
-        # the actual commit-side plan doesn't idle), and a simple
-        # StyleChange (not a family change), and finally _T2 production
-        # Jobs.
+        # includes a re-thread for the bar emptied during run-up since
+        # the actual commit-side plan doesn't idle), a RunnerChange
+        # (same family, legacy machine), and finally _T2 production Jobs.
         first_job = next(
             i for i, a in enumerate(mv.plan.activities) if isinstance(a, Knit)
         )
         self.assertEqual(mv.plan.activities[first_job].item, _T1)
-        style_changes = [
-            a for a in mv.plan.activities if isinstance(a, StyleChange)
+        changeovers = [
+            a for a in mv.plan.activities if isinstance(a, RunnerChange)
         ]
-        self.assertEqual(len(style_changes), 1)
-        self.assertFalse(style_changes[0].is_family_change)
+        self.assertEqual(len(changeovers), 1)
+        # Same-family legacy transition uses RunnerChange, not Style/Pattern.
+        self.assertFalse(any(isinstance(a, (StyleChange, PatternChange))
+                             for a in mv.plan.activities))
         # No tape-outs anywhere in the plan.
         self.assertFalse(any(isinstance(a, TapeOut) for a in mv.plan.activities))
 
@@ -1644,14 +1702,14 @@ class CandidateEnumerationTests(unittest.TestCase):
         # 30 min = 50 lbs = 0 rolls. The default current-week cap is 0,
         # which triggers the bump.
         # Beams are huge so the bumped window (Sun 23:30 of week 21 →
-        # Mon 00:00 of week 23) is cap-bounded by hours alone:
-        # 7 days + 30 min = 168.5h × 100 lbs/h = 16850 lbs, floored to
-        # 168 whole rolls × 100 = 16800 lbs.
+        # Mon 00:00 of week 23) is cap-bounded by hours alone: 7 days +
+        # 30 min = 168.5h over the per-roll cost (4/3h) =
+        # floor(168.5 / (4/3)) = 126 whole rolls × 100 = 12600 lbs.
         start = _START + timedelta(days=6, hours=23, minutes=30)
         machine = Machine(
             'M1', _T1, start,
             _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
-            _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
+            _24_7,
         )
         rls = RlsItem(
             item=_T1, start_date=_START, on_hand_lbs=0.0,
@@ -1665,7 +1723,7 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         moves = enumerate_candidates(state)
         self.assertEqual(len(moves), 1)
-        self.assertEqual(moves[0].lbs, 16800.0)
+        self.assertEqual(moves[0].lbs, 12600.0)
 
 
 # --- 1.4 Main loop --------------------------------------------------------
@@ -2024,7 +2082,7 @@ class MainLoopTests(unittest.TestCase):
         costing = Costing(_weights(
             lateness=10, drainage=1, carrying=1, excess=1,
             tape_out_single=1, tape_out_both=1,
-            family_change=1, idle_time=0.1,
+            runner_change=1, pattern_change=1, idle_time=0.1,
         ))
         report = plan(state, costing)
 

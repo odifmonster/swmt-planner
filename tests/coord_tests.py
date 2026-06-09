@@ -30,8 +30,6 @@ _24_7 = WorkCal(work_days=(0, 1, 2, 3, 4, 5, 6),
                 day_start=0, day_end=24, holidays=())
 _TOP_BEAM = BeamSet('40D BLACK 1000X4')
 _BTM_BEAM = BeamSet('60D WHITE 1000X4')
-_SIMPLE_CHANGE = timedelta(minutes=15)
-_FAMILY_CHANGE = timedelta(hours=1)
 
 
 def _greige(item_id: str, safety: float) -> Greige:
@@ -81,8 +79,7 @@ def _machine(
     return Machine(
         machine_id, init_item, start,
         _TOP_BEAM, 1e6, _BTM_BEAM, 1e6,
-        _24_7, _SIMPLE_CHANGE, _FAMILY_CHANGE,
-        is_new=is_new,
+        _24_7, is_new=is_new,
     )
 
 

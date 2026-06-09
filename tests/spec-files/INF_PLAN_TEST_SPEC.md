@@ -38,11 +38,11 @@ These tests are about `commit_move`'s routing; the per-type status-
 update math and the `Job` / `Roll` construction are covered by
 `tests/machine_tests.py`.
 
-1. **Activity stream** — for each activity type (`Knit`, `Waste`,
-   `TapeOut` over all three `bars`, `BeamLoad` over both `bar`s,
-   `StyleChange` over both `is_family_change` values, `Idle`): the
-   activity appears in `machine.activities` and no `rls_item.jobs` is
-   touched.
+1. **Activity stream** — for each activity type (`Knit`, `Doff`, `Waste`,
+   `TapeOut` over all three `bars`, `Hanging` and `Threading` over all
+   three `bars`, the three changeover classes (`StyleChange` /
+   `RunnerChange` / `PatternChange`), `Idle`): the activity appears in
+   `machine.activities` and no `rls_item.jobs` is touched.
 2. **Job records** — a plan whose `jobs` holds a `Job(item, rolls)`
    routes that `Job` into `machine.jobs` and into `rls_item.jobs` for
    `job.item.id` (item and rolls match). A move whose two jobs target
@@ -71,16 +71,19 @@ current item, hits a beam runout, swaps to a new item, and produces the
 new item. The plan's **activity stream** (`plan.activities`) is, in
 order:
 
-- `Knit(A, run-up_lbs)` — whole rolls of `A` produced before the
-  changeover. The run-up emits **whole rolls only** — no `Waste` of a
-  partial roll (unlike the old fabric-waste model where a sub-half roll
-  was discarded at the runout).
+- `Knit`/`Doff` pairs of `A` — one per whole roll produced before the
+  changeover (each roll is a `Knit` then its `Doff`). The run-up emits
+  **whole rolls only** — no `Waste` of a partial roll (unlike the old
+  fabric-waste model where a sub-half roll was discarded at the runout).
 - changeover preamble for the leftover bars — a `TapeOut` and/or a
   zero-duration `Waste` (discarding a below-threshold yarn residue from a
-  bar) plus a `BeamLoad` for each bar whose leftover yarn doesn't match
-  `B`. Any preamble `Waste` is a yarn discard and produces **no** `Job`.
-- `StyleChange(from=A, to=B)` — transition to the new item.
-- `Knit(B, new_item_lbs)` — production of the new item.
+  bar) plus a re-thread (`Hanging` + `Threading`) for each bar whose
+  leftover yarn doesn't match `B`. Any preamble `Waste` is a yarn discard
+  and produces **no** `Job`.
+- the changeover activity (`StyleChange` / `RunnerChange` / `PatternChange`,
+  selected by the machine's `is_new` and the `A`→`B` family comparison) —
+  transition to the new item.
+- `Knit`/`Doff` pairs of `B` — production of the new item.
 
 and its **production records** (`plan.jobs`) are the run-up `Job(A)`
 (the whole rolls of `A`) followed by the new-item `Job(B)`.
@@ -123,8 +126,10 @@ right weights and that `score_after_move` stays pure — not the
 underlying numerics themselves, which are covered by the demand-view
 and machine tests.
 
-A few scenarios suffice, arranged so each of the nine Phase-1 weights
-produces a non-trivial contribution at least once. In each test below,
+A few scenarios suffice, arranged so each of the eleven Phase-1 weights
+produces a non-trivial contribution at least once (the single
+`family_change` weight is now three: `style_change` / `runner_change` /
+`pattern_change`). In each test below,
 the weights for *covered* components are set to distinguishable values
 (e.g., 1, 10, 100) so a misweighting shows up as a wrong total; the
 other weights are set to 0.
@@ -135,9 +140,10 @@ Setup:
 - An `RlsItem` with `on_hand_lbs` well below its `safety_target` so
   that no jobs results in non-zero `drainage` against the safety view.
 - A machine whose committed plan contains a `TapeOut('top')` (or
-  `'btm'`), a `BeamLoad`, an `Idle` of known work-hour duration, and a
-  `Knit` whose `Job` record has a roll completing past the earliest
-  order's `due_date` (producing non-zero `lateness` in the raw view).
+  `'btm'`), a re-thread (`Hanging` + `Threading`, both unweighted), an
+  `Idle` of known work-hour duration, and a `Knit` whose `Job` record has
+  a roll completing past the earliest order's `due_date` (producing
+  non-zero `lateness` in the raw view).
 
 Assert: `score(state)` equals
 `w_lateness × raw_view.lateness + w_drainage × safety_view.drainage
@@ -146,18 +152,28 @@ Assert: `score(state)` equals
 Components covered: `lateness`, `drainage`, `tape_out_single`,
 `idle_time`.
 
-#### 1.2.2 Cross-yarn cross-family transition
+#### 1.2.2 Changeover types and double tape-out
 
-Setup:
-- A machine whose committed plan contains a `TapeOut('both')`, two
-  `BeamLoad`s, and a `StyleChange(is_family_change=True)` (the
-  canonical full-changeover shape).
-- No demand-side contributions (no unmet weekly demand and safety
-  pool already at target, so all four demand-view trackers are 0).
+The single `family_change` weight split into three by changeover class
+(`style_change` = new machine; `runner_change` = legacy same-family;
+`pattern_change` = legacy cross-family). Each sub-case isolates one
+changeover weight (and, in the first, `tape_out_both`); the re-thread
+(`Hanging` + `Threading`) is unweighted, and all four demand-view
+trackers are 0 (no unmet weekly demand, safety pool at target).
 
-Assert: `score(state)` equals `w_tape_out_both + w_family_change`.
-
-Components covered: `tape_out_both`, `family_change`.
+1. **Legacy cross-family full changeover** — a legacy machine whose
+   committed plan is the canonical full changeover: `TapeOut('both')`, a
+   `'both'` re-thread, and a `PatternChange`. Assert `score(state)
+   == w_tape_out_both + w_pattern_change`. Covers `tape_out_both`,
+   `pattern_change`.
+2. **Legacy same-family changeover** — a legacy machine transitioning to
+   a same-family item with different yarn (so beam work occurs); the
+   changeover is a `RunnerChange`. With the `tape_out_*` weights set to 0,
+   assert `score(state) == w_runner_change`. Covers `runner_change`.
+3. **New-machine changeover** — a `Machine(is_new=True)` whose plan
+   contains a `StyleChange` (the only changeover class a new machine
+   emits, regardless of family). Assert `score(state) == w_style_change`.
+   Covers `style_change`.
 
 #### 1.2.3 Waste (discarded yarn)
 
@@ -180,8 +196,8 @@ Components covered: `waste_lbs`.
 Setup:
 - An `RlsItem` whose committed jobs total more than weekly demand plus
   the safety target, so `safety_view.excess > 0`.
-- No schedule-side contributions (no `TapeOut`, no
-  `StyleChange(is_family_change=True)`, no `Idle`, no `Waste`).
+- No schedule-side contributions (no `TapeOut`, no changeover, no
+  `Idle`, no `Waste`).
 
 Assert: `score(state)` equals `w_excess × safety_view.excess`.
 
@@ -389,36 +405,40 @@ records (modulo small float tolerance on `lbs`):
    producible cap is the binding constraint (not the order size).
    - covers cases where the existing schedule restricts available
    hours, and where preamble activities (forced run-up, tape-outs,
-   style changes, carrying-avoidance idle) restrict hours.
+   changeovers, carrying-avoidance idle) restrict hours.
+   - each whole roll costs `per_roll = tgt_wt / rate + DOFF_DURATION`
+   work-hours (its knit **plus** its doff), so the roll counts below
+   divide the available hours by `per_roll`, not by `tgt_wt / rate`.
     1. **Mid-week schedule tail** — `current_status.as_of` falls
        partway through the current ISO week, leaving partial remaining
        hours. Order's item matches the current item so there's no
        preamble work. `move.lbs` equals
-       `floor(remaining_work_hours × rate / tgt_wt) × tgt_wt`.
+       `floor(remaining_work_hours / per_roll) × tgt_wt`.
     2. **Full changeover preamble** — machine's current item differs
        from the order's in both bars' yarn and in family, forcing
-       `TapeOut('both') + 2 × BeamLoad + StyleChange(is_family_change=
-       True)` in the preamble. `as_of = week_start` so the preamble is
-       the only restriction. `move.lbs` equals
-       `floor((week_work_hours - preamble_hours) × rate / tgt_wt) ×
-       tgt_wt` where `preamble_hours = TAPE_OUT_BOTH_DURATION + 2 ×
-       BEAM_LOAD_DURATION + machine.family_change_duration`.
+       `TapeOut('both') + a 'both' re-thread (Hanging + Threading) +
+       PatternChange` (legacy cross-family) in the preamble. `as_of =
+       week_start` so the preamble is the only restriction. `move.lbs`
+       equals `floor((week_work_hours - preamble_hours) / per_roll) ×
+       tgt_wt` where `preamble_hours = TAPE_OUT_BOTH_DURATION +
+       HANGING_BOTH_DURATION + THREADING_BOTH_DURATION +
+       PATTERN_CHANGE_DURATION`.
     3. **Carrying-avoidance idle inside the week** — regular order
        whose `due_date - lead_time - margin` falls partway through the
        same ISO week as the decision point. `effective_start` advances
        to that target via the carrying-avoidance idle, shrinking the
        in-week production window; `move.lbs` equals
-       `floor((week_end - effective_start work hours - preamble_hours)
-       × rate / tgt_wt) × tgt_wt`.
+       `floor(((week_end - effective_start) work hours - preamble_hours)
+       / per_roll) × tgt_wt`.
     4. **`'next_runout'` decision point inside the week** — current
        item has partial beams at `as_of = week_start` such that
        `next_runout` falls midway through the week. Order's item shares
-       yarn with the current item so the preamble is a single
-       `StyleChange(is_family_change=False)`. `move.lbs` equals
-       `floor((week_end - next_runout work hours - simple_change_
-       duration) × rate / tgt_wt) × tgt_wt`. (The cap simulation
-       idles from `as_of` to `next_runout` rather than running the
-       current item, but the post-`next_runout` budget is the same.)
+       yarn **and** family with the current item so the preamble is a
+       single same-family changeover (a `RunnerChange` on a legacy
+       machine). `move.lbs` equals `floor(((week_end - next_runout) work
+       hours - RUNNER_CHANGE_DURATION) / per_roll) × tgt_wt`. (The cap
+       simulation idles from `as_of` to `next_runout` rather than running
+       the current item, but the post-`next_runout` budget is the same.)
 
 ### 1.4 Main loop
 
