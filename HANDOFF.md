@@ -29,13 +29,12 @@ pandas/numpy; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** through Step 2 the suite was **285 tests, all passing**.
-> The Step-3 *code* rework has landed but the **tests have NOT been updated
-> yet** — the suite is currently **stale and will fail** (it references the
-> old `Status` structure, `BeamLoad`, `family_change`, and Step-2
-> mechanics). The `swmtplanner` package itself **imports cleanly** and the
-> schedule layer is smoke-verified; the costing layer is verified in
-> isolation. Updating the tests is the remaining work (see "Next").
+> **Suite state:** **316 tests, all passing** (`python -m unittest discover
+> -s tests -p '*_tests.py'`). Step 3 is fully landed — `src/` code *and*
+> tests + coverage specs all updated to the Step-3 model and committed. The
+> planner still prints `Total moves committed: N` debug lines to stdout
+> during the loop tests; that's an intentional source-side print the user
+> wants kept for now (harmless to the suite).
 
 ## Preferred workflow
 
@@ -55,8 +54,8 @@ in doff time). Commits are the user's to make.
 |---|---|---|
 | **1** | Separate production from schedule activities (`Job`/`Roll`, `ProductionPlan`) | ✅ complete + committed |
 | **2** | Runout logic (`BEAM_FLOOR_LBS`, mid-roll beam loads, max-waste, yarn `Waste`) | ✅ complete + committed |
-| **3** | Add `Doff`, split `BeamLoad`→`Hanging`/`Threading`, split changeover | 🟡 design ✅ + **all `src/` code ✅ committed**; **tests remaining** |
-| **4** | Expand verbose audit (more FK links, consolidate `*_detail_id`, log all candidates) | ⏸ pending (blocked by #3) |
+| **3** | Add `Doff`, split `BeamLoad`→`Hanging`/`Threading`, split changeover | ✅ complete + committed (design, `src/` code, tests + specs) |
+| **4** | Expand verbose audit (more FK links, consolidate `*_detail_id`, log all candidates) | ⏸ pending (next up; #3 no longer blocks it) |
 
 A cross-cutting **`Status` accessor refactor** was also done during Step 3
 (see below) — it touched the same files and is committed alongside the
@@ -79,11 +78,11 @@ bar), charged per-lb via a new `waste_lbs` cost weight. A later refinement:
 `Waste` and `TapeOut` store the **`BeamSet`** (yarn SKU) being
 discarded/removed, not the `Greige`.
 
-### Step 3 — design ✅, code ✅ (committed), tests remaining
+### Step 3 — ✅ complete (design, code, tests + specs all committed)
 
-**Design** (both `schedule/DESIGN.md` and `planners/infinite/DESIGN.md`) is
-fully updated. **All `src/` code is implemented and committed**; the package
-imports and the schedule layer is smoke-clean. What was built:
+**Design** (both `schedule/DESIGN.md` and `planners/infinite/DESIGN.md`),
+**all `src/` code**, and the **tests + coverage specs** are implemented and
+committed; the full suite is green. What was built:
 
 **New activity set** (`schedule/activity/activity.py`), `BeamLoad` removed:
 - **`Doff`** — fieldless (like `Idle`); one per completed roll. A roll's
@@ -138,33 +137,39 @@ components). `Knit`/`Doff`/`Hanging`/`Threading` are **unweighted**.
 `"top 40D BLACK 1000X4 (2800 lbs), btm 60D WHITE 1000X4 (1800 lbs)"`),
 `Threading` shows the bar(s), `Doff` is blank.
 
-### Step 4 — pending (blocked on Step 3)
+### Step 4 — ⏸ pending (next up; Step 3 no longer blocks it)
 
 More FK links across the verbose detail tables; consolidate the five
 `*_detail_id` counters to key off `move_id`; possibly a job→activity link
 for a true knit-start; expand the iteration log to log **all** considered
 candidates (remove the 16-row truncation).
 
+### Step-3 tests — ✅ done (record of what was reworked)
+
+- **Coverage specs**: `SCHEDULE_TEST_SPEC.md` (Phases 1–4) and
+  `INF_PLAN_TEST_SPEC.md` brought to the Step-3 model — `Doff` per roll,
+  `Hanging`/`Threading` + remove→hang→thread guard rails, three changeover
+  types, `Status` accessor API + `Status.create`, doff-aware `next_runout`,
+  and the `style_change`/`runner_change`/`pattern_change` split. `COORD_TEST_
+  SPEC.md` needed no changes. (Decisions on file: `level_loading`/`old_machine`
+  weights stay untested; `_activity_desc`/`cost_detail.tsv` are dev-only and
+  intentionally unspecced.)
+- **Test code**: `machine_tests.py` (accessor API, per-roll `Doff`, guard
+  rails, doff-aware `next_runout` + `producible_lbs_in_week` caps),
+  `inf_plan_tests.py` (new activity set, three changeover weights, doff-aware
+  caps, `Machine(...)` constructor no longer takes change durations), and
+  `coord_tests.py` (just the constructor-arg fix).
+
 ## Next concrete action
 
-**Update the Step-3 tests + coverage specs** (the package imports and the
-schedule layer is smoke-verified, so the suite can actually run again):
+**Step 4 — expand the verbose audit** (no longer blocked). From the Step-4
+scope: more FK links across the verbose detail tables; consolidate the five
+`*_detail_id` counters to key off `move_id`; possibly a job→activity link for
+a true knit-start; and expand the iteration log to log **all** considered
+candidates (remove the 16-row truncation). This is the `planners/infinite/`
+verbose-log layer (`iterlog.py`, `report.py`) — dev-facing output, not the
+end product.
 
-1. **Coverage specs first** — bring `SCHEDULE_TEST_SPEC.md` and
-   `INF_PLAN_TEST_SPEC.md` to the Step-3 model: `Doff` per roll +
-   `completion_time == Doff.end`; `Hanging`/`Threading` (and the guard
-   rails / remove→hang→thread sequencing); the three changeover types;
-   the `Status` accessor API + `Status.create`; doff-aware `next_runout`;
-   costing `style_change`/`runner_change`/`pattern_change` (fourteen
-   components); `_activity_desc` for the new activities.
-2. **Test code** — rework `tests/machine_tests.py` (biggest: `Status(...)`
-   → `Status.create(...)`, `.top_beam`→`.beam('top')`, all activity-sequence
-   assertions for `Doff`/`Hanging`/`Threading`/changeovers, per-roll doffs,
-   `next_runout` math, guard-rail raises), `tests/inf_plan_tests.py`
-   (`CostWeights` three changeover weights; `_activity_desc`; `cost_detail`
-   columns; any `Status` construction), and `tests/coord_tests.py` (check
-   any machines-file fixtures for dropped `style_change_time` /
-   `family_change_time` keys — they're now ignored, so harmless, but verify).
-3. Run each module, then the full suite, until green.
-
-DESIGN/spec-first, narrow per turn; the user reviews each section.
+DESIGN/spec-first, narrow per turn; the user reviews each section. Start by
+bringing `planners/infinite/DESIGN.md` to the Step-4 model before touching
+code.
