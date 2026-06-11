@@ -345,6 +345,7 @@ class Machine(HasID[str]):
         lbs: float,
         start_at: Literal['schedule_tail', 'next_runout'],
         idle_for: timedelta = timedelta(0),
+        tgt_order: str | None = None,
     ) -> 'ProductionPlan':
         """Plan production of `lbs` of `item` on this machine. Pure — does
         not mutate state.
@@ -354,6 +355,12 @@ class Machine(HasID[str]):
         machine sits unstaffed during what would otherwise be work hours.
         The entire downstream plan (run-up, preamble, production) needs an
         operator, so Idle precedes everything else.
+
+        `tgt_order` records which order the caller is raising this call to
+        fill (an order id, default `None`). It is stamped onto the new-item
+        `Job` only; the `'next_runout'` run-up `Job` always carries `None`.
+        It captures intent, not the order actually filled (resolved later by
+        the `SafetyAwareView`).
 
         Walk (see DESIGN.md for details):
           0. Optional `Idle` (when `idle_for > 0`).
@@ -380,6 +387,17 @@ class Machine(HasID[str]):
             )
         if idle_for < timedelta(0):
             raise ValueError(f'idle_for must be non-negative, got {idle_for}')
+        # 'next_runout' means "finish the current item, then change over to a
+        # different one." With no item change it would emit no changeover and
+        # split one continuous run into a run-up Job + new-item Job at the
+        # arbitrary beam-runout boundary — a caller mistake ('schedule_tail'
+        # is the way to continue the current item).
+        if (start_at == 'next_runout'
+                and item == self._current_status.current_item):
+            raise ValueError(
+                "'next_runout' mode requires a changeover, but item "
+                f'{item.id!r} is already the machine\'s current item'
+            )
 
         emitted: list[Activity] = []
         jobs: list[Job] = []
@@ -397,7 +415,7 @@ class Machine(HasID[str]):
         working = self._emit_preamble(emitted, working, item)
 
         # 3. Production loop for the new item.
-        self._emit_production_loop(emitted, working, item, lbs, jobs)
+        self._emit_production_loop(emitted, working, item, lbs, jobs, tgt_order)
         return ProductionPlan(activities=tuple(emitted), jobs=tuple(jobs))
 
     # ----- private plan_production helpers -----
@@ -427,8 +445,10 @@ class Machine(HasID[str]):
         rolls: list[Roll] = []
         for _ in range(n_rolls):
             working = self._emit_knit(emitted, working, cur, cur.tgt_wt)
+            knit = emitted[-1]                # the Knit just emitted
             working = self._emit_doff(emitted, working)
-            rolls.append(Roll(lbs=cur.tgt_wt, completion_time=working.as_of))
+            rolls.append(Roll(lbs=cur.tgt_wt, completion_time=working.as_of,
+                              knits=(knit,)))
         jobs.append(Job(item=cur, rolls=tuple(rolls)))
         return working
 
@@ -510,6 +530,7 @@ class Machine(HasID[str]):
     def _emit_production_loop(
         self, emitted: list[Activity], working: Status,
         item: 'Greige', lbs: float, jobs: list[Job],
+        tgt_order: str | None = None,
     ) -> None:
         """Wind `lbs` of `item` (a whole multiple of `tgt_wt`) one roll at a
         time, recording each completed `Roll` on one straddle-aware `Job`.
@@ -525,6 +546,7 @@ class Machine(HasID[str]):
         rolls_left = round(lbs / tgt)   # whole rolls owed (lbs is a multiple)
         roll_filled = 0.0               # lbs wound on the in-progress roll
         knit = 0.0                      # lbs in the current (unflushed) Knit
+        roll_knits: list[Knit] = []     # Knits wound onto the in-progress roll
 
         def usable(bar: Literal['top', 'btm'], pct: float) -> float:
             """Live usable yarn on a bar, net of the un-flushed Knit: a bar
@@ -533,12 +555,14 @@ class Machine(HasID[str]):
             return working.lbs_remaining(bar) - knit * pct - BEAM_FLOOR_LBS
 
         def flush() -> None:
-            """Emit the open Knit (if any) and reset the accumulator. The
-            Knit's start is the current `working.as_of`, unchanged since the
-            accumulator opened (nothing else is emitted mid-segment)."""
+            """Emit the open Knit (if any), record it on the in-progress
+            roll, and reset the accumulator. The Knit's start is the current
+            `working.as_of`, unchanged since the accumulator opened (nothing
+            else is emitted mid-segment)."""
             nonlocal working, knit
             if knit > _FLOAT_EPS:
                 working = self._emit_knit(emitted, working, item, knit)
+                roll_knits.append(emitted[-1])
                 knit = 0.0
 
         def resolve() -> None:
@@ -574,14 +598,16 @@ class Machine(HasID[str]):
             if roll_filled >= tgt - _FLOAT_EPS:  # roll complete
                 flush()                          # emit the roll's final Knit
                 working = self._emit_doff(emitted, working)
-                rolls.append(Roll(lbs=tgt, completion_time=working.as_of))
+                rolls.append(Roll(lbs=tgt, completion_time=working.as_of,
+                                  knits=tuple(roll_knits)))
                 roll_filled = 0.0
                 rolls_left -= 1
+                roll_knits.clear()
             else:                                # a bar hit the floor mid-roll
                 resolve()                        # re-thread it; co-swap other
 
         if rolls:
-            jobs.append(Job(item=item, rolls=tuple(rolls)))
+            jobs.append(Job(item=item, rolls=tuple(rolls), tgt_order=tgt_order))
 
     # ----- single-activity emission helpers -----
 

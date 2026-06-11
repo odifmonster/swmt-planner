@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from swmtplanner.demand.rlsitem import CostComponents
+from swmtplanner.demand.rlsitem import CostComponents, RlsItem
 
 from swmtplanner.planners.infinite.coordination import build_context
 from swmtplanner.planners.infinite.costing import CostBreakdown, Costing
@@ -30,11 +30,12 @@ if TYPE_CHECKING:
 @dataclass
 class PlanReport:
     """Snapshot of a `plan` invocation's output. Bundles the schedules,
-    registered jobs, final cost picture, unmet-demand summary, and
-    late-order summary so callers can persist or render the result
-    without holding the mutable `State` around. The schedules themselves
-    also still live on the `Machine` instances inside `state` — this is
-    a copy.
+    registered jobs, final cost picture, unmet-demand summary,
+    late-order summary, and the input demand (`rls_items`, which also
+    carry each item's post-plan views and `roll_order_links`) so callers
+    can persist or render the result without holding the mutable `State`
+    around. The schedules themselves also still live on the `Machine`
+    instances inside `state` — this is a copy.
 
     The eight `*_log` / `*_detail` tuples make up the Phase 3 verbose
     audit trail. They are populated only when `plan(..., verbose=True)`
@@ -47,6 +48,7 @@ class PlanReport:
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple['RawOrder', ...]
+    rls_items: dict[str, RlsItem]
     iteration_log: tuple[IterationLogRecord, ...] | None = None
     cost_detail: tuple[CostDetailRecord, ...] | None = None
     lateness_detail: tuple[LatenessDetailRecord, ...] | None = None
@@ -276,6 +278,7 @@ def _build_report(
             for order in r.raw_view.orders
             if order.late_lbs > 0
         ),
+        rls_items=dict(state.rls_items),
         iteration_log=(
             tuple(accumulators.iteration_log)
             if accumulators is not None else None

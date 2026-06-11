@@ -557,6 +557,7 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [0.0, 0.0, 0.0, 0.0],
         )
         self.assertEqual(view.safety_pool, 0.0)
+        self.assertEqual(view.roll_order_links, ())  # no rolls -> no links
 
     def test_on_hand_partially_fills_week_0(self):
         # 50 lbs < week 0's demand of 100. Order 0 gets 50, others untouched,
@@ -568,6 +569,7 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [50.0, 0.0, 0.0, 0.0],
         )
         self.assertEqual(view.safety_pool, 0.0)
+        self.assertEqual(view.roll_order_links, ())  # on_hand has no roll
 
     def test_on_hand_fills_week_0_then_partial_safety(self):
         # 600 lbs: 100 → week 0, 500 → safety (target 1400, not full).
@@ -578,6 +580,7 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [100.0, 0.0, 0.0, 0.0],
         )
         self.assertEqual(view.safety_pool, 500.0)
+        self.assertEqual(view.roll_order_links, ())  # on_hand has no roll
 
     def test_on_hand_fills_week_0_full_safety_then_partial_week_1(self):
         # 1600 lbs: 100 → week 0, 1400 → safety (full), 100 → week 1 (partial).
@@ -588,6 +591,7 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [100.0, 100.0, 0.0, 0.0],
         )
         self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, ())  # on_hand has no roll
 
     def test_on_hand_fills_all_demand_and_safety(self):
         # 2150 lbs = 100 + 1400 + 200 + 150 + 300, exactly enough to cover
@@ -599,6 +603,7 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [100.0, 200.0, 150.0, 300.0],
         )
         self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, ())  # on_hand has no roll
 
     def test_jobs_fill_weeks_0_and_1_before_safety(self):
         # Job ends between week 0's and week 1's due dates → nearest on-time
@@ -612,6 +617,12 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [100.0, 200.0, 0.0, 0.0],
         )
         self.assertEqual(view.safety_pool, 500.0)
+        # One jumbo roll spanning wk0/wk1/safety; its single link is to the
+        # earliest order it touches (wk0, paid late first).
+        self.assertEqual(
+            view.roll_order_links,
+            ((jobs[0].rolls[0], view.orders[0].id),),
+        )
 
     def test_job_late_to_all_orders_fills_every_order_before_safety(self):
         # Job ends a week after week 3's due_date → late to all orders.
@@ -625,6 +636,105 @@ class SafetyAwareViewRecomputeTests(unittest.TestCase):
             [100.0, 200.0, 150.0, 300.0],
         )
         self.assertEqual(view.safety_pool, 500.0)
+        # Jumbo roll late to all orders; bucket 1 pays earliest-first, so its
+        # single link is to wk0.
+        self.assertEqual(
+            view.roll_order_links,
+            ((jobs[0].rolls[0], view.orders[0].id),),
+        )
+
+    # --- roll_order_links cases (spec 1.2-1.5), rolls sized one-per-bucket ---
+
+    def test_links_on_hand_fills_wk0_and_safety_rolls_on_time(self):
+        # Spec 1.2. on_hand = wk0 (100) + safety (1400) tops the pool to target,
+        # so no roll touches safety. One on-time roll per remaining week (within
+        # the 7-day lead window) links to its own week's order; no S@ link, no
+        # on_hand link; all cost trackers stay zero.
+        view = _make_safety_view([100, 200, 150, 300])
+        j1 = _job_at(_due(1) - timedelta(days=2), lbs=200)
+        j2 = _job_at(_due(2) - timedelta(days=2), lbs=150)
+        j3 = _job_at(_due(3) - timedelta(days=2), lbs=300)
+        view.recompute(jobs=[j1, j2, j3], on_hand=1500)
+        self.assertEqual(
+            [o.allocated_lbs for o in view.orders],
+            [100.0, 200.0, 150.0, 300.0],
+        )
+        self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, (
+            (j1.rolls[0], view.orders[1].id),
+            (j2.rolls[0], view.orders[2].id),
+            (j3.rolls[0], view.orders[3].id),
+        ))
+        self.assertEqual(view.drainage, 0.0)
+        self.assertEqual(view.carrying, 0.0)
+        self.assertEqual(view.excess, 0.0)
+
+    def test_links_rolls_before_wk1_fill_wk1_then_safety_then_wk2(self):
+        # Spec 1.3. on_hand = wk0 (100). Three rolls all completing before wk1's
+        # due date, sized to wk1 demand, full safety, and wk2 demand; the bucket
+        # walk routes them wk1 (bucket 1) -> safety (bucket 2) -> wk2 (bucket 3).
+        view = _make_safety_view([100, 200, 150, 300])
+        j_wk1 = _job_at(_due(0) + timedelta(days=1), lbs=200)
+        j_saf = _job_at(_due(0) + timedelta(days=2), lbs=1400)
+        j_wk2 = _job_at(_due(0) + timedelta(days=3), lbs=150)
+        view.recompute(jobs=[j_wk1, j_saf, j_wk2], on_hand=100)
+        self.assertEqual(
+            [o.allocated_lbs for o in view.orders],
+            [100.0, 200.0, 150.0, 0.0],
+        )
+        self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, (
+            (j_wk1.rolls[0], view.orders[1].id),
+            (j_saf.rolls[0], view.safety.id),
+            (j_wk2.rolls[0], view.orders[2].id),
+        ))
+
+    def test_links_safety_refill_split_across_wk1_and_wk2_windows(self):
+        # Spec 1.4. on_hand = wk0 (100). Demand rolls fill wk1/wk2/wk3 on time;
+        # the 1400 safety refill is split between a roll in the wk1 window and a
+        # roll in the wk2 window, so two distinct rolls link to S@.
+        view = _make_safety_view([100, 200, 150, 300])
+        j_wk1 = _job_at(_due(1) - timedelta(days=2), lbs=200)
+        j_saf1 = _job_at(_due(1) - timedelta(days=1), lbs=700)
+        j_wk2 = _job_at(_due(2) - timedelta(days=2), lbs=150)
+        j_saf2 = _job_at(_due(2) - timedelta(days=1), lbs=700)
+        j_wk3 = _job_at(_due(3) - timedelta(days=2), lbs=300)
+        view.recompute(jobs=[j_wk1, j_saf1, j_wk2, j_saf2, j_wk3], on_hand=100)
+        self.assertEqual(
+            [o.allocated_lbs for o in view.orders],
+            [100.0, 200.0, 150.0, 300.0],
+        )
+        self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, (
+            (j_wk1.rolls[0], view.orders[1].id),
+            (j_saf1.rolls[0], view.safety.id),
+            (j_wk2.rolls[0], view.orders[2].id),
+            (j_saf2.rolls[0], view.safety.id),
+            (j_wk3.rolls[0], view.orders[3].id),
+        ))
+
+    def test_links_drain_then_late_wk2_then_wk3(self):
+        # Spec 1.5. on_hand = wk0 (100). A pre-wk1 job fills wk1 + full safety;
+        # no rolls between wk1 and wk2, so the wk2 order drains the pool. Later
+        # rolls pay the still-open wk2 late (refunding the drain, restoring the
+        # pool to target) then fill wk3 — no closing safety refill.
+        view = _make_safety_view([100, 200, 150, 300])
+        j_wk1 = _job_at(_due(0) + timedelta(days=3), lbs=200)
+        j_saf = _job_at(_due(0) + timedelta(days=4), lbs=1400)
+        j_wk2 = _job_at(_due(2) + timedelta(days=1), lbs=150)
+        j_wk3 = _job_at(_due(2) + timedelta(days=2), lbs=300)
+        view.recompute(jobs=[j_wk1, j_saf, j_wk2, j_wk3], on_hand=100)
+        self.assertEqual(
+            [o.allocated_lbs for o in view.orders],
+            [100.0, 200.0, 150.0, 300.0],
+        )
+        self.assertEqual(view.safety_pool, 1400.0)
+        self.assertEqual(view.roll_order_links, (
+            (j_wk1.rolls[0], view.orders[1].id),
+            (j_saf.rolls[0], view.safety.id),
+            (j_wk2.rolls[0], view.orders[2].id),
+            (j_wk3.rolls[0], view.orders[3].id),
+        ))
 
     # --- Carrying / excess tests ---
     # All four below have on_hand >= week 0 demand + safety_target and avoid

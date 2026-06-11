@@ -1018,23 +1018,45 @@ def _doff_count(plan):
 
 def _job_shape(plan):
     """Structural shape of a plan's production records, dropping job ids:
-    one tuple per `Job` of (item id, total_rolls, total_lbs, per-roll
-    lbs)."""
+    one tuple per `Job` of (item id, total_rolls, total_lbs, tgt_order,
+    per-roll (lbs, per-roll knit lbs)). The per-roll knit lbs capture the
+    `Roll.knits` shape positionally (by value) so two runs of the same plan
+    match without comparing fresh `Knit` instances by identity."""
     return [
-        (j.item.id, j.total_rolls, j.total_lbs,
-         tuple(r.lbs for r in j.rolls))
+        (j.item.id, j.total_rolls, j.total_lbs, j.tgt_order,
+         tuple((r.lbs, tuple(k.lbs for k in r.knits)) for r in j.rolls))
         for j in plan.jobs
     ]
 
 
 def _assert_single_job(test, plan, item_id, total_lbs, total_rolls):
     """Assert the plan produced exactly one `Job` for `item_id` with the
-    given roll totals (`Waste` lbs are not part of the `Job`)."""
+    given roll totals (`Waste` lbs are not part of the `Job`). Also checks
+    the job's per-roll `Knit` links via `_assert_knit_links`, so every
+    single-job case (the §2.3 loop cases) verifies provenance."""
     test.assertEqual(len(plan.jobs), 1)
     job = plan.jobs[0]
     test.assertEqual(job.item.id, item_id)
     test.assertAlmostEqual(job.total_lbs, total_lbs)
     test.assertEqual(job.total_rolls, total_rolls)
+    _assert_knit_links(test, plan)
+
+
+def _assert_knit_links(test, plan):
+    """Assert every `Roll.knits` links to the exact `Knit` activities that
+    wound it (§2.3 / §2.4 provenance). Across all jobs' rolls in order, the
+    linked `Knit`s reproduce the plan's full `Knit` sequence **by identity**
+    — so each `Knit` lands on exactly one roll, none is shared or dropped,
+    and only `Knit`s appear in `knits`. Per roll, the knit lbs sum to the
+    roll's lbs (a straddled roll holds its pre- and post-swap `Knit`s)."""
+    plan_knits = [a for a in plan.activities if isinstance(a, Knit)]
+    linked = []
+    for job in plan.jobs:
+        for roll in job.rolls:
+            test.assertTrue(all(isinstance(k, Knit) for k in roll.knits))
+            test.assertAlmostEqual(sum(k.lbs for k in roll.knits), roll.lbs)
+            linked.extend(roll.knits)
+    test.assertEqual([id(k) for k in linked], [id(k) for k in plan_knits])
 
 
 # --- 2.1 Input acceptance — obsolete, not implemented -------------------
@@ -1257,14 +1279,23 @@ class PlanProductionStartAtTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=2800.0, init_btm_lbs=1800.0)
         plan = m.plan_production(_ITEM_B, lbs=200.0,
-                                 start_at='schedule_tail')
+                                 start_at='schedule_tail',
+                                 tgt_order='P0@AU0002')
         self.assertEqual(_shape(plan), [
             ('RunnerChange', 'AU0001', 'AU0002'),
             *_kd(200.0, 'AU0002'),
         ])
         self.assertEqual(plan.activities[0].start, m.current_status.as_of)
-        # schedule_tail mode: exactly one Job (the new item).
+        # schedule_tail mode: exactly one Job (the new item), carrying the
+        # passed tgt_order.
         _assert_single_job(self, plan, 'AU0002', 200.0, 1)
+        self.assertEqual(plan.jobs[0].tgt_order, 'P0@AU0002')
+
+    def test_tgt_order_defaults_to_none(self):
+        # Omitting tgt_order leaves the new-item Job's tgt_order None.
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
+        self.assertIsNone(plan.jobs[0].tgt_order)
 
     def test_next_runout_clean_roll_boundary(self):
         # Sub-case 1: the previous item's beams hold an EXACT whole-roll
@@ -1278,7 +1309,8 @@ class PlanProductionStartAtTests(unittest.TestCase):
         # rolls on the fresh beams.
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=205.0, init_btm_lbs=305.0)
-        plan = m.plan_production(_ITEM_B, lbs=400.0, start_at='next_runout')
+        plan = m.plan_production(_ITEM_B, lbs=400.0, start_at='next_runout',
+                                 tgt_order='P0@AU0002')
         self.assertEqual(_shape(plan), (
             _kd(100.0, 'AU0001') * 5                       # run-up: 5 rolls A
             + _rethread('both', top_lbs=2800.0, btm_lbs=1800.0)
@@ -1289,6 +1321,14 @@ class PlanProductionStartAtTests(unittest.TestCase):
         self.assertEqual([(j.item.id, j.total_rolls, j.total_lbs)
                           for j in plan.jobs],
                          [('AU0001', 5, 500.0), ('AU0002', 2, 400.0)])
+        # tgt_order is stamped on the new-item Job only; the run-up Job is None.
+        run_up_job, new_item_job = plan.jobs
+        self.assertIsNone(run_up_job.tgt_order)
+        self.assertEqual(new_item_job.tgt_order, 'P0@AU0002')
+        # Every roll (run-up's single-Knit rolls + the new item's) links to
+        # the Knit(s) that wound it.
+        _assert_knit_links(self, plan)
+        self.assertTrue(all(len(r.knits) == 1 for r in run_up_job.rolls))
         # The run-up itself produced no Waste / beam work before the
         # changeover; the re-thread is the preamble's.
         co_idx = next(i for i, a in enumerate(plan.activities)
@@ -1311,7 +1351,8 @@ class PlanProductionStartAtTests(unittest.TestCase):
         m = _make_machine(init_item=_ITEM_BIG,
                           init_top_lbs=355.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_BIG2, lbs=600.0,
-                                 start_at='next_runout')
+                                 start_at='next_runout',
+                                 tgt_order='P0@AU_BIG2')
         self.assertEqual(_shape(plan), (
             _kd(300.0, 'AU_BIG') * 2                       # run-up: 2 rolls
             + [('RunnerChange', 'AU_BIG', 'AU_BIG2')]      # preamble: no beam work
@@ -1323,6 +1364,15 @@ class PlanProductionStartAtTests(unittest.TestCase):
         self.assertEqual([(j.item.id, j.total_rolls, j.total_lbs)
                           for j in plan.jobs],
                          [('AU_BIG', 2, 600.0), ('AU_BIG2', 2, 600.0)])
+        run_up_job, new_item_job = plan.jobs
+        self.assertIsNone(run_up_job.tgt_order)
+        self.assertEqual(new_item_job.tgt_order, 'P0@AU_BIG2')
+        # Link provenance: run-up rolls one Knit each; the new item's first
+        # roll straddles the mid-roll re-thread and is wound across two Knits.
+        _assert_knit_links(self, plan)
+        self.assertTrue(all(len(r.knits) == 1 for r in run_up_job.rolls))
+        self.assertEqual(len(new_item_job.rolls[0].knits), 2)
+        self.assertEqual(len(new_item_job.rolls[1].knits), 1)
         # No beam work in the preamble: both bars stayed above the floor and
         # matched, so nothing is re-threaded before the first BIG2 Knit.
         co_idx = next(i for i, a in enumerate(plan.activities)
@@ -1342,7 +1392,8 @@ class PlanProductionStartAtTests(unittest.TestCase):
         # swapped later, inside B's production loop.)
         m = _make_machine(init_item=_ITEM_A,
                           init_top_lbs=16.0, init_btm_lbs=2000.0)
-        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout')
+        plan = m.plan_production(_ITEM_B, lbs=200.0, start_at='next_runout',
+                                 tgt_order='P0@AU0002')
         # The run-up emitted nothing before the changeover.
         co_idx = next(i for i, a in enumerate(plan.activities)
                       if isinstance(a, _CHANGEOVERS))
@@ -1350,8 +1401,21 @@ class PlanProductionStartAtTests(unittest.TestCase):
             isinstance(a, (Knit, Doff, Waste))
             for a in plan.activities[:co_idx]
         ))
-        # Exactly one Job — the new item's.
+        # Exactly one Job — the new item's — carrying the passed tgt_order.
         _assert_single_job(self, plan, 'AU0002', 200.0, 1)
+        self.assertEqual(plan.jobs[0].tgt_order, 'P0@AU0002')
+
+    def test_next_runout_same_item_raises(self):
+        # §2.4 case 4: 'next_runout' requires a real changeover, so calling it
+        # with the machine's current item is a ValueError raised before any
+        # activity is emitted.
+        m = _make_machine(init_item=_ITEM_A,
+                          init_top_lbs=2800.0, init_btm_lbs=1800.0)
+        with self.assertRaises(ValueError):
+            m.plan_production(_ITEM_A, lbs=100.0, start_at='next_runout')
+        # 'schedule_tail' with the same item is allowed (no changeover).
+        plan = m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail')
+        _assert_single_job(self, plan, 'AU0001', 100.0, 1)
 
 
 # --- 2.5 Purity and commit ----------------------------------------------

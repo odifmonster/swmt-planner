@@ -1004,12 +1004,13 @@ class CandidateEnumerationTests(unittest.TestCase):
     def _assert_orders_match(self, actual, expected, places=6):
         """Approximate equality for lists of RegularOrder / SafetyOrder.
         Compares types, items (by identity), week metadata for
-        RegularOrders, and `lbs` within float tolerance."""
+        RegularOrders, `order_id`, and `lbs` within float tolerance."""
         self.assertEqual(len(actual), len(expected))
         for a, e in zip(actual, expected):
             self.assertIs(type(a), type(e))
             self.assertIs(a.item, e.item)
             self.assertAlmostEqual(a.lbs, e.lbs, places=places)
+            self.assertEqual(a.order_id, e.order_id)
             if isinstance(a, RegularOrder):
                 self.assertEqual(a.week_idx, e.week_idx)
                 self.assertEqual(a.due_date, e.due_date)
@@ -1204,7 +1205,8 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         expected = [
             RegularOrder(item=item, week_idx=0,
-                         due_date=_START, lbs=100.0),
+                         due_date=_START, lbs=100.0,
+                         order_id=f'P0@{item.id}'),
         ]
 
         # (a) week 0 has the unmet 100 lbs directly via the constructor.
@@ -1230,7 +1232,8 @@ class CandidateEnumerationTests(unittest.TestCase):
         self._assert_orders_match(eligible_orders(state_b), expected)
 
     def test_eligible_orders_safety_below_target_only(self):
-        expected = [SafetyOrder(item=_ITEM_A, lbs=500.0)]
+        expected = [SafetyOrder(item=_ITEM_A, lbs=500.0,
+                                order_id=f'S@{_ITEM_A.id}')]
 
         # (a) Zero demand and zero on_hand on _ITEM_A (safety=500) leave
         # safety pool empty.
@@ -1259,8 +1262,10 @@ class CandidateEnumerationTests(unittest.TestCase):
     def test_eligible_orders_both_unmet_and_shortfall(self):
         expected = [
             RegularOrder(item=_ITEM_A, week_idx=0,
-                         due_date=_START, lbs=100.0),
-            SafetyOrder(item=_ITEM_A, lbs=500.0),
+                         due_date=_START, lbs=100.0,
+                         order_id=f'P0@{_ITEM_A.id}'),
+            SafetyOrder(item=_ITEM_A, lbs=500.0,
+                        order_id=f'S@{_ITEM_A.id}'),
         ]
 
         # (a) weekly=[100, 0, 0, 0], no on_hand → week 0 fully unmet and
@@ -1293,7 +1298,8 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         expected = [
             RegularOrder(item=item, week_idx=0,
-                         due_date=_START, lbs=100.0),
+                         due_date=_START, lbs=100.0,
+                         order_id=f'P0@{item.id}'),
         ]
 
         # (a) on_hand=100 partially fills week-0 demand of 200; weeks 1-3
@@ -1353,8 +1359,10 @@ class CandidateEnumerationTests(unittest.TestCase):
         # safety=300 (per the module-level fixture).
         self._assert_orders_match(eligible_orders(state), [
             RegularOrder(item=safety0, week_idx=0,
-                         due_date=_START, lbs=100.0),
-            SafetyOrder(item=_ITEM_B, lbs=300.0),
+                         due_date=_START, lbs=100.0,
+                         order_id=f'P0@{safety0.id}'),
+            SafetyOrder(item=_ITEM_B, lbs=300.0,
+                        order_id=f'S@{_ITEM_B.id}'),
         ])
 
     # ===================================================================
@@ -1725,6 +1733,55 @@ class CandidateEnumerationTests(unittest.TestCase):
         self.assertEqual(len(moves), 1)
         self.assertEqual(moves[0].lbs, 12600.0)
 
+    # --- 1.3.3.3 next_runout skipped for the machine's current item -------
+
+    def test_enumerate_candidates_skips_same_item_next_runout(self):
+        # Separate setup from the filtering/cap tests: M1 is mid-run on _T1
+        # with partial beams (top=600, btm=1000, top_pct=btm_pct=0.5) so its
+        # next_runout is in-window and distinct from schedule_tail. _T1 (the
+        # current item) has unmet demand, and so does _T2 (a different item M1
+        # can run). The (next_runout, _T1) pairing must be skipped --
+        # plan_production rejects a same-item next_runout -- while
+        # (schedule_tail, _T1) and (next_runout, _T2) remain.
+        machine = Machine(
+            'M1', _T1, _START,
+            _TOP_BEAM, 600.0, _BTM_BEAM, 1000.0,
+            _24_7,
+        )
+        rls_t1 = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 0.0, 0.0, 0.0],
+        )
+        rls_t2 = RlsItem(
+            item=_T2, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[100.0, 0.0, 0.0, 0.0],
+        )
+        state = _make_state(
+            machines={'M1': machine},
+            rls_items={_T1.id: rls_t1, _T2.id: rls_t2},
+            window_end=machine.next_runout,   # both DPs in window
+        )
+        moves = enumerate_candidates(state)   # must not raise
+
+        # 1. No same-item next_runout candidate.
+        self.assertFalse(any(
+            mv.start_at == 'next_runout' and mv.item.id == _T1.id
+            for mv in moves
+        ))
+        # 2. The schedule_tail candidate for the current item is present.
+        self.assertTrue(any(
+            mv.start_at == 'schedule_tail' and mv.item.id == _T1.id
+            for mv in moves
+        ))
+        # 3. A next_runout candidate for the *other* item is present — the skip
+        #    is specific to the current item, not a blanket next_runout drop.
+        self.assertTrue(any(
+            mv.start_at == 'next_runout' and mv.item.id == _T2.id
+            for mv in moves
+        ))
+
 
 # --- 1.4 Main loop --------------------------------------------------------
 
@@ -2066,7 +2123,7 @@ class MainLoopTests(unittest.TestCase):
         m1 = _big_beam_machine('M1', init_item=_T1)
         m2 = _big_beam_machine('M2', init_item=_T2)
         rls_t1 = RlsItem(
-            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            item=_T1, start_date=_START, on_hand_lbs=150.0,
             lead_time=timedelta(0),
             weekly_lbs_needed=[100.0, 100.0, 100.0, 100.0],
         )
@@ -2120,6 +2177,34 @@ class MainLoopTests(unittest.TestCase):
                         order.remaining_lbs
                     )
         self.assertEqual(report.unmet_lbs_by_item_week, actual_unmet)
+
+        # 6. rls_items are the same objects state holds, and each carries
+        # its on_hand_coverage (the initial jobs=[] allocation, captured at
+        # construction). Re-derive the expected coverage from a fresh
+        # RlsItem built with the same inputs — its views prime with
+        # jobs=[] + on_hand at __init__, so this exercises the real code
+        # path rather than re-implementing the bucket walk.
+        self.assertEqual(set(report.rls_items), set(state.rls_items))
+        for item_id, rls in state.rls_items.items():
+            self.assertIs(report.rls_items[item_id], rls)
+            fresh = RlsItem(
+                item=rls.item, start_date=rls.start_date,
+                on_hand_lbs=rls.on_hand_lbs, lead_time=rls.lead_time,
+                weekly_lbs_needed=[w.qty_lbs for w in rls.weekly_demand],
+            )
+            expected = {
+                o.id: o.allocated_lbs for o in fresh.safety_view.orders
+            }
+            expected[fresh.safety_view.safety.id] = (
+                fresh.safety_view.safety_pool
+            )
+            self.assertEqual(
+                report.rls_items[item_id].on_hand_coverage, expected,
+            )
+        # The positive-on_hand item (_T1) has non-trivial coverage.
+        self.assertGreater(
+            sum(report.rls_items[_T1.id].on_hand_coverage.values()), 0.0,
+        )
 
 
 if __name__ == '__main__':

@@ -164,6 +164,15 @@ Roll                              # one completed roll. Pure data; no
                                   # machine-state effect.
   lbs: float                      # actual weight of the roll
   completion_time: datetime       # when the roll is ready to ship
+  knits: tuple[Knit, ...] = ()    # provenance: the component `Knit` activities
+                                  # that wound this roll, extracted from the
+                                  # activities `plan_production` emitted. Lets a
+                                  # roll trace back to the exact knitting run(s)
+                                  # behind it — one `Knit` for a roll wound on a
+                                  # single beam, two when the roll straddles a
+                                  # beam swap (wound partly before, partly after
+                                  # the re-thread). A Job's knits are then just
+                                  # the union of its rolls' knits.
 
 Job (HasID)                       # an "order" for some number of rolls of
                                   # an item on a machine, fulfilled by one
@@ -176,7 +185,19 @@ Job (HasID)                       # an "order" for some number of rolls of
                                   # schedule (`Machine.jobs`), not on the
                                   # activity schedule.
   item: Greige
-  rolls: tuple[Roll, ...]
+  rolls: tuple[Roll, ...]         # each Roll carries its own component `Knit`s
+                                  # (see Roll above); a Job's knits are the
+                                  # union of its rolls' knits.
+  tgt_order: str | None = None    # provenance: the id of the order this Job
+                                  # was *created to target*, passed into
+                                  # `plan_production` by the caller. None for a
+                                  # Job not raised against any particular order
+                                  # (e.g. a `'next_runout'` run-up Job, which
+                                  # just finishes the current item). NOT the
+                                  # order the Job actually fills — that depends
+                                  # on priority across all jobs/demand and is
+                                  # resolved later in the `SafetyAwareView`, not
+                                  # stored here.
   total_rolls: int                # computed: len(rolls)
   total_lbs: float                # computed: sum(roll.lbs for roll in rolls)
 
@@ -215,7 +236,8 @@ Machine (HasID)
                                     # vs RunnerChange / PatternChange (legacy)
   status_at(t) -> Status
   duration_of(spec) -> timedelta
-  plan_production(item, lbs, start_at, idle_for=timedelta(0)) -> ProductionPlan
+  plan_production(item, lbs, start_at, idle_for=timedelta(0),
+                  tgt_order=None) -> ProductionPlan
   add_activities(activities) -> None
   add_jobs(jobs) -> None
   # capacity + stopping-point queries
@@ -475,7 +497,7 @@ are never registered with an `RlsItem`.
 
 ## The `plan_production` walk
 
-Given `(item, lbs, start_at, idle_for)` and `current_status`, build a
+Given `(item, lbs, start_at, idle_for, tgt_order)` and `current_status`, build a
 `ProductionPlan` carrying both the activity-schedule additions
 (`Knit`s, `Doff`s, `Hanging`s, `Threading`s, `Waste`s, etc.) and the
 production-schedule additions (one or two `Job` records). `start_at` is one
@@ -497,6 +519,22 @@ of:
 of `item.tgt_wt`. Any current-item production at the front of a runout-mode
 plan is whatever happens to fit before exhaustion; it is independent of
 `lbs`.
+
+`tgt_order` is an optional order id (default `None`) recording which order the
+caller is raising this call to fill — the caller's stated intent at planning
+time, not a resolved fact. It is stamped onto the **new-item `Job`** only (the
+phase-3 loop's `Job`). The run-up `Job` (phase 1) merely finishes the *current*
+item and is not raised against any order, so it always carries
+`tgt_order=None`. The order a `Job` *actually* fills is resolved later, by
+priority, in the `SafetyAwareView` — never stored on the `Job` here.
+
+**`'next_runout'` requires a real changeover.** It is an error to call
+`'next_runout'` mode with `item == current_status.current_item`: that mode
+means "finish the current item, *then* change over to a different one," so with
+no item change it would emit no changeover and split one continuous run into
+two `Job`s at the arbitrary beam-runout boundary. `plan_production` raises
+`ValueError` in that case. (`'schedule_tail'` mode has no such restriction —
+continuing the current item with no changeover is exactly what it is for.)
 
 `idle_for` is a non-negative `timedelta` that, when positive, prepends an
 `Idle` activity of that work-hour duration to the plan. Used to model
@@ -535,16 +573,20 @@ producible = min(top_usable / current_item.top_pct,
                  btm_usable / current_item.btm_pct)
 n_rolls    = producible // current_item.tgt_wt
 for _ in range(n_rolls):                  # each run-up roll is a clean roll
-    emit Knit(current_item, current_item.tgt_wt)
+    k = emit Knit(current_item, current_item.tgt_wt)
     emit Doff                             # ends the roll
-    record Roll(current_item.tgt_wt, completion_time = Doff.end)
+    record Roll(current_item.tgt_wt, completion_time = Doff.end, knits = (k,))
 ```
+
+Each run-up roll is a single uninterrupted `Knit` (no mid-roll swap), so its
+`Roll.knits` is just that one `Knit`.
 
 Because `n_rolls * tgt_wt <= producible`, no bar reaches the floor partway
 through a run-up roll, so each roll is a single `Knit(tgt_wt)` followed by a
 `Doff` — no mid-roll swap. Each roll is appended as a `Roll` entry on the
 run-up's `Job` record for `current_item` (its `completion_time` is the
-roll's `Doff.end`); the call yields that `Job` alongside the new-item `Job`
+roll's `Doff.end`, its `knits` the one `Knit` that wound it); the call yields
+that `Job` (with `tgt_order=None`) alongside the new-item `Job`
 from phase 3 (no run-up `Job` when `n_rolls == 0`). **No `Waste` is emitted
 here** — the run-up never knits a partial, so there is no runout fabric to
 discard.
@@ -617,8 +659,9 @@ There are two swap triggers, both routed through one `resolve` step:
 rolls_left  = lbs / item.tgt_wt        # whole rolls owed
 roll_filled = 0.0                      # lbs wound on the in-progress roll
 knit        = 0.0                      # lbs in the current (unflushed) Knit
+roll_knits  = []                       # Knits wound onto the in-progress roll
 
-flush():   if knit > 0: emit Knit(item, knit); knit = 0
+flush():   if knit > 0: roll_knits.append(emit Knit(item, knit)); knit = 0
 
 # Swap any bar at/below the floor (re-thread to continue) or near-empty
 # (discard its residue as Waste, then re-thread). Flush the open Knit once
@@ -643,8 +686,8 @@ while rolls_left > 0:
     if roll_filled >= item.tgt_wt:               # roll complete
         flush()                                  # end the roll's final Knit
         emit Doff                                # takes the roll off (DOFF_DURATION)
-        record Roll(item.tgt_wt, completion_time = Doff.end)
-        roll_filled = 0; rolls_left -= 1
+        record Roll(item.tgt_wt, completion_time = Doff.end, knits = tuple(roll_knits))
+        roll_filled = 0; rolls_left -= 1; roll_knits = []
     else:                                        # a bar hit BEAM_FLOOR mid-roll
         resolve()                                # re-thread it; co-swap the other if near-empty
 ```
@@ -654,12 +697,18 @@ at a mid-roll swap — its `lbs` is whatever was wound in that segment, within
 `(0, tgt_wt]`. Every roll is a whole `tgt_wt` roll, ends in exactly one
 `Doff`, and a roll that straddles a swap is wound partly before and partly
 after it, completing in the later `Knit`. There is no trailing `flush` after
-the loop — each roll already flushes at its `Doff`.
+the loop — each roll already flushes at its `Doff`. Because `flush()` records
+each emitted `Knit` onto `roll_knits`, a straddling roll's `Roll.knits`
+collects both the pre-swap `Knit` (flushed inside `resolve()`) and the
+post-swap final `Knit`; `roll_knits` resets after each `Doff`, so each `Knit`
+lands on exactly one `Roll`.
 
-Every completed roll is appended as a `Roll(lbs, completion_time)` entry on the
-new-item `Job` record, its `completion_time` being the roll's `Doff.end`. When
-the loop terminates, that `Job` (and the run-up `Job` from phase 1, if any) is
-bundled into the `ProductionPlan` the call returns.
+Every completed roll is appended as a `Roll(lbs, completion_time, knits)` entry
+on the new-item `Job` record, its `completion_time` being the roll's `Doff.end`
+and its `knits` the `Knit`(s) that wound it. When the loop terminates, that
+`Job` — carrying the call's `tgt_order` — (and the run-up `Job` from phase 1,
+if any, with `tgt_order=None`) is bundled into the `ProductionPlan` the call
+returns.
 
 Unlike the previous model, the loop **does** co-swap a non-exhausted bar: when
 one bar runs out, the other is swapped too if it has fallen below

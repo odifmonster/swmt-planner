@@ -6,8 +6,9 @@ from swmtplanner.support import HasID
 
 if TYPE_CHECKING:
     from swmtplanner.demand.rlsitem import RlsItem
+    from swmtplanner.demand.view import SafetyAwareView
 
-__all__ = ['WeeklyDemand', 'Order', 'SafetyAwareOrder', 'RawOrder']
+__all__ = ['WeeklyDemand', 'Order', 'SafetyAwareOrder', 'RawOrder', 'Safety']
 
 @dataclass(frozen=True)
 class WeeklyDemand:
@@ -31,6 +32,13 @@ class Order(HasID[str]):
     def is_fulfilled(self) -> bool: ...
 
 class SafetyAwareOrder(Order): ...
+
+class Safety(HasID[str]):
+    def __init__(self, rls_item: 'RlsItem', view: 'SafetyAwareView') -> None: ...
+    @property
+    def view(self) -> 'SafetyAwareView': ...
+    @property
+    def remaining_lbs(self) -> float: ...
 
 class RawOrder(Order):
     @property

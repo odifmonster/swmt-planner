@@ -396,12 +396,32 @@ the cases:
 - Cases 4, 7 (mid-roll swap / cascade): at least one roll straddles a
   re-thread and is backed by two `Knit`s.
 
+**`Roll.knits` provenance (every case above).** For each recorded `Roll`,
+assert `roll.knits` is exactly the `Knit` activity object(s) that wound it —
+in order and **by identity** (the same `Knit` instances that appear in
+`plan.activities`, not just equal values). A single-`Knit` roll holds a
+one-tuple; a swap-straddled roll (cases 4, 7) holds the two `Knit`s it was
+wound across, pre-swap then post-swap. Across the whole `Job`, concatenating
+every `Roll.knits` reproduces the loop's full `Knit` sequence in order, and no
+`Knit` is shared between two rolls (`Waste` / `Hanging` / `Threading` / `Doff`
+never appear in `knits`). The logical branches are already covered by the cases
+above; this adds the link assertion to each rather than new scenarios.
+
 ### 2.4 `start_at` mode behavior
+
+**`tgt_order` stamping (all modes).** The optional `tgt_order` argument is
+recorded on the **new-item `Job` only**. Pass a sentinel id and assert that
+`Job`'s `tgt_order` equals it; the `'next_runout'` run-up `Job` always carries
+`tgt_order=None` regardless of the argument. When `tgt_order` is omitted, the
+new-item `Job`'s `tgt_order` is `None`. `tgt_order` has no effect on the
+activity stream.
 
 1. `start_at='schedule_tail'`
     - the first emitted activity's `start == current_status.as_of`
     - no run-up activities of the current item
     - `plan.jobs` contains exactly one `Job` (the new item)
+    - that `Job`'s `tgt_order` equals the passed `tgt_order` argument (and is
+      `None` when omitted)
 2. `start_at='next_runout'`
     - run-up emits `Knit`/`Doff` pairs of `current_item` for **whole rolls
       only**, stopping before any roll the beams can't finish above the
@@ -416,6 +436,12 @@ the cases:
     - **two `Job`s produced**: a run-up `Job` of `current_item` (its whole
       rolls) followed by the new item's `Job`, in that order —
       `plan.jobs == (run_up_job, new_item_job)`
+    - **`tgt_order`**: the new-item `Job` carries the passed `tgt_order`; the
+      run-up `Job`'s `tgt_order` is `None`
+    - **run-up `Roll.knits`**: each run-up roll is a single uninterrupted
+      `Knit` (no beam work in the run-up), so every run-up `Roll`'s `knits` is
+      a one-tuple holding that roll's `Knit` (by identity, from
+      `plan.activities`)
     - two scenarios distinguished by **where the fresh beam is hung**:
         1. clean roll boundary — the previous item's beams hold an **exact**
            whole-roll multiple, so the last run-up roll drains the limiting
@@ -438,7 +464,13 @@ the cases:
       (`producible < tgt_wt`), so the run-up emits **nothing** (no `Knit`,
       no `Waste`) and creates no run-up `Job`
     - **one `Job` produced**: `plan.jobs` contains only the new item's
-      `Job`
+      `Job`, carrying the passed `tgt_order`
+4. `start_at='next_runout'` with `item == current_status.current_item`
+    - `plan_production` raises `ValueError` (the same-item guard): that mode
+      requires a real changeover, and the new item already matches the
+      machine's current item. The error is raised before any activity is
+      emitted. (`'schedule_tail'` mode has no such restriction — producing the
+      current item from the tail is covered by §2.2 case 1 / §2.4 case 1.)
 
 ### 2.5 Purity and commit
 
@@ -446,9 +478,12 @@ the cases:
    `jobs`, or the schedule tail
     - call twice with the same args; the two plans must be shape-equal on
       both halves — `plan.activities` (same types, item refs, `lbs`,
-      durations) and `plan.jobs` (same item refs, per-`Roll` `lbs` and
-      `completion_time` offsets) — allowing only auto-incremented activity
-      / job ids to differ
+      durations) and `plan.jobs` (same item refs, `tgt_order`, per-`Roll`
+      `lbs` / `completion_time` offsets, and per-`Roll` `knits` count and
+      shape) — allowing only auto-incremented activity / job ids to differ
+      (the two runs' `knits` reference each run's own fresh `Knit` instances,
+      so compare them positionally against that run's `plan.activities`, not
+      by identity across runs)
 2. After `add_activities(plan.activities)`, `current_status` matches the
    status computed by manually applying each activity in the plan
 3. After `add_jobs(plan.jobs)`, `machine.jobs` contains exactly those `Job`
@@ -577,6 +612,13 @@ guaranteed-empty bar as in the old drain-to-empty model. Verify:
 6. Run-up regression: the run-up itself emits only whole-roll `Knit`/`Doff`
    pairs of `current_item` — no `Waste`, no beam work; all leftover-yarn
    handling is the preamble's job
+
+These cases focus on the **activity-stream / preamble** shape. The `Job`-level
+provenance is unchanged from §2.4 and not re-asserted per case here: two `Job`s
+(`run_up_job`, `new_item_job`), the new-item `Job` carrying the passed
+`tgt_order` and the run-up `Job` `None`, and each `Roll.knits` holding the
+`Knit`(s) that wound it (run-up rolls one each). At least one §3.2 case should
+still assert these once to confirm they hold under a non-trivial changeover.
 
 ### 3.3 Changeover type and duration
 

@@ -4,7 +4,7 @@ from typing import Literal
 
 from swmtplanner.schedule import Activity, Job
 from swmtplanner.demand.order import RawOrder
-from swmtplanner.demand.rlsitem import CostComponents
+from swmtplanner.demand.rlsitem import CostComponents, RlsItem
 from swmtplanner.planners.infinite.costing import Costing
 from swmtplanner.planners.infinite.iterlog import (
     IterationLogRecord, build_iteration_log_record,
@@ -46,6 +46,7 @@ class PlanReport:
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple[RawOrder, ...]
+    rls_items: dict[str, RlsItem]
     iteration_log: tuple[IterationLogRecord, ...] | None = ...
     cost_detail: tuple[CostDetailRecord, ...] | None = ...
     lateness_detail: tuple[LatenessDetailRecord, ...] | None = ...

@@ -23,12 +23,14 @@ class RegularOrder:
     week_idx: int
     due_date: datetime
     lbs: float
+    order_id: str
 
 
 @dataclass(frozen=True)
 class SafetyOrder:
     item: Greige
     lbs: float
+    order_id: str
 
 
 @dataclass(frozen=True)

@@ -120,7 +120,72 @@ for every order it can reach.
 
 ### SafetyAwareView
 
-1. ~~Job allocation logic~~ (already covered)
+1. Job allocation logic (re-expanded — now also covers `roll_order_links`)
+
+    The bucketed distribution (bucket 1 cumulative-unfilled-earliest-first →
+    bucket 2 safety refill → bucket 3 later on-time orders → bucket 4 excess)
+    is exercised by the cases below. Each case asserts the per-order
+    `allocated_lbs` and `safety_pool` (as before) **and** the resolved
+    `roll_order_links`.
+
+    **Link rule under test.** `roll_order_links` holds one `(Roll, order_id)`
+    pair per *filled* roll — the **earliest** destination the roll reaches as
+    `recompute` walks the buckets (a demand `Order.id`, `P{week_idx}@{item_id}`,
+    for buckets 1 and 3; the `Safety.id`, `S@{item_id}`, for bucket 2).
+    `on_hand` carries no roll and excess-only rolls reach no order, so neither
+    produces a link; the demand→roll relation is one-to-many (one order, many
+    rolls; each roll → one order). Assert the **full** `roll_order_links`
+    tuple: the exact `(roll, order_id)` pairs in `recompute`'s processing order
+    (rolls sorted by `completion_time`), each `roll` being the object from the
+    job that produced it. Greige `AU2958G` (safety target 1400) gives ids
+    `P0@AU2958G`..`P3@AU2958G` and `S@AU2958G`.
+
+    Rolls in the new cases are each sized to land in exactly one bucket (the
+    real whole-roll model never straddles two orders), so every roll's first
+    destination is its only one.
+
+    1. Existing cases — all updated to also assert `roll_order_links`:
+        - no-jobs / on-hand-only cases → `roll_order_links` is empty (`on_hand`
+          carries no roll, so even a fully-allocating `on_hand` links nothing)
+        - the single-job cases (`..._weeks_0_and_1_before_safety`,
+          `..._late_to_all_orders...`) use one jumbo roll that spans several
+          orders; under the earliest-first rule its single link is to the
+          earliest order it touches (`P0@AU2958G` in both)
+    2. On-hand = wk0 + safety; incoming rolls fill the weekly demand on time
+       within the lead-time window
+        - `on_hand` = wk0 demand + 1400 safety, so it fills wk0 and tops up the
+          pool to target; **no roll touches safety**
+        - one roll per remaining week (wk1/wk2/wk3), each sized to that week's
+          demand and completing within `[due - lead_time, due]`
+        - links: each roll → its own week's order (`P1@`, `P2@`, `P3@`), in
+          time order; no `S@` link, no `on_hand` link; all cost trackers 0
+    3. On-hand = wk0; rolls before wk1's due date exceed wk1 demand + safety —
+       allocation priority is wk1 demand → safety → wk2 demand
+        - model with three rolls, all completing before wk1's due date, sized
+          to wk1 demand (bucket 1), the full 1400 safety (bucket 2), and wk2
+          demand (bucket 3) respectively
+        - links: `P1@` → `S@` → `P2@`, in that order
+    4. On-hand = wk0; rolls fill all demand on time; safety replenishment is
+       split between rolls in the wk1 and wk2 windows
+        - model with demand rolls (wk1/wk2/wk3, each → its order) plus two
+          safety rolls, one completing in the wk1 window and one in the wk2
+          window, that together top up the pool to target
+        - links: the wk1-window rolls → `P1@` and `S@`; the wk2-window rolls →
+          `P2@` and `S@`; the wk3 roll → `P3@` — confirming **two distinct
+          rolls link to `S@`**
+    5. On-hand = wk0; a roll before wk1's due fills wk1 + a full safety
+       top-up; no rolls between wk1 and wk2 (so the wk2 order drains the
+       pool); later rolls pay down wk2 (late) then fill wk3
+        - pre-drain rolls: wk1 demand → `P1@`, full safety top-up to target →
+          `S@`
+        - the wk2 drain event itself produces **no link** (demand draining, not
+          a roll); it drops the pool below target
+        - post-drain rolls (after wk2's due date): the earliest-unfilled rule
+          pays the still-open wk2 order first (`P2@`, late — this refunds the
+          safety the drain consumed, restoring the pool to target), then wk3
+          (`P3@`). No closing safety refill is needed — the wk2 refund already
+          restored the pool.
+        - links, in time order: `P1@`, `S@`, `P2@`, `P3@`
 2. Cost tracker calculations
     1. ~~Excess- and carry- only~~ (already covered)
     2. All zero case

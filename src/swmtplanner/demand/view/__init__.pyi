@@ -1,11 +1,13 @@
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from swmtplanner.demand.order import RawOrder, SafetyAwareOrder, WeeklyDemand
+from swmtplanner.demand.order import (
+    RawOrder, SafetyAwareOrder, WeeklyDemand, Safety,
+)
 
 if TYPE_CHECKING:
     from swmtplanner.demand.rlsitem import RlsItem
-    from swmtplanner.schedule import Job
+    from swmtplanner.schedule import Job, Roll
 
 __all__ = ['RawView', 'SafetyAwareView']
 
@@ -23,6 +25,10 @@ class SafetyAwareView:
     def __init__(self, rls_item: 'RlsItem', weekly_demand: list[WeeklyDemand]) -> None: ...
     @property
     def orders(self) -> tuple[SafetyAwareOrder, ...]: ...
+    @property
+    def safety(self) -> Safety: ...
+    @property
+    def roll_order_links(self) -> tuple[tuple['Roll', str], ...]: ...
     @property
     def safety_target(self) -> float: ...
     @property

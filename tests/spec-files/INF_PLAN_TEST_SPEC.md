@@ -349,6 +349,12 @@ records (modulo small float tolerance on `lbs`):
   zero `on_hand`, full demand) and call `register_jobs` to drive the
   RlsItem's views into the same target state.
 
+Each emitted order's `order_id` is also asserted — it is the demand-layer id
+the planner threads into `plan_production` as `tgt_order`, captured straight
+off the demand object rather than rebuilt: a `RegularOrder` carries the
+corresponding `SafetyAwareOrder.id` (`P{week_idx}@{item_id}`), a `SafetyOrder`
+the view's `Safety.id` (`S@{item_id}`).
+
 1. **Fully satisfied item** — no unmet weekly demand and safety pool
    at-or-above target. Output: `[]`.
 
@@ -439,6 +445,22 @@ records (modulo small float tolerance on `lbs`):
        hours - RUNNER_CHANGE_DURATION) / per_roll) × tgt_wt`. (The cap
        simulation idles from `as_of` to `next_runout` rather than running
        the current item, but the post-`next_runout` budget is the same.)
+3. **`'next_runout'` skipped for the machine's current item**
+   - Separate setup from §1.3.3.1/.2 (those are arranged so no decision point
+     is a `next_runout`). A machine is left mid-run on item `X` with partial
+     beams so its `next_runout` is in-window and distinct from `schedule_tail`,
+     and `X` itself has unmet demand (so `eligible_orders` emits a
+     `RegularOrder` for `X`). A second item `Y` the machine can run also has
+     unmet demand.
+   - `enumerate_candidates` must **not** emit the (`next_runout`, `X`-order)
+     candidate — `plan_production` rejects a same-item `next_runout`. The skip
+     is specific to the current item, not a blanket `next_runout` drop. Verify:
+       1. no candidate has `start_at == 'next_runout'` and `item == X`
+       2. the `schedule_tail` candidate for `X` on that machine **is** present
+          (continuing the current item is still enumerated)
+       3. a `next_runout` candidate for `Y` (a different in-window item the
+          machine can run) **is** present
+       4. `enumerate_candidates` returns normally — no `ValueError` escapes
 
 ### 1.4 Main loop
 
@@ -542,3 +564,11 @@ For any non-trivial scenario, verify:
    week_idx) pairs where the corresponding
    `safety_view.orders[week_idx].remaining_lbs > 0`, with matching
    lbs values. Pairs with `remaining_lbs == 0` are omitted.
+6. `report.rls_items[item_id]` is each item's `RlsItem` (the same object
+   `state.rls_items` holds), and its `on_hand_coverage` reflects the
+   initial on-hand allocation: for a scenario with positive `on_hand`,
+   the covered lbs per order id match the jobs=`[]` allocation (e.g.
+   `on_hand` filling week 0 then safety), and `demand - covered` gives
+   the remaining-after-on-hand the `demand` sheet reports. (Only the
+   `PlanReport` data is checked — the Excel rendering is verified by
+   running the program, not in unit tests.)

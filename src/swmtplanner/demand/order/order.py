@@ -9,6 +9,7 @@ from swmtplanner.support import HasID
 if TYPE_CHECKING:
     from swmtplanner.demand.rlsitem import RlsItem
     from swmtplanner.schedule import Job
+    from swmtplanner.demand.view import SafetyAwareView
 
 @dataclass(frozen=True)
 class WeeklyDemand:
@@ -91,3 +92,32 @@ class RawOrder(Order):
     @late_fill_date.setter
     def late_fill_date(self, value: datetime | None) -> None:
         self._late_fill_date = value
+
+class Safety(HasID[str]):
+    """The safety-stock replenishment "order" for one `SafetyAwareView`.
+    Not a week of demand — it stands in for "refill the pool toward
+    target," so a `Job` raised to replenish safety has a concrete order id
+    to target (`Job.tgt_order`) and so safety fills land in the view's
+    `roll_order_links` like any demand fill.
+
+    Very basic: it owns no quantity of its own, reading its requirement
+    (`remaining_lbs`) live from the `SafetyAwareView` it is attached to."""
+
+    def __init__(self, rls_item: 'RlsItem', view: 'SafetyAwareView') -> None:
+        self._id = f'S@{rls_item.item.id}'
+        self._view = view
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def view(self) -> 'SafetyAwareView':
+        return self._view
+
+    @property
+    def remaining_lbs(self) -> float:
+        """The safety pool's shortfall after the latest recompute:
+        `max(0, safety_target - safety_pool)`. Mirrors `Order.remaining_lbs`,
+        read live from the view."""
+        return max(0.0, self._view.safety_target - self._view.safety_pool)

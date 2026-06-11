@@ -29,18 +29,20 @@ pandas/numpy; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **316 tests, all passing** (`python -m unittest discover
-> -s tests -p '*_tests.py'`). Step 3 is fully landed — `src/` code *and*
-> tests + coverage specs all updated to the Step-3 model and committed. The
-> planner still prints `Total moves committed: N` debug lines to stdout
-> during the loop tests; that's an intentional source-side print the user
-> wants kept for now (harmless to the suite).
+> **Suite state:** **323 tests, all passing** (`python -m unittest discover
+> -s tests -p '*_tests.py'`). Step 3 is fully landed and committed. **Step 4
+> sub-step 1 (Job-related links + the `demand`/`xref` Excel tabs) is fully
+> landed across design, `src/` code, coverage specs, and tests on all three
+> layers — but is NOT yet committed** (sizable uncommitted diff in `src/` and
+> `tests/`). The planner still prints `Total moves committed: N` debug lines
+> to stdout during the loop tests; that's an intentional source-side print the
+> user wants kept for now (harmless to the suite).
 
 ## Preferred workflow
 
 For any significant change: **DESIGN.md first** (iterate over multiple turns,
 one section/concept per turn — the user reviews each before moving on), then
-**coverage spec**, then **code**, then **test code**, then run. Small,
+**code**, then **coverage spec**, then **test code**, then run. Small,
 reviewable diffs; don't sweep multiple subsystems at once. The user tolerates
 the docs/code being temporarily inconsistent across sections rather than a
 big sweep, and explicitly calls out which sections to do or skip. Surface
@@ -55,7 +57,7 @@ in doff time). Commits are the user's to make.
 | **1** | Separate production from schedule activities (`Job`/`Roll`, `ProductionPlan`) | ✅ complete + committed |
 | **2** | Runout logic (`BEAM_FLOOR_LBS`, mid-roll beam loads, max-waste, yarn `Waste`) | ✅ complete + committed |
 | **3** | Add `Doff`, split `BeamLoad`→`Hanging`/`Threading`, split changeover | ✅ complete + committed (design, `src/` code, tests + specs) |
-| **4** | Codebase-wide **debug mode** (`VerboseLog` threaded through; `Job`↔order/`Knit` links; itemized lateness/drainage/carrying cost events; HTML dashboard) | ⏸ pending (next up; #3 no longer blocks it) |
+| **4** | Codebase-wide **debug mode** (`VerboseLog` threaded through; `Job`↔order/`Knit` links; itemized lateness/drainage/carrying cost events; HTML dashboard) | 🔨 in progress — sub-step 1 complete (uncommitted); sub-steps 2–3 pending |
 
 A cross-cutting **`Status` accessor refactor** was also done during Step 3
 (see below) — it touched the same files and is committed alongside the
@@ -145,7 +147,7 @@ components). `Knit`/`Doff`/`Hanging`/`Threading` are **unweighted**.
 - Activity and `Job` string ids widened from **5-digit** to **8-digit**
   zero-padded counters (e.g. `KNIT00001` → `KNIT00000001`).
 
-### Step 4 — ⏸ pending (next up; Step 3 no longer blocks it)
+### Step 4 — 🔨 in progress (sub-step 1 complete, uncommitted)
 
 Step 4 has been **re-scoped** into a far-reaching refactor that gives the
 whole codebase a custom **"debug mode."** Instead of reconstructing the
@@ -182,12 +184,47 @@ and how each cost was incurred.
 
 **Sub-steps (do in order, DESIGN/spec-first each):**
 
-1. **Job-related links.** On the `Job` itself, add the link to its
-   **targeted order** and to its **component `Knit`s** (both known at
-   creation). The **actually-filled order** is resolved separately, by
-   priority, in the **`SafetyAwareView`** (which already tracks both jobs and
-   demand) — not stored on the `Job` at creation. Build both the creation-time
-   links and the view-side fill-resolution logic.
+1. **Job-related links. ✅ complete (uncommitted), 323 green** — including the
+   added Excel-output scope. What shipped (the design evolved from the original
+   sketch):
+   - **schedule** — `Job.tgt_order: str | None` (the order the caller
+     *targeted*, passed into `plan_production`; stamped on the new-item `Job`
+     only, run-up `Job` always `None`). Component `Knit`s live on **`Roll`**,
+     not `Job` (`Roll.knits` — collected per-roll at each `Doff`; a straddling
+     roll holds its two `Knit`s; a `Job`'s knits are the union of its rolls').
+     Added a guard: `plan_production` raises `ValueError` for `'next_runout'`
+     mode when `item == current_item` (no real changeover).
+   - **demand** — new very-basic **`Safety`** order class attached to a
+     `SafetyAwareView` (`id = S@{item}`, `remaining_lbs` reads the pool
+     shortfall live). `SafetyAwareView.recompute` now also builds
+     **`roll_order_links`** (read-only `tuple[tuple[Roll, str], ...]`): each
+     filled roll → the **earliest** order/safety it fills (first bucket
+     destination); `on_hand`/excess produce no link. Distribution math
+     unchanged (the chunk-crossing logic is harmless whole-roll leftover).
+   - **planner** — `RegularOrder` / `SafetyOrder` carry `order_id` (captured
+     straight off the demand order / `Safety`, never rebuilt);
+     `enumerate_candidates` threads it into `plan_production` as `tgt_order`
+     and **skips** `next_runout` pairings for the machine's current item (so
+     the new guard never fires at runtime).
+   - **Excel output (added scope — ✅ done).** `write_plan_report_xlsx` in
+     `planners/infinite/report.py` now writes **six** sheets (`demand`,
+     `schedule`, `production`, `xref`, `unmet_demand`, `late_orders`):
+     - **`demand`** — original input demand, one row per order (**regular and
+       safety**): `order_id`, `item`, `due_date` (blank for safety), `demand`
+       (regular = weekly `qty_lbs`; safety = `safety_target`), `covered_on_hand`,
+       `remaining`. On-hand coverage comes from **`RlsItem.on_hand_coverage`**
+       (a `dict[str,float]` keyed by order id, captured at construction from
+       the jobs=`[]` allocation).
+     - **`production`** gained a `tgt_order` column (`Job.tgt_order`, blank for
+       run-up jobs).
+     - **`xref`** — flat, one row per `Knit`: `item`, `job_id`, `roll_idx`,
+       `roll_completion`, `knit_id`, `knit_lbs`, `order_id` (the **resolved**
+       fill from `roll_order_links`, distinct from the job's aimed-at
+       `tgt_order`). Joins `Roll.knits` / `roll_order_links` / `Job.rolls`.
+     - **`PlanReport`** gained `rls_items: dict[str, RlsItem]` to feed both new
+       sheets. Output rendering is intentionally **not** unit-tested (verified
+       by running the program); only `on_hand_coverage` was added to the
+       PlanReport snapshot-fidelity test.
 2. **Verbose-logging methodology.** Introduce `VerboseLog` and thread it
    through the relevant methods; rework the detail-record classes so methods
    write events directly (including the itemized lateness/drainage/carrying
@@ -215,14 +252,20 @@ and how each cost was incurred.
 
 ## Next concrete action
 
-**Begin Step 4, sub-step 1 — Job-related links.** Start DESIGN-first: settle
-in DESIGN how a `Job` carries its targeted order and component `Knit`s at
-creation, and how the **`SafetyAwareView`** (which already tracks both jobs
-and demand) resolves the actually-filled order by priority — the fill-link is
-not on the `Job` at creation. This touches `schedule/job/` (the `Job`/`Roll`
-records) and the demand layer's `SafetyAwareView`. Settle the data model and
-linking rules before any code, then the coverage spec, then code, then tests.
+**First: commit sub-step 1** (links + the `demand`/`xref` Excel tabs together)
+— currently a sizable uncommitted diff across `src/` and `tests/`; 323 green.
 
-DESIGN/spec-first, narrow per turn (one section/concept), the user reviews
-each section. Sub-steps 2 (`VerboseLog` methodology + detail-record rewrite)
-and 3 (dashboard generator) follow once sub-step 1 lands.
+**Then begin Step 4, sub-step 2 — Verbose-logging methodology.** Introduce
+`VerboseLog` and thread it (as an optional kwarg) through the relevant methods
+— planner loop, costing, demand views, schedule emission — so each writes its
+own detail records directly instead of reconstructing the audit after the fact
+in `iterlog.py`/`report.py`. Rework the detail-record classes accordingly,
+including the itemized lateness/drainage/carrying event tables, and consolidate
+every detail counter that is 1-to-1 with `move_id` onto `move_id` (drop the
+separate `*_detail_id` counters for those tables). The sub-step-1 work this
+builds on: `roll_order_links` (demand-side fill resolution), `Job.tgt_order`,
+and `Roll.knits` provenance are all in place to feed the verbose log.
+
+DESIGN-first, narrow per turn (one section/concept), the user reviews each
+section, then code → coverage spec → tests. Sub-step 3 (dashboard generator)
+follows once sub-step 2 lands.

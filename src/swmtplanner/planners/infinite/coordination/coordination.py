@@ -28,20 +28,31 @@ class OrderKey:
 class RegularOrder:
     """The earliest week of unmet demand for an item, read from the
     item's safety-aware view. `due_date` drives the carrying-avoidance
-    idle calculation when this order is paired with a decision point."""
+    idle calculation when this order is paired with a decision point.
+
+    `order_id` is the id of the demand-layer `SafetyAwareOrder` this
+    order corresponds to (`P{week_idx}@{item.id}`), captured directly
+    from that order so it never has to be rebuilt. The enumerator threads
+    it into `Machine.plan_production` as `tgt_order`."""
     item: 'Greige'
     week_idx: int
     due_date: datetime
     lbs: float
+    order_id: str
 
 
 @dataclass(frozen=True)
 class SafetyOrder:
     """A request to top up an item's safety pool to its target. Safety
     fills don't accrue carrying cost in the demand view, so they're not
-    subject to carrying-avoidance idle."""
+    subject to carrying-avoidance idle.
+
+    `order_id` is the id of the safety view's `Safety` order
+    (`S@{item.id}`), captured directly from it; the enumerator threads it
+    into `Machine.plan_production` as `tgt_order`."""
     item: 'Greige'
     lbs: float
+    order_id: str
 
 
 # ----- Scoring context ----------------------------------------------------
@@ -112,6 +123,7 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
                     week_idx=order.week.week_idx,
                     due_date=order.week.due_date,
                     lbs=order.remaining_lbs,
+                    order_id=order.id,
                 ))
                 break
         # Safety: top-up if pool is below target.
@@ -119,7 +131,10 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
             rls.safety_view.safety_target - rls.safety_view.safety_pool
         )
         if safety_gap > 0:
-            out.append(SafetyOrder(item=rls.item, lbs=safety_gap))
+            out.append(SafetyOrder(
+                item=rls.item, lbs=safety_gap,
+                order_id=rls.safety_view.safety.id,
+            ))
     return out
 
 

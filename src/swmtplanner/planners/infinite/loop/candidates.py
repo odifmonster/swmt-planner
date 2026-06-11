@@ -82,6 +82,15 @@ def enumerate_candidates(state: State) -> list[Move]:
             if not order.item.can_run_on_mchn(dp.machine_id):
                 continue
 
+            # 'next_runout' means "finish the current item, then change to a
+            # different one." Pairing it with an order for the machine's
+            # *current* item is a no-op changeover that `plan_production`
+            # rejects (its same-item guard); the 'schedule_tail' point already
+            # covers continuing the current item.
+            if (dp.start_at == 'next_runout'
+                    and order.item == machine.current_status.current_item):
+                continue
+
             # Carrying-avoidance idle: regular orders idle to a target
             # `due_date - lead_time - margin`, where `margin` (default
             # 24h, configured on `State`) is an allowance under the
@@ -137,6 +146,7 @@ def enumerate_candidates(state: State) -> list[Move]:
                 order.item, lbs,
                 start_at=dp.start_at,
                 idle_for=idle_for,
+                tgt_order=order.order_id,
             )
 
             out.append(Move(

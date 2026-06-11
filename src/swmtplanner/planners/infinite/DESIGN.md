@@ -307,6 +307,7 @@ PlanReport
   # the planned schedule — the headline output of the planning tool
   schedules: dict[str, tuple[Activity, ...]]    # machine_id -> activities
   jobs_by_item: dict[str, tuple[Job, ...]]      # greige_id -> jobs registered
+  rls_items: dict[str, RlsItem]                 # greige_id -> RlsItem (the input demand + its post-plan views, incl. each safety view's roll_order_links); feeds the `demand` and `xref` sheets
   # final cost picture
   total_score: float
   cost_components_by_item: dict[str, CostComponents]
@@ -531,6 +532,13 @@ from the current `State`. The candidates are the Cartesian product of
 three axes — machine × decision point × eligible order — and each tuple
 becomes one `Move` with derived `lbs`, `start_at`, and `idle_for`.
 
+One pairing is dropped: a `next_runout` decision point is never paired with an
+order for the machine's **current** item. `next_runout` means "finish the
+current item, then change over to a different one," so with no item change
+`Machine.plan_production` rejects it (the same-item guard in the schedule
+design); the machine's `schedule_tail` point already covers continuing the
+current item.
+
 ### Per-machine decision points
 
 Every machine has up to two natural points in time at which new
@@ -564,6 +572,15 @@ Each `RlsItem` contributes at most two orders to the candidate set:
 
 An `RlsItem` whose demand is fully met *and* whose safety pool is at
 target contributes nothing to the candidate set.
+
+Each eligible order also carries the **id of the demand-layer order it
+corresponds to**, captured straight off the demand object at construction (so
+the id is never rebuilt from parts): the `SafetyAwareOrder.id`
+(`P{week_idx}@{item.id}`) for a regular order, the safety view's `Safety.id`
+(`S@{item.id}`) for a safety order. The enumerator threads this id into
+`Machine.plan_production` as `tgt_order`, so the resulting `Job` records which
+order the planner was targeting (the *actually-filled* order is resolved later
+in the demand layer — see the schedule and demand designs).
 
 ### Decision window
 
@@ -1022,13 +1039,56 @@ resolve against; its `holidays` must also be inlined.
 
 The CLI writes a single Excel workbook at
 `<output_dir>/knit_plan_<YYYYMMDD>.xlsx` where the YYYYMMDD is the
-resolved `start_date`. Four sheets:
+resolved `start_date`. Six sheets:
 
+- `demand` — the original input demand, one row per order across all
+  `rls_items`, **regular and safety**. Built from `PlanReport.rls_items`.
+  Columns:
+  - `order_id` — the demand-layer order id (`P{week_idx}@{item}` for a
+    regular order, `S@{item}` for a safety order)
+  - `item` — greige id
+  - `due_date` — the order's due date; **blank for safety orders** (a
+    safety replenishment has no due date)
+  - `demand` — the original ordered quantity: a regular order's weekly
+    `qty_lbs`, a safety order's `safety_target`
+  - `covered_on_hand` — lbs of this order met by the item's **initial
+    on-hand inventory**, from `RlsItem.on_hand_coverage` (the jobs=`[]`
+    allocation captured at construction — see the demand design)
+  - `remaining` — `demand - covered_on_hand`, the demand production must
+    still place after initial inventory
 - `schedule` — multi-indexed by `(machine, activity_id)`, every
   activity across all machines.
 - `production` — multi-indexed by `(item, job_id)`, one row per
-  committed `Job`: its `total_rolls`, `total_lbs`, and `completion`
-  (when the job finishes — its last roll's `completion_time`).
+  committed `Job`: its `total_rolls`, `total_lbs`, `completion`
+  (when the job finishes — its last roll's `completion_time`), and
+  `tgt_order` — the id of the order the job was raised to target
+  (`Job.tgt_order`), **blank** when the job targeted no specific order
+  (e.g. a `'next_runout'` run-up job).
+- `xref` — the roll/knit/order cross-reference: a flat table, **one row
+  per `Knit` activity** across every committed job (run-up and
+  production). Built from `PlanReport.rls_items` and the jobs they carry.
+  Columns:
+  - `item` — greige id
+  - `job_id` — the id of the job the knit's roll belongs to
+  - `roll_idx` — the roll's 0-based index within its job (a `Roll` has no
+    id of its own, so `(job_id, roll_idx)` identifies it)
+  - `roll_completion` — the roll's `completion_time`
+  - `knit_id` — the `Knit` activity's id
+  - `knit_lbs` — the lbs that `Knit` wound (a roll straddling a beam swap
+    has two knit rows whose `knit_lbs` sum to the roll's lbs)
+  - `order_id` — the order this roll **actually fills**, looked up from the
+    item's `safety_view.roll_order_links` by roll identity; **blank** when
+    the roll reached no order (its lbs went entirely to excess). Distinct
+    from the job's `tgt_order` on the `production` sheet (what the job
+    *aimed* at) — `xref` shows the resolved fill.
+
+  Construction: for each item, build a `{roll: order_id}` map (keyed by
+  roll identity) from that item's `safety_view.roll_order_links`; then walk
+  `jobs_by_item` → `Job.rolls` (enumerated for `roll_idx`) → `Roll.knits`,
+  emitting one row per knit and looking up the roll's order in the map.
+  Rows ordered by `(item, job completion, roll_idx, knit order within the
+  roll)`. Flat table (no MultiIndex) — `item`/`job_id`/`roll_idx` are plain
+  columns so each knit's full provenance reads on its own row.
 - `unmet_demand` — flat `(item, week_idx, unmet_lbs)`, one row per
   `safety_view.orders` entry with `remaining_lbs > 0`.
 - `late_orders` — flat `(item, week_idx, late_lbs, late_fill_date)`,

@@ -4,16 +4,19 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 from abc import abstractmethod
 
-from swmtplanner.demand.order import RawOrder, SafetyAwareOrder, WeeklyDemand
+from swmtplanner.demand.order import (
+    RawOrder, SafetyAwareOrder, WeeklyDemand, Safety,
+)
 
 if TYPE_CHECKING:
     from swmtplanner.demand.rlsitem import RlsItem
     from swmtplanner.demand.order import Order
-    from swmtplanner.schedule import Job
+    from swmtplanner.schedule import Job, Roll
 
 _SECONDS_PER_DAY = 86400.0
 
-_EventQty = tuple[Literal['chunk'], float] | tuple[Literal['drain'], 'Order']
+_EventQty = (tuple[Literal['chunk'], float, 'Roll | None']
+             | tuple[Literal['drain'], 'Order'])
 
 class RawView:
 
@@ -98,10 +101,27 @@ class SafetyAwareView:
         # holds the orders whose due_date has already passed in the sim.
         self._physical_pool: float = 0.0
         self._drained: set = set()
+        # Safety-replenishment "order" + resolved roll->order fill links.
+        self._safety = Safety(rls_item, self)
+        self._roll_order_links: list[tuple['Roll', str]] = []
+        # Transient: the roll awaiting its first fill-link during the current
+        # _distribute_chunk (None for the on_hand pseudo-roll, or once linked).
+        self._link_target: 'Roll | None' = None
 
     @property
     def orders(self) -> tuple[SafetyAwareOrder, ...]:
         return self._orders
+
+    @property
+    def safety(self) -> Safety:
+        return self._safety
+
+    @property
+    def roll_order_links(self) -> tuple[tuple['Roll', str], ...]:
+        """Resolved (roll, order-id) fill links from the latest recompute —
+        one per filled roll, the earliest order it fills. See "Roll → order
+        fill links" in DESIGN.md."""
+        return tuple(self._roll_order_links)
 
     @property
     def safety_target(self) -> float:
@@ -140,6 +160,8 @@ class SafetyAwareView:
         self._drainage = 0.0
         self._physical_pool = 0.0
         self._drained.clear()
+        self._roll_order_links = []
+        self._link_target = None
 
         first_due = self._orders[0].week.due_date
         last_due = self._orders[-1].week.due_date
@@ -150,10 +172,12 @@ class SafetyAwareView:
         # Each Job expands into one chunk per `Roll` via `Job.rolls` so the
         # drainage sim sees fabric arriving as rolls come off the machine.
         # A Job with no rolls contributes nothing.
-        events: list[tuple[datetime, int, _EventQty]] = [(first_due, 0, ('chunk', on_hand))]
+        events: list[tuple[datetime, int, _EventQty]] = [
+            (first_due, 0, ('chunk', on_hand, None))
+        ]
         for j in jobs:
             events.extend(
-                (roll.completion_time, 0, ('chunk', roll.lbs))
+                (roll.completion_time, 0, ('chunk', roll.lbs, roll))
                 for roll in j.rolls
             )
         events.extend(
@@ -176,11 +200,11 @@ class SafetyAwareView:
                 deficit = self.safety_target - max(0.0, self._physical_pool)
                 self._drainage += deficit * duration_days
 
-            kind, payload = ev
-            if kind == 'chunk':
-                self._distribute_chunk(t, payload)
+            if ev[0] == 'chunk':
+                _, available, roll = ev
+                self._distribute_chunk(t, available, roll)
             else:  # 'drain'
-                order = payload
+                order = ev[1]
                 gap = max(0.0, order.week.qty_lbs - order.allocated_lbs)
                 self._physical_pool -= gap
                 self._drained.add(order)
@@ -192,7 +216,17 @@ class SafetyAwareView:
             deficit = self.safety_target - max(0.0, self._physical_pool)
             self._drainage += deficit * duration_days
 
-    def _distribute_chunk(self, avail_time: datetime, available: float) -> None:
+    def _distribute_chunk(
+        self, avail_time: datetime, available: float,
+        roll: 'Roll | None' = None,
+    ) -> None:
+        # Record the first destination this roll's lbs reach as its fill-link
+        # (see "Roll → order fill links" in DESIGN.md). The on_hand pseudo-roll
+        # has no Roll, so it never links. `_fill_orders` / `_refill_safety`
+        # consume `_link_target` on their first positive take, so any later
+        # destination for the same roll is left unlinked.
+        self._link_target = roll
+
         # Find earliest on-time order (smallest index whose due_date >= avail_time).
         on_time_idx: int | None = None
         for i, order in enumerate(self._orders):
@@ -245,6 +279,7 @@ class SafetyAwareView:
             take = min(order.remaining_lbs, available)
             order.allocated_lbs += take
             if take > 0:
+                self._link_roll(order.id)
                 # Late fills (bucket 1 lbs going to an order that has already
                 # drained) refund the safety that covered the order earlier.
                 if order in self._drained:
@@ -261,6 +296,16 @@ class SafetyAwareView:
             return 0.0
         room = max(0.0, self.safety_target - self._safety_pool)
         take = min(room, available)
+        if take > 0:
+            self._link_roll(self._safety.id)
         self._safety_pool += take
         self._physical_pool += take
         return available - take
+
+    def _link_roll(self, order_id: str) -> None:
+        """Record the current chunk's roll as filling `order_id` — but only
+        the first destination it reaches (and never the on_hand pseudo-roll).
+        Consumes `_link_target` so later buckets for the same roll no-op."""
+        if self._link_target is not None:
+            self._roll_order_links.append((self._link_target, order_id))
+            self._link_target = None

@@ -3,6 +3,7 @@ from datetime import datetime
 
 from swmtplanner.support import HasID
 from swmtplanner.products import Greige
+from swmtplanner.schedule.activity import Knit
 
 __all__ = ['Roll', 'Job']
 
@@ -11,6 +12,7 @@ __all__ = ['Roll', 'Job']
 class Roll:
     lbs: float
     completion_time: datetime
+    knits: tuple[Knit, ...] = ...
 
 
 @dataclass(frozen=True)

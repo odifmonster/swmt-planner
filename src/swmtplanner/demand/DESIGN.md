@@ -92,6 +92,26 @@ FulfillmentView (abstract)
     drainage                       # linear lb-day scalar
     carrying                       # linear lb-day scalar
     excess                         # linear lbs scalar
+    safety: Safety                 # this view's safety-replenishment "order"
+    roll_order_links               # read-only tuple[tuple[Roll, str], ...] —
+                                   # one (roll, order-id) link per filled roll
+                                   # (earliest order it fills), rebuilt by
+                                   # recompute (see "Roll → order fill links")
+
+Safety (HasID)          # the safety-stock replenishment "order" for one
+                        # SafetyAwareView. Not a week of demand — it stands in
+                        # for "refill the pool toward target" so a Job raised to
+                        # replenish safety has a concrete order id to target
+                        # (Job.tgt_order) and so safety fills land in
+                        # roll_order_links like any demand fill. Very basic: it
+                        # owns no qty of its own, reading its requirement live
+                        # from the view it is attached to.
+  view: SafetyAwareView           # back-reference; the view it reads from
+  id: str                         # f'S@{rls_item.item.id}'
+  remaining_lbs                   # read-through: max(0, view.safety_target -
+                                  # view.safety_pool) — the pool's shortfall
+                                  # after the latest recompute (mirrors
+                                  # Order.remaining_lbs)
 
 RlsItem (HasID)
   start_date, greige, on_hand_lbs, lead_time
@@ -251,6 +271,50 @@ This is the key non-obvious behavior:
 This is what tells the scheduler "you still need to plan to produce this,
 even though reality would limp through on safety."
 
+## Roll → order fill links
+
+The safety view is the only place that knows which order each produced roll
+*actually* fills, because that depends on priority across all jobs and demand —
+not on anything knowable when the `Job` was created. (`Job.tgt_order` records
+only the order the caller was *aiming* at.) As `recompute` distributes each
+roll, it records the resolved mapping in `roll_order_links` — a list of
+`(Roll, order_id)` pairs, rebuilt from scratch on every `recompute` and exposed
+read-only as a tuple.
+
+**Each roll links to exactly one order: the earliest it fills.** All demand is
+in whole-roll multiples, so a single roll cannot straddle two orders — it
+satisfies (part of) exactly one. The demand→roll relationship is therefore
+**one-to-many**: an order is filled by many rolls, but each roll fills one
+order. So the link is recorded once per roll — the **first** destination that
+takes a positive amount from it as `recompute` walks its buckets:
+
+- bucket 1 / bucket 3 → the filled `Order`'s id;
+- bucket 2 → the view's `Safety.id` — this is why the `Safety` order exists, so
+  safety replenishment has a concrete id to link to;
+- bucket 4 (excess) and the `on_hand` pseudo-roll have no order id, so a roll
+  that reaches only those produces **no link**.
+
+"Earliest" means earliest in `recompute`'s application order, not by due date —
+safety replenishment has no due date, but a roll counts as filling safety
+"earlier" than some order if bucket 2 took it before that order did. Once a
+roll's first destination is recorded, later destinations for the same roll are
+ignored.
+
+> `recompute`'s chunk distribution still contains the logic that lets one chunk
+> cross multiple orders — leftover from an earlier iteration that did not work
+> in whole rolls. It is harmless under the whole-roll rule (the crossing never
+> triggers) and is left in place in case the rule is relaxed later, so this step
+> makes **no substantive change to the distribution math** — it only records the
+> first destination per roll. To carry the `Roll` through, each chunk event
+> holds its source `Roll` (the `on_hand` pseudo-chunk holds none); a bucket fill
+> records the link the first time it takes a positive amount for a roll-backed
+> chunk that is not yet linked.
+
+`Safety.remaining_lbs` reads through to `max(0, safety_target - safety_pool)`
+after the latest recompute — the same shortfall that feeds
+`RlsItem.replenishment_need_lbs` — so a job can target it and know how much is
+still owed.
+
 ## RlsItem aggregates
 
 Derived from the two views and the job list:
@@ -263,6 +327,16 @@ Derived from the two views and the job list:
 - `replenishment_need_lbs` — sum of `safety_view.orders[i].remaining_lbs`
   plus any safety shortfall at horizon end. This is "what the scheduler still
   has to place."
+- `on_hand_coverage` — `dict[str, float]` mapping each order id to the lbs of
+  that order met by the item's **initial on-hand inventory** alone (no jobs):
+  every regular order's `Order.id` → its `allocated_lbs`, plus the safety
+  view's `Safety.id` → its `safety_pool`. It is **captured once at
+  construction** — the views are already primed there with the jobs=`[]` +
+  `on_hand` allocation, so this is exactly that snapshot, taken before any
+  `register_jobs`; later registrations don't change it. The reporting layer
+  uses it (with each order's original quantity) to show, per order, demand /
+  covered-by-on-hand / remaining-after-on-hand. A frozen view of initial
+  inventory, distinct from the live, job-dependent aggregates above.
 - No `total_cost` here. Cost components are exposed separately via the views
   and via `cost_if`; the scheduler combines them.
 

@@ -53,6 +53,17 @@ class RlsItem(HasID[str]):
         # change between its pre- and post-recompute snapshots.
         self._recompute_views()
 
+        # Snapshot what initial on-hand inventory covers, while the views are
+        # primed against the empty job list (jobs=[] + on_hand). Keyed by order
+        # id: each regular order -> its allocated_lbs, plus the safety order ->
+        # the safety_pool. Immutable; later register_jobs don't change it.
+        self._on_hand_coverage: dict[str, float] = {
+            o.id: o.allocated_lbs for o in self._safety_view.orders
+        }
+        self._on_hand_coverage[self._safety_view.safety.id] = (
+            self._safety_view.safety_pool
+        )
+
     @property
     def id(self) -> str:
         return self._id
@@ -104,6 +115,14 @@ class RlsItem(HasID[str]):
         # Fast scalar over the whole job list; the safety view's `excess`
         # tracker is the authoritative penalty quantity.
         return max(0.0, self.scheduled_lbs - self.total_demand_lbs)
+
+    @property
+    def on_hand_coverage(self) -> dict[str, float]:
+        """Per-order lbs met by initial on-hand inventory alone (no jobs),
+        keyed by order id — each regular `Order.id` plus the `Safety.id`.
+        Captured at construction from the jobs=`[]` allocation; unaffected by
+        later `register_jobs`. Returns a fresh copy."""
+        return dict(self._on_hand_coverage)
 
     @property
     def replenishment_need_lbs(self) -> float:
