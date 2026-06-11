@@ -55,7 +55,7 @@ in doff time). Commits are the user's to make.
 | **1** | Separate production from schedule activities (`Job`/`Roll`, `ProductionPlan`) | ✅ complete + committed |
 | **2** | Runout logic (`BEAM_FLOOR_LBS`, mid-roll beam loads, max-waste, yarn `Waste`) | ✅ complete + committed |
 | **3** | Add `Doff`, split `BeamLoad`→`Hanging`/`Threading`, split changeover | ✅ complete + committed (design, `src/` code, tests + specs) |
-| **4** | Expand verbose audit (more FK links, consolidate `*_detail_id`, log all candidates) | ⏸ pending (next up; #3 no longer blocks it) |
+| **4** | Codebase-wide **debug mode** (`VerboseLog` threaded through; `Job`↔order/`Knit` links; itemized lateness/drainage/carrying cost events; HTML dashboard) | ⏸ pending (next up; #3 no longer blocks it) |
 
 A cross-cutting **`Status` accessor refactor** was also done during Step 3
 (see below) — it touched the same files and is committed alongside the
@@ -137,12 +137,65 @@ components). `Knit`/`Doff`/`Hanging`/`Threading` are **unweighted**.
 `"top 40D BLACK 1000X4 (2800 lbs), btm 60D WHITE 1000X4 (1800 lbs)"`),
 `Threading` shows the bar(s), `Doff` is blank.
 
+**Post-Step-3 fixes (committed, suite still green at 316):**
+- The float tolerance that `machine.py` uses in `plan_production` is now also
+  applied in `status.py`'s `_removed` predicate — a bar the planner treated as
+  exhausted (sitting a hair above the floor by float drift) no longer raises
+  on the paired `Hanging`'s remove→hang guard.
+- Activity and `Job` string ids widened from **5-digit** to **8-digit**
+  zero-padded counters (e.g. `KNIT00001` → `KNIT00000001`).
+
 ### Step 4 — ⏸ pending (next up; Step 3 no longer blocks it)
 
-More FK links across the verbose detail tables; consolidate the five
-`*_detail_id` counters to key off `move_id`; possibly a job→activity link
-for a true knit-start; expand the iteration log to log **all** considered
-candidates (remove the 16-row truncation).
+Step 4 has been **re-scoped** into a far-reaching refactor that gives the
+whole codebase a custom **"debug mode."** Instead of reconstructing the
+verbose audit after the fact in `iterlog.py`/`report.py`, every relevant
+method gains an **optional `VerboseLog` keyword argument** and writes detail
+records straight into the log as it runs (a no-op when the log is absent).
+The payoff is a dashboard that makes it obvious *why* an order was scheduled
+and how each cost was incurred.
+
+**Key new concepts:**
+
+- **`VerboseLog` threaded through the code.** An optional kwarg on the
+  relevant methods (planner loop, costing, demand views, schedule emission,
+  …); when present, the method appends its own detail records directly. When
+  absent, behavior is unchanged and nothing is logged.
+- **Full `Job` provenance.** At creation a `Job` carries (1) the order it
+  **originally targeted** and (2) its **component `Knit` objects** — so it
+  traces back to the knits that produced it. The **highest-priority order it
+  actually fills** can't be known when the `Job` is created, so it is **not**
+  stored on the `Job`. The **`SafetyAwareView`** is the natural home for the
+  job→demand fill-link — it already tracks both the jobs and the
+  orders/demand — resolving it by priority.
+- **Itemized cost events.** The inventory- and priority-side cost breakdowns
+  stop being opaque scalars: they expose the actual **days/lbs late**, backed
+  by a **complete table of cost-carrying events** for `lateness`, `drainage`,
+  and `carrying`.
+- **HTML dashboard, two modes.** A generator renders the logged detail into
+  an HTML dashboard shipped with the verbose log:
+  - a **raw / debug mode** — direct access to the source-data tables with the
+    foreign/primary-key links surfaced for inspection;
+  - a **user-friendly mode** — starts from the schedule by machine and drills
+    down (machine → its jobs/activities → the order each job fills → the cost
+    breakdown) through nicely-formatted views.
+
+**Sub-steps (do in order, DESIGN/spec-first each):**
+
+1. **Job-related links.** On the `Job` itself, add the link to its
+   **targeted order** and to its **component `Knit`s** (both known at
+   creation). The **actually-filled order** is resolved separately, by
+   priority, in the **`SafetyAwareView`** (which already tracks both jobs and
+   demand) — not stored on the `Job` at creation. Build both the creation-time
+   links and the view-side fill-resolution logic.
+2. **Verbose-logging methodology.** Introduce `VerboseLog` and thread it
+   through the relevant methods; rework the detail-record classes so methods
+   write events directly (including the itemized lateness/drainage/carrying
+   event tables). Replaces the current after-the-fact reconstruction.
+   Consolidate every detail counter that is 1-to-1 with `move_id` onto
+   `move_id` (drop the separate `*_detail_id` counters for those tables).
+3. **Dashboard generator.** Write the script that renders the logged detail
+   into the HTML dashboard.
 
 ### Step-3 tests — ✅ done (record of what was reworked)
 
@@ -162,14 +215,14 @@ candidates (remove the 16-row truncation).
 
 ## Next concrete action
 
-**Step 4 — expand the verbose audit** (no longer blocked). From the Step-4
-scope: more FK links across the verbose detail tables; consolidate the five
-`*_detail_id` counters to key off `move_id`; possibly a job→activity link for
-a true knit-start; and expand the iteration log to log **all** considered
-candidates (remove the 16-row truncation). This is the `planners/infinite/`
-verbose-log layer (`iterlog.py`, `report.py`) — dev-facing output, not the
-end product.
+**Begin Step 4, sub-step 1 — Job-related links.** Start DESIGN-first: settle
+in DESIGN how a `Job` carries its targeted order and component `Knit`s at
+creation, and how the **`SafetyAwareView`** (which already tracks both jobs
+and demand) resolves the actually-filled order by priority — the fill-link is
+not on the `Job` at creation. This touches `schedule/job/` (the `Job`/`Roll`
+records) and the demand layer's `SafetyAwareView`. Settle the data model and
+linking rules before any code, then the coverage spec, then code, then tests.
 
-DESIGN/spec-first, narrow per turn; the user reviews each section. Start by
-bringing `planners/infinite/DESIGN.md` to the Step-4 model before touching
-code.
+DESIGN/spec-first, narrow per turn (one section/concept), the user reviews
+each section. Sub-steps 2 (`VerboseLog` methodology + detail-record rewrite)
+and 3 (dashboard generator) follow once sub-step 1 lands.

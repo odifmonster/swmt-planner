@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 Bar = Literal['top', 'btm']
 
 
+_FLOAT_EPS = 1e-6
+
+
 @dataclass(frozen=True)
 class _BarState:
     """Per-bar slice of a `Status`: the mounted beam, its remaining lbs, and
@@ -97,7 +100,7 @@ class Status:
         """A bar is 'removed' (old set gone or spent, ready to hang) when its
         beam has been taken off (`beam(bar) is None`, via TapeOut/Waste) or
         knit down to the floor (`lbs_remaining(bar) <= BEAM_FLOOR_LBS`)."""
-        return self.beam(bar) is None or self.lbs_remaining(bar) <= BEAM_FLOOR_LBS
+        return self.beam(bar) is None or self.lbs_remaining(bar) <= BEAM_FLOOR_LBS + _FLOAT_EPS
 
     def _hung(self, bar: Bar) -> bool:
         """A bar is 'hung' (a fresh set loaded but not yet threaded) when it is

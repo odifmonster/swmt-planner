@@ -89,7 +89,7 @@ class Knit(Activity):
 
     @property
     def id(self) -> str:
-        return f'KNIT{self._count:05}'
+        return f'KNIT{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ class Waste(Activity):
 
     @property
     def id(self) -> str:
-        return f'WASTE{self._count:05}'
+        return f'WASTE{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ class Doff(Activity):
 
     @property
     def id(self) -> str:
-        return f'DOFF{self._count:05}'
+        return f'DOFF{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -148,7 +148,7 @@ class TapeOut(Activity):
 
     @property
     def id(self) -> str:
-        return f'TAPEOUT{self._count:05}'
+        return f'TAPEOUT{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -168,7 +168,7 @@ class Hanging(Activity):
 
     @property
     def id(self) -> str:
-        return f'HANGING{self._count:05}'
+        return f'HANGING{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -182,7 +182,7 @@ class Threading(Activity):
 
     @property
     def id(self) -> str:
-        return f'THREADING{self._count:05}'
+        return f'THREADING{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -197,7 +197,7 @@ class StyleChange(Activity):
 
     @property
     def id(self) -> str:
-        return f'STYLECHANGE{self._count:05}'
+        return f'STYLECHANGE{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -210,7 +210,7 @@ class RunnerChange(Activity):
 
     @property
     def id(self) -> str:
-        return f'RUNNERCHANGE{self._count:05}'
+        return f'RUNNERCHANGE{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -223,7 +223,7 @@ class PatternChange(Activity):
 
     @property
     def id(self) -> str:
-        return f'PATTERNCHANGE{self._count:05}'
+        return f'PATTERNCHANGE{self._count:08}'
 
 
 @dataclass(frozen=True)
@@ -235,4 +235,4 @@ class Idle(Activity):
 
     @property
     def id(self) -> str:
-        return f'IDLE{self._count:05}'
+        return f'IDLE{self._count:08}'

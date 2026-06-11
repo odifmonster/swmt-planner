@@ -49,7 +49,7 @@ class Job(HasID[str]):
 
     @property
     def id(self) -> str:
-        return f'JOB{self._count:05}'
+        return f'JOB{self._count:08}'
 
     @property
     def total_rolls(self) -> int:
