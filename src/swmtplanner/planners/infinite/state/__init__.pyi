@@ -18,6 +18,7 @@ class Move:
     idle_for: timedelta
     plan: ProductionPlan
     week_idx: int | None = ...
+    order_remaining_lbs: float = ...
 
 
 @dataclass

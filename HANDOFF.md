@@ -225,14 +225,46 @@ and how each cost was incurred.
        sheets. Output rendering is intentionally **not** unit-tested (verified
        by running the program); only `on_hand_coverage` was added to the
        PlanReport snapshot-fidelity test.
-2. **Verbose-logging methodology.** Introduce `VerboseLog` and thread it
-   through the relevant methods; rework the detail-record classes so methods
-   write events directly (including the itemized lateness/drainage/carrying
-   event tables). Replaces the current after-the-fact reconstruction.
-   Consolidate every detail counter that is 1-to-1 with `move_id` onto
-   `move_id` (drop the separate `*_detail_id` counters for those tables).
-3. **Dashboard generator.** Write the script that renders the logged detail
-   into the HTML dashboard.
+2. **`DebugLog` + dashboard — new top-level `swmtplanner.debuglog` module.**
+   The original sub-steps 2 (verbose-logging methodology) and 3 (dashboard
+   generator) are now realized here. `DebugLog` is a generic, config-driven
+   table container (no hard-coded schema), so it lives at the top level rather
+   than under `planners/infinite/`. It is the renamed `VerboseLog`:
+   an optional object threaded (kwarg) through the planner loop / costing /
+   demand views / schedule emission, which each populate as they run; it will
+   subsume the after-the-fact reconstruction in `iterlog.py` / the `*_detail`
+   machinery on `PlanReport`. Built over **four phases** — each gets its own
+   DESIGN → code → coverage spec → tests when it begins (see
+   `debuglog/DESIGN.md`).
+
+   **Groundwork — divorce the old verbose path. ✅ done (uncommitted).** Before
+   layering the new code in, the existing verbose-logging build path was cut
+   from the live planner so the old structures stay referenceable without
+   tangling: `plan()`'s `verbose` branch (accumulators/counters/
+   `build_candidate_records`) is removed and the param is now **inert**;
+   `_build_report` no longer attaches the `*_detail` tuples (always `None`);
+   the CLI keeps `--verbose` but it's a **no-op**. **Kept untouched as
+   reference:** `iterlog.py` (record types + builders), `report.py`'s verbose
+   dataframe builders + `write_verbose_log_tsvs` + `write_dashboard_html` (now
+   uncalled), and `costing.py`'s `cost_breakdown*` methods. 323 green.
+
+   - **Phase 1 — simplified iteration log + cost summary. ⏸ next.** `DebugLog`
+     carries just two tables: a **simplified `IterationLog`** (one row per
+     scored candidate per iteration) and a **`CostSummary`**. Chosen because
+     both are built **live as the loop runs** (unlike the output tables, built
+     post-hoc), so they actually exercise the pass-the-object-and-write
+     mechanic this phase exists to validate. No dashboard; iteration log
+     deliberately simplified (schema refined later).
+   - **Phase 2 — remaining tables (cost detail + output). ⏸ pending.** Add the
+     cost detail tables for **inventory**, **schedule**, and **priority** (and
+     expand the iteration log if needed), plus the output tables the regular
+     Excel workbook produces (`demand`, `schedule`, `production`, `xref`,
+     `unmet_demand`, `late_orders`) as **flat (no MultiIndex)** tables —
+     deferred here because they're built at the end, not live.
+   - **Phase 3 — raw dashboard. ⏸ pending.** Render the tables directly as
+     HTML with foreign-key links surfaced (debug view only, no drill-down).
+   - **Phase 4 — full dashboard. ⏸ pending.** Add the user-friendly
+     machine→jobs→order→cost drill-down alongside the raw view.
 
 ### Step-3 tests — ✅ done (record of what was reworked)
 
@@ -252,20 +284,30 @@ and how each cost was incurred.
 
 ## Next concrete action
 
-**First: commit sub-step 1** (links + the `demand`/`xref` Excel tabs together)
-— currently a sizable uncommitted diff across `src/` and `tests/`; 323 green.
+**First: commit the uncommitted work** — now two logical changes (consider
+separate commits): (a) sub-step 1 (links + the `demand`/`xref` Excel tabs),
+and (b) the sub-step-2 groundwork (divorcing the old verbose path; see the
+sub-step-2 "Groundwork" note above). Sizable diff across `src/` and `tests/`;
+323 green.
 
-**Then begin Step 4, sub-step 2 — Verbose-logging methodology.** Introduce
-`VerboseLog` and thread it (as an optional kwarg) through the relevant methods
-— planner loop, costing, demand views, schedule emission — so each writes its
-own detail records directly instead of reconstructing the audit after the fact
-in `iterlog.py`/`report.py`. Rework the detail-record classes accordingly,
-including the itemized lateness/drainage/carrying event tables, and consolidate
-every detail counter that is 1-to-1 with `move_id` onto `move_id` (drop the
-separate `*_detail_id` counters for those tables). The sub-step-1 work this
-builds on: `roll_order_links` (demand-side fill resolution), `Job.tgt_order`,
-and `Roll.knits` provenance are all in place to feed the verbose log.
+**Continue sub-step 2 — `debuglog` Phase 1 (simplified iteration log + cost
+summary).** Phase 1 is **designed in full** (`swmtplanner/debuglog/DESIGN.md`):
+the generic `DebugLog` API (`DebugLog(**tables)` of `(col, default)` tuples ·
+`set_pk(table, col, ctr_name=None)` · `set_fk(table, col, foreign_table,
+foreign_column)` · `add_row` → PK · `get_last_pk_val(table)` · `update_row(table,
+pk_val, **kwargs)` · `get_df(table, **kwargs)`), the `iteration_log` /
+`cost_summary` schemas, and the single-pass population flow.
+
+**Code status:** the `DebugLog` **schema construction** is implemented —
+`__init__`, `set_pk`, `set_fk` in `swmtplanner/debuglog/debuglog.py` (323
+green). **Remaining for Phase 1:** the row methods (`add_row`,
+`get_last_pk_val`, `update_row`, `get_df`), then wiring — thread the optional
+`debuglog` kwarg through `plan` (score + rank the full candidate list, write
+`iteration_log`, patch rank/role via `update_row`) and `Costing.score_after_move`
+(build `cost_summary`, reading the id via `get_last_pk_val`). Then coverage
+spec → tests.
 
 DESIGN-first, narrow per turn (one section/concept), the user reviews each
-section, then code → coverage spec → tests. Sub-step 3 (dashboard generator)
-follows once sub-step 2 lands.
+section, then code → coverage spec → tests. Phases 2–4 (cost detail + output
+tables, raw dashboard, full dashboard) follow in order, each designed when it
+begins — see `swmtplanner/debuglog/DESIGN.md`.

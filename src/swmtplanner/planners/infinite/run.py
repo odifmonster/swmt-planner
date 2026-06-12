@@ -28,9 +28,10 @@ from .costing import (
     Costing, load_weights, weights_from_dict,
 )
 from .loop import plan
-from .report import (
-    write_plan_report_xlsx, write_verbose_log_tsvs, write_dashboard_html,
-)
+# NOTE: `write_verbose_log_tsvs` / `write_dashboard_html` still live in
+# `report.py` (kept for reference) but are no longer wired in — the verbose
+# log/dashboard build path is divorced pending the `debuglog/` rework.
+from .report import write_plan_report_xlsx
 from .state import State
 
 
@@ -175,7 +176,7 @@ def run(
     costing = Costing(cost_weights)
 
     typer.echo('Running planner...')
-    report = plan(state, costing, verbose=verbose)
+    report = plan(state, costing)
     typer.echo(f'  total_score: {report.total_score:.2f}')
     typer.echo(
         f'  unmet (item, week) pairs: '
@@ -194,31 +195,15 @@ def run(
     write_plan_report_xlsx(report, output_path)
 
     if verbose:
-        log_dir = (
-            output_dir / f'verbose_{sd.strftime("%Y%m%d")}'
+        # The verbose log / dashboard build path has been divorced from the
+        # planner pending the `debuglog/` rework (see debuglog/DESIGN.md).
+        # The flag is kept so existing invocations don't break, but for now
+        # it does nothing. The old writers (`write_verbose_log_tsvs`,
+        # `write_dashboard_html`) remain in `report.py` for reference.
+        typer.echo(
+            '  (--verbose is currently a no-op — verbose logging is being '
+            'reworked into the debuglog submodule)'
         )
-        idx = 1
-        while log_dir.exists():
-            idx += 1
-            log_dir = (
-                output_dir
-                / f'verbose_{sd.strftime("%Y%m%d")}_{idx}'
-            )
-        typer.echo(f'Writing verbose log to {log_dir}/')
-        write_verbose_log_tsvs(report, log_dir)
-
-        dashboard_path = (
-            output_dir / f'dashboard_{sd.strftime("%Y%m%d")}.html'
-        )
-        idx = 1
-        while dashboard_path.exists():
-            idx += 1
-            dashboard_path = (
-                output_dir
-                / f'dashboard_{sd.strftime("%Y%m%d")}_{idx}.html'
-            )
-        typer.echo(f'Writing dashboard to {dashboard_path}')
-        write_dashboard_html(report, dashboard_path)
 
     typer.echo('Done.')
 

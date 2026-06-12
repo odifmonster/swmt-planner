@@ -28,7 +28,12 @@ class Move:
     `None` for safety-replenishment moves. The cost layer uses it to
     form the `OrderKey` for priority-cost lookup; defaults to `None`
     so directly-constructed `Move`s in tests don't have to set it
-    when priority weights are zero."""
+    when priority weights are zero.
+
+    `order_remaining_lbs` is the unfulfilled lbs on the targeted order at
+    enumeration time (the eligible `RegularOrder.lbs` / `SafetyOrder.lbs`).
+    Carried for the debug log's `iteration_log`; defaults to `0.0` so
+    directly-constructed `Move`s in tests don't have to set it."""
     machine_id: str
     item: 'Greige'
     lbs: float
@@ -36,6 +41,7 @@ class Move:
     idle_for: timedelta
     plan: ProductionPlan
     week_idx: int | None = None
+    order_remaining_lbs: float = 0.0
 
 
 @dataclass

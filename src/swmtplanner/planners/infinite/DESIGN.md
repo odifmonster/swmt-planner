@@ -269,6 +269,8 @@ Move
   start_at: Literal['schedule_tail', 'next_runout']
   idle_for: timedelta
   week_idx: int | None    # which order this move addresses; None for safety (Phase 2)
+  order_remaining_lbs: float  # unfulfilled lbs on the targeted order at enumeration
+                          # (the eligible RegularOrder.lbs / SafetyOrder.lbs); for the debug log
   plan: ProductionPlan    # cached output of machine.plan_production
 
 plan(state, costing) -> PlanReport

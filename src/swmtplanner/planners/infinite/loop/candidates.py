@@ -160,6 +160,9 @@ def enumerate_candidates(state: State) -> list[Move]:
                     order.week_idx if isinstance(order, RegularOrder)
                     else None
                 ),
+                # The targeted order's unfulfilled lbs (capped production
+                # `lbs` above is separate); carried for the debug log.
+                order_remaining_lbs=order.lbs,
             ))
 
     return out
