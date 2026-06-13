@@ -4,6 +4,7 @@ from typing import Any
 
 from swmtplanner.planners.infinite.coordination import ScoringContext
 from swmtplanner.planners.infinite.state import Move, State
+from swmtplanner.debuglog import DebugLog
 
 __all__ = [
     'CostWeights', 'CostBreakdown', 'PriorityContribution', 'Costing',
@@ -68,6 +69,7 @@ class Costing:
     def score(self, state: State) -> float: ...
     def score_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
+        debuglog: DebugLog | None = ...,
     ) -> float: ...
     def cost_breakdown(self, state: State) -> CostBreakdown: ...
     def cost_breakdown_after_move(

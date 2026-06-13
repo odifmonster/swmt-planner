@@ -23,6 +23,7 @@ from swmtplanner.products import (
 from swmtplanner.demand import read_rls_items, rls_items_from_list
 from swmtplanner.schedule import read_machines, machines_from_list
 from swmtplanner.support import load_workcal, workcal_from_dict
+from swmtplanner.debuglog import DebugLog
 
 from .costing import (
     Costing, load_weights, weights_from_dict,
@@ -38,6 +39,38 @@ from .state import State
 _REQUIRED_KEYS = (
     'start_date', 'weights', 'products', 'workcal', 'machines', 'demand',
 )
+
+
+def _build_debug_log() -> DebugLog:
+    """Construct the phase-1 `DebugLog`: the `iteration_log` and `cost_summary`
+    tables with their keys / links configured (see
+    `swmtplanner/debuglog/DESIGN.md`). The planner populates it as it runs;
+    this just sets up the empty, schema-fixed log."""
+    dl = DebugLog(
+        iteration_log=[
+            ('iteration_idx', None),
+            ('move_id', None),
+            ('order_id', None),
+            ('order_remaining_lbs', None),
+            ('machine', None),
+            ('decision_point', None),
+            ('role', 'rejected'),
+            ('rank', None),
+            ('total_cost', None),
+        ],
+        cost_summary=[
+            ('summary_id', None),
+            ('move_id', None),
+            ('label', None),
+            ('kind', None),
+            ('raw', 0.0),
+            ('cost', 0.0),
+        ],
+    )
+    dl.set_pk('iteration_log', 'move_id', ctr_name='move_id')
+    dl.set_pk('cost_summary', 'summary_id')                 # non-auto composite
+    dl.set_fk('cost_summary', 'move_id', 'iteration_log', 'move_id')
+    return dl
 
 
 _Config = Annotated[Path, typer.Argument(
@@ -175,8 +208,10 @@ def run(
     )
     costing = Costing(cost_weights)
 
+    debuglog = _build_debug_log() if verbose else None
+
     typer.echo('Running planner...')
-    report = plan(state, costing)
+    report = plan(state, costing, debuglog=debuglog)
     typer.echo(f'  total_score: {report.total_score:.2f}')
     typer.echo(
         f'  unmet (item, week) pairs: '
@@ -195,14 +230,12 @@ def run(
     write_plan_report_xlsx(report, output_path)
 
     if verbose:
-        # The verbose log / dashboard build path has been divorced from the
-        # planner pending the `debuglog/` rework (see debuglog/DESIGN.md).
-        # The flag is kept so existing invocations don't break, but for now
-        # it does nothing. The old writers (`write_verbose_log_tsvs`,
-        # `write_dashboard_html`) remain in `report.py` for reference.
+        # The DebugLog's tables are set up and threaded into the planner, but
+        # population and rendering land in later debuglog phases — for now the
+        # log is wired through, not yet written or exported.
         typer.echo(
-            '  (--verbose is currently a no-op — verbose logging is being '
-            'reworked into the debuglog submodule)'
+            '  (--verbose: debug-log tables set up and passed to the planner; '
+            'population/rendering land in later debuglog phases)'
         )
 
     typer.echo('Done.')

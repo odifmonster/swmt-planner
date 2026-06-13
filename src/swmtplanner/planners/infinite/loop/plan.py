@@ -30,6 +30,8 @@ from .candidates import enumerate_candidates
 if TYPE_CHECKING:
     from swmtplanner.demand.order import RawOrder
     from swmtplanner.schedule import Activity, Job
+    from swmtplanner.debuglog import DebugLog
+    from swmtplanner.planners.infinite.state import Move
 
 
 @dataclass
@@ -66,7 +68,7 @@ class PlanReport:
 
 
 def plan(
-    state: State, costing: Costing, *, verbose: bool = False,
+    state: State, costing: Costing, *, debuglog: 'DebugLog | None' = None,
 ) -> PlanReport:
     """Greedy planner. Iterates enumerate → score → commit-lowest,
     advancing the decision window as needed to keep the candidate pool
@@ -85,12 +87,12 @@ def plan(
     `state.commit_move`) and returns a `PlanReport` summarizing the
     result.
 
-    `verbose` is currently **inert** — a no-op kept for signature/CLI
-    compatibility. The old per-iteration audit-log build path has been
-    divorced from the live planner pending the `debuglog/` rework (see
-    `debuglog/DESIGN.md`); the `PlanReport` detail tuples are always `None`
-    and the hot loop is the only path. The flag will be re-wired to the new
-    `DebugLog` in a later phase."""
+    `debuglog` is an optional `DebugLog` (its `iteration_log` / `cost_summary`
+    tables already configured by the caller). It is **accepted but not yet
+    populated** — the code that writes the iteration log / cost summary lands
+    in a later step; for now passing it is a no-op and the hot loop is the only
+    path. (The old `verbose`-flag audit reconstruction stays divorced; the
+    `PlanReport` detail tuples remain `None`.)"""
     horizon = _compute_horizon(state)
 
     move_count = 0
@@ -116,19 +118,73 @@ def plan(
         # DP time, new-machine availability) once before scoring.
         ctx = build_context(state, candidates)
 
-        # Scalar score only, pick the min. (The verbose breakdown/log path
-        # has been divorced pending the `debuglog/` rework — see the
-        # docstring and `debuglog/DESIGN.md`.)
-        _, best_move = min(
-            ((costing.score_after_move(state, m, ctx), m) for m in candidates),
-            key=lambda pair: pair[0],
-        )
+        if debuglog is None:
+            # Hot path: scalar score only, pick the min.
+            _, best_move = min(
+                ((costing.score_after_move(state, m, ctx), m)
+                 for m in candidates),
+                key=lambda pair: pair[0],
+            )
+        else:
+            # Debug path: score and rank the full candidate list, writing each
+            # to `iteration_log` (and, via score_after_move, `cost_summary`).
+            best_move = _log_iteration(
+                debuglog, state, costing, ctx, candidates, move_count,
+            )
         state.commit_move(best_move)
 
         move_count += 1
 
     print()
     return _build_report(state, costing)
+
+
+def _targeted_order_id(move: 'Move') -> str | None:
+    """The id of the order this move targets — its new-item `Job`'s
+    `tgt_order`. (A `'next_runout'` run-up `Job`, if present, carries `None`;
+    the new-item `Job` carries the order id.)"""
+    return next(
+        (job.tgt_order for job in move.plan.jobs if job.tgt_order is not None),
+        None,
+    )
+
+
+def _log_iteration(
+    debuglog: 'DebugLog', state: State, costing: Costing,
+    ctx, candidates: list['Move'], iteration_idx: int,
+) -> 'Move':
+    """Score and rank every candidate, writing one `iteration_log` row each,
+    and return the committed move (lowest total cost). The known-at-emit fields
+    are written by `add_row` (which mints `move_id`); `rank` / `role` /
+    `total_cost` are patched in via `update_row` once the candidates are sorted.
+    Each candidate's `iteration_log` row is minted first (via `add_row`), then
+    `score_after_move` is called *with* the log so its `cost_summary` rows link
+    to that row's `move_id` (read back via `get_last_pk_val`)."""
+    scored: list[tuple[float, object, 'Move']] = []
+    for move in candidates:
+        move_id = debuglog.add_row(
+            'iteration_log',
+            iteration_idx=iteration_idx,
+            order_id=_targeted_order_id(move),
+            order_remaining_lbs=move.order_remaining_lbs,
+            machine=move.machine_id,
+            decision_point=move.start_at,
+        )
+        total = costing.score_after_move(state, move, ctx, debuglog=debuglog)
+        scored.append((total, move_id, move))
+
+    # Lowest total cost first; the committed move is rank 0. A stable sort
+    # keeps the first-encountered candidate ahead on ties, matching the
+    # hot path's `min`.
+    scored.sort(key=lambda s: s[0])
+    for rank, (total, move_id, move) in enumerate(scored):
+        debuglog.update_row(
+            'iteration_log', move_id,
+            rank=rank,
+            total_cost=total,
+            role='committed' if rank == 0 else 'rejected',
+        )
+    return scored[0][2]
 
 
 def _compute_horizon(state: State) -> datetime:

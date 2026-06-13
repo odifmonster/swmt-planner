@@ -5,6 +5,7 @@ from typing import Literal
 from swmtplanner.schedule import Activity, Job
 from swmtplanner.demand.order import RawOrder
 from swmtplanner.demand.rlsitem import CostComponents, RlsItem
+from swmtplanner.debuglog import DebugLog
 from swmtplanner.planners.infinite.costing import Costing
 from swmtplanner.planners.infinite.iterlog import (
     IterationLogRecord, build_iteration_log_record,
@@ -58,5 +59,5 @@ class PlanReport:
 
 
 def plan(
-    state: State, costing: Costing, *, verbose: bool = ...,
+    state: State, costing: Costing, *, debuglog: DebugLog | None = ...,
 ) -> PlanReport: ...

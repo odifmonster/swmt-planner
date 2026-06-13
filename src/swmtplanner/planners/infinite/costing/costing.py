@@ -14,6 +14,7 @@ from swmtplanner.planners.infinite.state import Move, State
 if TYPE_CHECKING:
     from swmtplanner.schedule import Activity
     from swmtplanner.support import WorkCal
+    from swmtplanner.debuglog import DebugLog
 
 
 @dataclass
@@ -165,6 +166,7 @@ class Costing:
 
     def score_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
+        debuglog: 'DebugLog | None' = None,
     ) -> float:
         """Score the state as if `move` were committed. Pure — does not
         mutate `state`. Internally uses `RlsItem.cost_if(jobs)` for the
@@ -173,7 +175,15 @@ class Costing:
         affected machine combine its existing activities with the plan's;
         other machines use their current counts. Adds the move's
         cross-cutting contributions (priority, level-loading,
-        old-machine) read off `ctx`."""
+        old-machine) read off `ctx`.
+
+        When `debuglog` is given, the per-component breakdown is written to its
+        `cost_summary` table (one row per weighted component, tagged with the
+        current `iteration_log` `move_id`) and the same total is returned. The
+        hot path (no `debuglog`) skips that bookkeeping."""
+        if debuglog is not None:
+            return self._emit_cost_summary(debuglog, state, move, ctx)
+
         # Group the plan's Job records by their item.id. A single plan
         # can carry Jobs for more than one item (the 'next_runout' run-up
         # adds a Job of the current item ahead of the new item's).
@@ -380,6 +390,101 @@ class Costing:
             priority_by_item=priority_by_item,
         )
 
+    def _emit_cost_summary(
+        self, debuglog: 'DebugLog', state: State, move: Move,
+        ctx: ScoringContext,
+    ) -> float:
+        """Compute the move's per-component breakdown, write one
+        `cost_summary` row per component — keyed `{move_id}_{label}` and linked
+        (FK) to the current `iteration_log` row — and return the same total
+        `score_after_move` would. Each row carries the component's `raw`
+        (unweighted) quantity and weighted `cost`. See debuglog/DESIGN.md."""
+        w = self._weights
+
+        # Demand quantities, summed across items (cost_if for the items the
+        # plan touches, current view trackers for the rest).
+        jobs_by_item: dict[str, list[Job]] = {}
+        for job in move.plan.jobs:
+            jobs_by_item.setdefault(job.item.id, []).append(job)
+        lateness_q = drainage_q = carrying_q = excess_q = 0.0
+        for item_id, rls in state.rls_items.items():
+            if item_id in jobs_by_item:
+                cc = rls.cost_if(jobs_by_item[item_id])
+                lateness_q += cc.lateness
+                drainage_q += cc.drainage
+                carrying_q += cc.carrying
+                excess_q += cc.excess
+            else:
+                lateness_q += rls.raw_view.lateness
+                drainage_q += rls.safety_view.drainage
+                carrying_q += rls.safety_view.carrying
+                excess_q += rls.safety_view.excess
+
+        # Schedule quantities, summed across machines (the affected machine
+        # combines its committed activities with the plan's).
+        tos_q = tob_q = sc_q = rc_q = pc_q = it_q = wl_q = 0.0
+        for machine_id, machine in state.machines.items():
+            if machine_id == move.machine_id:
+                activities = (
+                    list(machine.activities) + list(move.plan.activities)
+                )
+            else:
+                activities = machine.activities
+            stos, stob, ssc, src, spc, sit, swl = \
+                self._schedule_quantities_for(activities, machine.workcal)
+            tos_q += stos
+            tob_q += stob
+            sc_q += ssc
+            rc_q += src
+            pc_q += spc
+            it_q += sit
+            wl_q += swl
+
+        # Cross-cutting quantities (priority opportunity-cost, level-loading
+        # work-hour delta, old-machine flag).
+        machine = state.machines[move.machine_id]
+        priority_q = self._priority_raw(move, ctx)
+        dp_time = (
+            machine.schedule_tail if move.start_at == 'schedule_tail'
+            else machine.next_runout
+        )
+        level_q = machine.workcal.get_work_hours_between(
+            ctx.earliest_dp_time, dp_time,
+        )
+        old_q = 1.0 if (
+            ctx.new_machine_avail.get(move.item, False) and not machine.is_new
+        ) else 0.0
+
+        # (label, kind, raw quantity, weight) for all fourteen components.
+        components = [
+            ('lateness', 'inventory', lateness_q, w.lateness),
+            ('drainage', 'inventory', drainage_q, w.drainage),
+            ('carrying', 'inventory', carrying_q, w.carrying),
+            ('excess', 'inventory', excess_q, w.excess),
+            ('tape_out_single', 'schedule', tos_q, w.tape_out_single),
+            ('tape_out_both', 'schedule', tob_q, w.tape_out_both),
+            ('style_change', 'schedule', sc_q, w.style_change),
+            ('runner_change', 'schedule', rc_q, w.runner_change),
+            ('pattern_change', 'schedule', pc_q, w.pattern_change),
+            ('idle_time', 'schedule', it_q, w.idle_time),
+            ('waste_lbs', 'schedule', wl_q, w.waste_lbs),
+            ('priority', 'other', priority_q, w.priority),
+            ('level_loading', 'other', level_q, w.level_loading),
+            ('old_machine', 'other', old_q, w.old_machine),
+        ]
+
+        move_id = debuglog.get_last_pk_val('iteration_log')
+        total = 0.0
+        for label, kind, raw, weight in components:
+            cost = weight * raw
+            total += cost
+            debuglog.add_row(
+                'cost_summary',
+                summary_id=f'{move_id}_{label}',
+                label=label, kind=kind, raw=raw, cost=cost,
+            )
+        return total
+
     # ---- helpers -------------------------------------------------------
 
     def _cross_cutting_cost(
@@ -413,18 +518,17 @@ class Costing:
 
         return priority_cost + level_loading_cost + old_machine_cost
 
-    def _priority_cost(
+    def _priority_raw(
         self, move: Move, ctx: ScoringContext,
     ) -> float:
-        """Weighted priority cost — an opportunity-cost estimate of
-        the lateness this move would incur on higher-priority regular
-        orders the planner is deferring. For each regular order with a
-        better rank than the move's own, charge the standard
-        `lbs × 2^days_late` shape assuming a fill time of
-        `max(due_date + 1 day, earliest_dp_excluding[move.machine_id])`
-        (falling back to `ctx.earliest_dp_time` when no other machine
-        has a candidate). Safety orders are skipped — their miss-cost
-        is drainage, not lateness. See "Priority cost" in DESIGN.md."""
+        """Unweighted priority quantity: the summed `lbs × 2^days_late`
+        opportunity-cost shape over the higher-priority regular orders this
+        move defers. For each regular order ranked better than the move's own,
+        assume a fill time of `max(due_date + 1 day,
+        earliest_dp_excluding[move.machine_id])` (falling back to
+        `ctx.earliest_dp_time`). Safety orders are skipped — their miss-cost is
+        drainage, not lateness. `_priority_cost` is this times `w.priority`.
+        See "Priority cost" in DESIGN.md."""
         move_key = OrderKey(
             item_id=move.item.id, week_idx=move.week_idx,
         )
@@ -451,7 +555,13 @@ class Costing:
             days_late = (fill_time - order.due_date) / one_day
             lateness_lb_days += order.lbs * (2.0 ** days_late)
 
-        return self._weights.priority * lateness_lb_days
+        return lateness_lb_days
+
+    def _priority_cost(
+        self, move: Move, ctx: ScoringContext,
+    ) -> float:
+        """Weighted priority cost: `w.priority × _priority_raw(move, ctx)`."""
+        return self._weights.priority * self._priority_raw(move, ctx)
 
     def _priority_breakdown(
         self, move: Move, ctx: ScoringContext,
