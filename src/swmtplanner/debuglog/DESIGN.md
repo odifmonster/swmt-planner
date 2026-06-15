@@ -231,23 +231,134 @@ Minting `move_id` up front (step 1) makes it available to the candidate's
 by `update_row` in step 2. `score_after_move` is called exactly **once per
 candidate**, and the non-debug hot path is untouched.
 
-### Phase 2 — remaining tables (cost detail + output)
+### Phase 2 — cost-detail leaf tables + output tables
 
-Fill out the rest of `DebugLog`'s tables:
+Phase 2 **lays out new tables** on the same `DebugLog` (population is a later
+step). Two groups: the leaf tables that break phase-1's `cost_summary` rows
+down, and the carry-over output tables.
 
-- the **cost detail tables** for the three cost families — **inventory**,
-  **schedule**, and **priority** — the per-move attribution behind phase 1's
-  cost summary (expanding the iteration log from its simplified form if the
-  detail tables need extra join keys);
-- the **output tables** the regular Excel workbook already produces — `demand`,
-  `schedule`, `production`, `xref`, `unmet_demand`, `late_orders` — carried
-  here as **flat tables (no MultiIndex)** for the later dashboard consumers.
-  These are built once at the end rather than live, which is why they wait
-  until now (phase 1 needed the live-write tables to test the mechanics).
+#### Cost-detail tables
 
-Together with phase 1 these are the analytical heart of the log — the per-move
-cost attribution that explains each scheduling decision — and subsume what
-`iterlog.py` / `report.py` currently reconstruct after the fact.
+**`inv_cost_detail`** — the inventory leaf: everything the demand layer
+(`RlsItem`) computes — `lateness`, `drainage`, `carrying`, `excess`. One table;
+the `label` column distinguishes them. Every discrete time window is its own
+row.
+
+```
+inv_cost_detail
+  icost_id      # PK -> counter 'icost_id' (auto-incremented)
+  summary_id    # FK -> cost_summary.summary_id (the parent component row)
+  move_id       # FK -> iteration_log.move_id (the candidate; redundant with
+                #   summary_id but convenient for grouping by candidate)
+  label         # 'lateness' | 'drainage' | 'carrying' | 'excess'
+  item          # greige id
+  days          # window length / days-late; None (blank) for excess
+  qty           # lbs for this row
+  weight        # the component's weight
+  value         # the weighted cost contribution of this row
+```
+
+Granularity by `label`:
+- **lateness** — one row per late delivery of material to an order: `days` =
+  days late, `qty` = lbs delivered late, `value` = `weight × qty × 2^days`.
+- **drainage** — one row per stretch the pool sits at the same level **below**
+  target: `days` = stretch length, `qty` = deficit lbs, `value` =
+  `weight × qty × days`.
+- **carrying** — one row per **fill held beyond its lead time** (the demand
+  view accrues carrying per such fill, not per above-target stretch — the rows
+  follow the view's actual accumulation so they reconcile): `days` = days held
+  beyond lead, `qty` = lbs filled, `value` = `weight × qty × days`.
+- **excess** — `days` blank; one row carrying the excess `qty`, `value` =
+  `weight × qty`.
+
+**Strict reconciliation:** detail is emitted for **every** item (each scored
+candidate runs every `RlsItem` through `cost_if`, not just the ones its plan
+touches), so the rows for a given `summary_id` sum (their `value`) exactly to
+that `cost_summary` row's `cost`. Rows that aren't of interest (e.g. items the
+move didn't affect) are filtered in the dashboard, not dropped here. Config:
+`set_pk('inv_cost_detail', 'icost_id', ctr_name='icost_id')`,
+`set_fk('inv_cost_detail', 'summary_id', 'cost_summary', 'summary_id')`,
+`set_fk('inv_cost_detail', 'move_id', 'iteration_log', 'move_id')`.
+
+**`sched_cost_detail`** — one row per **activity** (the schedule breakdown).
+
+```
+sched_cost_detail
+  activity_id   # PK (non-auto; the Activity's own id)
+  move_id       # FK -> iteration_log.move_id
+  machine       # machine id
+  start         # the activity's start
+  end           # the activity's end
+  desc          # short description (as in the schedule sheet)
+  weight        # the activity's cost weight; blank for cost-free types
+  cost          # weight × quantity; blank for cost-free types
+```
+
+`weight` / `cost` are **blank** for activity types that carry no cost concept
+(`Knit`, `Doff`, `Hanging`, `Threading`); a weighted type whose weight happens
+to be **0** shows `0` in both — distinguishing "no cost" from "zero-valued
+cost". This lists every candidate's plan activities — the committed iteration's
+*and* the rejected ones — so it is the complete activity ledger and the old
+`schedule` **output table is dropped** (redundant). It links only by `move_id`
+(no `summary_id`): it is a per-candidate activity ledger, not a per-component
+leaf, so it is not expected to sum to a `cost_summary` row. Config:
+`set_pk('sched_cost_detail', 'activity_id')` (non-auto), `set_fk(...,
+'move_id', 'iteration_log', 'move_id')`.
+
+**`priority_detail`** — one row per higher-priority deferred regular order the
+move charges against.
+
+```
+priority_detail
+  move_id        # FK -> iteration_log.move_id
+  item           # greige id of the deferred order
+  week_idx       # its week
+  remaining_lbs  # its unfilled lbs
+  late_day       # the selected late-delivery day (days_late used)
+  weight         # w.priority
+  cost           # weight × remaining_lbs × 2^late_day
+```
+
+Key-less — a flat leaf grouped by `move_id`. Config: `set_fk('priority_detail',
+'move_id', 'iteration_log', 'move_id')`.
+
+The remaining `cost_summary` components — **`level_loading`** and
+**`old_machine`** — get **no leaf table** (each is a single scalar with no
+sub-structure).
+
+#### Output tables
+
+**`production`** — the complete production ledger, **one row per `Knit`**
+(folding the old per-job `production` and per-knit `xref` into one). It spans
+**every candidate's plan — committed and rejected** — keyed by `move_id`, not
+just the final schedule.
+
+```
+production
+  knit_id    # PK (non-auto; the Knit activity's id, unique across all plans)
+  move_id    # FK -> iteration_log.move_id (the candidate, committed or not)
+  roll_id    # synthesized: f'{job_id}_{roll_index}' (a Roll has no id of its
+             #   own); several knits may share one roll_id (a straddled roll)
+  job_id     # the roll's job
+  item       # greige id
+  start      # the knit's start
+  end        # the knit's end
+  lbs        # the knit's lbs
+```
+
+Because it includes uncommitted rolls (never allocated to demand), it carries
+**no roll→order link** — the resolved fill `order_id` the old `xref` held is
+dropped.
+
+**`demand`** — a copy of the regular Excel output's `demand` sheet (`order_id`,
+`item`, `due_date`, `demand`, `covered_on_hand`, `remaining`).
+
+**`unmet_demand`** — a copy of the regular `unmet_demand` sheet (`item`,
+`week_idx`, `unmet_lbs`).
+
+The regular **`late_orders`** sheet is **dropped** — the same lateness
+information (per-delivery `days` / `qty` / `value`) is in `inv_cost_detail`'s
+`lateness` rows.
 
 ### Phase 3 — raw dashboard
 

@@ -150,10 +150,15 @@ class RlsItem(HasID[str]):
             self._jobs.insert(idx, job)
         self._recompute_views()
 
-    def cost_if(self, jobs: list['Job']):
+    def cost_if(self, jobs: list['Job'], detail_sink=None):
         """Return the `CostComponents` that would result if `jobs` were
         registered, without mutating any state. Empty `jobs` returns the
-        current state's cost."""
+        current state's cost.
+
+        `detail_sink`, when given, is forwarded to both views' `recompute` so
+        they report their per-window cost detail (lateness / drainage /
+        carrying / excess) as the hypothetical is evaluated, before the state
+        is restored."""
         new_jobs = list(self._jobs)
         for job in jobs:
             idx = bisect_right(
@@ -161,8 +166,8 @@ class RlsItem(HasID[str]):
             )
             new_jobs.insert(idx, job)
 
-        self._raw_view.recompute(new_jobs, self._on_hand_lbs)
-        self._safety_view.recompute(new_jobs, self._on_hand_lbs)
+        self._raw_view.recompute(new_jobs, self._on_hand_lbs, detail_sink)
+        self._safety_view.recompute(new_jobs, self._on_hand_lbs, detail_sink)
         res = CostComponents(self._raw_view.lateness,
                              self._safety_view.drainage,
                              self._safety_view.carrying,

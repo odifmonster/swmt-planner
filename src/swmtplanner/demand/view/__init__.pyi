@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from swmtplanner.demand.order import (
     RawOrder, SafetyAwareOrder, WeeklyDemand, Safety,
@@ -18,7 +18,10 @@ class RawView:
     def orders(self) -> tuple[RawOrder, ...]: ...
     @property
     def lateness(self) -> float: ...
-    def recompute(self, jobs: list['Job'], on_hand: float) -> None: ...
+    def recompute(
+        self, jobs: list['Job'], on_hand: float,
+        detail_sink: Callable[..., Any] | None = ...,
+    ) -> None: ...
 
 
 class SafetyAwareView:
@@ -41,4 +44,7 @@ class SafetyAwareView:
     def carrying(self) -> float: ...
     @property
     def drainage(self) -> float: ...
-    def recompute(self, jobs: list['Job'], on_hand: float) -> None: ...
+    def recompute(
+        self, jobs: list['Job'], on_hand: float,
+        detail_sink: Callable[..., Any] | None = ...,
+    ) -> None: ...

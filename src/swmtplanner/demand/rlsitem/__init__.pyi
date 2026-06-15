@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from swmtplanner.support import HasID
 from swmtplanner.demand.order import WeeklyDemand
@@ -57,4 +57,6 @@ class RlsItem(HasID[str]):
     @property
     def replenishment_need_lbs(self) -> float: ...
     def register_jobs(self, jobs: list['Job']) -> None: ...
-    def cost_if(self, jobs: list['Job']) -> CostComponents: ...
+    def cost_if(
+        self, jobs: list['Job'], detail_sink: 'Callable[..., Any] | None' = ...,
+    ) -> CostComponents: ...

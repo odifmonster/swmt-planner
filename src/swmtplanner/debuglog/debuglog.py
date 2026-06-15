@@ -277,6 +277,7 @@ class DebugLog:
                 raise KeyError(f'table {table!r} has no column {k!r}')
             row[col_map[k]] = self._resolve(self._tables[table][k], v)
 
+
     def get_df(self, table: str, **kwargs: Any) -> pd.DataFrame:
         """Render `table` as a flat `pandas.DataFrame` (no MultiIndex). A keyed
         table uses its primary key as the index (built via
@@ -288,8 +289,12 @@ class DebugLog:
         pk = schema['@pk_col_name']
         data = self._data.get(table)
         if pk is None:
+            cols = (
+                data['columns'] if data is not None
+                else [c for c in schema if not c.startswith('@')]
+            )
             rows = data['rows'] if data is not None else []
-            return pd.DataFrame(rows, columns=data['columns'], **kwargs)
+            return pd.DataFrame(rows, columns=cols, **kwargs)
         cols = (
             list(data['col_map']) if data is not None
             else [c for c in schema if not c.startswith('@') and c != pk]

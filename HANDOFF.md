@@ -29,14 +29,16 @@ pandas/numpy; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **323 tests, all passing** (`python -m unittest discover
+> **Suite state:** **365 tests, all passing** (`python -m unittest discover
 > -s tests -p '*_tests.py'`). Step 3 is fully landed and committed. **Step 4
-> sub-step 1 (Job-related links + the `demand`/`xref` Excel tabs) is fully
-> landed across design, `src/` code, coverage specs, and tests on all three
-> layers — but is NOT yet committed** (sizable uncommitted diff in `src/` and
-> `tests/`). The planner still prints `Total moves committed: N` debug lines
-> to stdout during the loop tests; that's an intentional source-side print the
-> user wants kept for now (harmless to the suite).
+> work since the last commit is NOT yet committed** (sizable uncommitted diff
+> across `src/` and `tests/`): sub-step 1 (Job-related links + `demand`/`xref`
+> Excel tabs), the verbose-path divorce, and the new `swmtplanner.debuglog`
+> module through **Phase 1** (DebugLog class + tests; `iteration_log` /
+> `cost_summary` populated live in the planner). The planner still prints
+> `Total moves committed: N` debug lines to stdout during the loop tests;
+> that's an intentional source-side print the user wants kept for now
+> (harmless to the suite).
 
 ## Preferred workflow
 
@@ -248,19 +250,56 @@ and how each cost was incurred.
    dataframe builders + `write_verbose_log_tsvs` + `write_dashboard_html` (now
    uncalled), and `costing.py`'s `cost_breakdown*` methods. 323 green.
 
-   - **Phase 1 — simplified iteration log + cost summary. ⏸ next.** `DebugLog`
-     carries just two tables: a **simplified `IterationLog`** (one row per
-     scored candidate per iteration) and a **`CostSummary`**. Chosen because
-     both are built **live as the loop runs** (unlike the output tables, built
-     post-hoc), so they actually exercise the pass-the-object-and-write
-     mechanic this phase exists to validate. No dashboard; iteration log
-     deliberately simplified (schema refined later).
-   - **Phase 2 — remaining tables (cost detail + output). ⏸ pending.** Add the
-     cost detail tables for **inventory**, **schedule**, and **priority** (and
-     expand the iteration log if needed), plus the output tables the regular
-     Excel workbook produces (`demand`, `schedule`, `production`, `xref`,
-     `unmet_demand`, `late_orders`) as **flat (no MultiIndex)** tables —
-     deferred here because they're built at the end, not live.
+   - **Phase 1 — simplified iteration log + cost summary. ✅ done
+     (uncommitted).** `DebugLog` carries two tables, both built **live as the
+     loop runs**: `iteration_log` (one row per scored candidate per iteration)
+     and `cost_summary` (one row per weighted cost component per candidate).
+     What landed:
+     - **`DebugLog` class** (`swmtplanner/debuglog/`, top-level, generic
+       config-driven tables) — `__init__` / `set_pk` / `set_fk` / `add_row` /
+       `get_last_pk_val` / `update_row` / `get_df`, with `.pyi` and white-box
+       unit tests (`tests/debuglog_tests.py`, spec `DEBUGLOG_TEST_SPEC.md`).
+     - **Setup** in `run.py` (`_build_debug_log`): the two tables with keys /
+       links wired; built when `--verbose`, passed to `plan(debuglog=…)`. The
+       `plan` `verbose` flag became the optional `debuglog` argument.
+     - **`iteration_log` population** in `plan._log_iteration`: the debug path
+       scores + ranks the full candidate list, `add_row`s each (minting
+       `move_id`), and patches `rank`/`role`/`total_cost` post-sort via
+       `update_row`. Committed move unchanged from the hot path.
+     - **`cost_summary` population** in `Costing.score_after_move(…,
+       debuglog=…)` → `_emit_cost_summary`: 14 rows/candidate (raw + weighted),
+       `kind` ∈ {inventory, schedule, other}, keyed `{move_id}_{label}` with a
+       `move_id` FK; per-move `Σ cost == iteration_log.total_cost`. Added
+       `_priority_raw` (which `_priority_cost` now delegates to).
+     - **Not exported yet** — the populated log isn't written anywhere
+       (Phase 1 has no dashboard; rendering is Phases 3–4). `--verbose` builds
+       and populates it but produces no extra output file.
+   - **Phase 2 — cost-detail + output tables. 🔨 in progress (uncommitted).**
+     Table layout fully designed in `debuglog/DESIGN.md` (per-table columns,
+     keys, links, granularity). What's landed:
+     - **All Phase-2 tables set up** in `run.py`'s `_build_debug_log`
+       (`inv_cost_detail`, `sched_cost_detail`, `priority_detail`,
+       `production`, `demand`, `unmet_demand`) with keys / FKs — including the
+       new `iteration_log.order_id → demand.order_id` FK (fine that `demand` is
+       built last: the value is passed in, FK existence isn't checked at
+       insert).
+     - **`inv_cost_detail` populated** with **strict reconciliation**: the
+       demand views (`recompute`) gained an optional `detail_sink` that reports
+       each lateness / drainage / carrying / excess window
+       `(label, item, days, qty, contribution)`; `cost_if` forwards it;
+       `Costing._emit_cost_summary` weights it into rows. Every item is run
+       through `cost_if` so rows sum exactly to the `cost_summary` inventory
+       rows (dashboard filters unwanted rows). `carrying` rows are per
+       fill-held-beyond-lead (matching the view's accrual).
+     - **`priority_detail` populated** via `_priority_raw` when the debuglog is
+       present.
+     - **Still to do:** `sched_cost_detail` + `production` (from each
+       candidate's plan activities / knits; `roll_id` = `{job_id}_{roll_index}`),
+       and the `demand` / `unmet_demand` copies (built at the end). Dropped
+       vs the regular output: `schedule` (redundant with `sched_cost_detail`)
+       and `late_orders` (covered by `inv_cost_detail` lateness rows); the old
+       `xref` is folded into `production` minus the roll→order link.
+       `get_df` now also handles empty key-less tables (additive fix).
    - **Phase 3 — raw dashboard. ⏸ pending.** Render the tables directly as
      HTML with foreign-key links surfaced (debug view only, no drill-down).
    - **Phase 4 — full dashboard. ⏸ pending.** Add the user-friendly
@@ -284,30 +323,34 @@ and how each cost was incurred.
 
 ## Next concrete action
 
-**First: commit the uncommitted work** — now two logical changes (consider
+**First: commit the uncommitted work** — several logical changes (consider
 separate commits): (a) sub-step 1 (links + the `demand`/`xref` Excel tabs),
-and (b) the sub-step-2 groundwork (divorcing the old verbose path; see the
-sub-step-2 "Groundwork" note above). Sizable diff across `src/` and `tests/`;
-323 green.
+(b) the verbose-path divorce groundwork, (c) the `swmtplanner.debuglog` module
+through Phase 1 (DebugLog class + tests; `iteration_log` / `cost_summary`
+populated), and (d) Phase-2-so-far (all tables set up; `inv_cost_detail` +
+`priority_detail` populated; the `detail_sink` threading in the demand layer).
+Sizable diff across `src/` and `tests/`; 365 green.
 
-**Continue sub-step 2 — `debuglog` Phase 1 (simplified iteration log + cost
-summary).** Phase 1 is **designed in full** (`swmtplanner/debuglog/DESIGN.md`):
-the generic `DebugLog` API (`DebugLog(**tables)` of `(col, default)` tuples ·
-`set_pk(table, col, ctr_name=None)` · `set_fk(table, col, foreign_table,
-foreign_column)` · `add_row` → PK · `get_last_pk_val(table)` · `update_row(table,
-pk_val, **kwargs)` · `get_df(table, **kwargs)`), the `iteration_log` /
-`cost_summary` schemas, and the single-pass population flow.
+**Then finish `debuglog` Phase 2 — the remaining tables.** Design is complete
+(`debuglog/DESIGN.md`); `inv_cost_detail` / `priority_detail` are populated.
+Remaining population:
+- **`sched_cost_detail`** — one row per activity in each candidate's plan
+  (`move.plan.activities`): `activity_id` (PK), `move_id`, `machine`, `start`,
+  `end`, `desc`, `weight`/`cost` (blank for cost-free types; `0` for
+  zero-weight). Reuse `report.py`'s `_activity_desc`; the schedule weights live
+  on `CostWeights`.
+- **`production`** — one row per `Knit` across every candidate's plan
+  (committed + rejected): `knit_id` (PK), `move_id`, `roll_id` =
+  `{job_id}_{roll_index}`, `job_id`, `item`, `start`, `end`, `lbs`. Source from
+  `move.plan.jobs` → `Roll.knits`.
+- **`demand` / `unmet_demand`** — built at the end from `report.py`'s
+  `demand_dataframe` / `unmet_demand_dataframe` data (copies of the regular
+  output).
 
-**Code status:** the `DebugLog` **schema construction** is implemented —
-`__init__`, `set_pk`, `set_fk` in `swmtplanner/debuglog/debuglog.py` (323
-green). **Remaining for Phase 1:** the row methods (`add_row`,
-`get_last_pk_val`, `update_row`, `get_df`), then wiring — thread the optional
-`debuglog` kwarg through `plan` (score + rank the full candidate list, write
-`iteration_log`, patch rank/role via `update_row`) and `Costing.score_after_move`
-(build `cost_summary`, reading the id via `get_last_pk_val`). Then coverage
-spec → tests.
+No coverage spec / tests for the debuglog planner wiring yet — the unit tests
+in `tests/debuglog_tests.py` cover the `DebugLog` class; the user has so far
+verified the populated tables by inspection. Consider planner-wiring tests when
+Phase 2 lands.
 
-DESIGN-first, narrow per turn (one section/concept), the user reviews each
-section, then code → coverage spec → tests. Phases 2–4 (cost detail + output
-tables, raw dashboard, full dashboard) follow in order, each designed when it
-begins — see `swmtplanner/debuglog/DESIGN.md`.
+Phases 3–4 (raw dashboard, full dashboard) follow — see
+`swmtplanner/debuglog/DESIGN.md`. DESIGN-first, narrow per turn, user reviews.

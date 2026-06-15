@@ -33,7 +33,8 @@ class RawView:
     def lateness(self) -> float:
         return self._lateness
 
-    def recompute(self, jobs: list['Job'], on_hand: float) -> None:
+    def recompute(self, jobs: list['Job'], on_hand: float,
+                  detail_sink=None) -> None:
         # FIFO stream over (availability_time, lbs). Each Job expands
         # into one chunk per `Roll` via `Job.rolls` — rolls ship as they
         # come off the machine rather than as a single bundle, so the
@@ -80,7 +81,12 @@ class RawView:
                 if avail_time > order.week.due_date:
                     order.late_lbs += take
                     days_late = (avail_time - order.week.due_date).total_seconds() / _SECONDS_PER_DAY
-                    self._lateness += take * (2.0 ** days_late)
+                    contribution = take * (2.0 ** days_late)
+                    self._lateness += contribution
+                    if detail_sink is not None:
+                        # One row per late delivery of material to an order.
+                        detail_sink('lateness', self._rls_item.item.id,
+                                    days_late, take, contribution)
 
                 chunk_remaining -= take
                 needed -= take
@@ -107,6 +113,9 @@ class SafetyAwareView:
         # Transient: the roll awaiting its first fill-link during the current
         # _distribute_chunk (None for the on_hand pseudo-roll, or once linked).
         self._link_target: 'Roll | None' = None
+        # Transient: the per-window cost-detail sink active during recompute
+        # (set each recompute; None when not collecting detail).
+        self._detail_sink = None
 
     @property
     def orders(self) -> tuple[SafetyAwareOrder, ...]:
@@ -147,7 +156,8 @@ class SafetyAwareView:
     def drainage(self) -> float:
         return self._drainage
 
-    def recompute(self, jobs: list['Job'], on_hand: float) -> None:
+    def recompute(self, jobs: list['Job'], on_hand: float,
+                  detail_sink=None) -> None:
         # On-hand is processed as a pseudo-job at the first order's due_date
         # (so it's on-time for every order). Roll arrivals are merged into
         # the event list below and sorted by time, so job order doesn't
@@ -162,6 +172,8 @@ class SafetyAwareView:
         self._drained.clear()
         self._roll_order_links = []
         self._link_target = None
+        self._detail_sink = detail_sink            # used by _fill_orders too
+        item_id = self._rls_item.item.id
 
         first_due = self._orders[0].week.due_date
         last_due = self._orders[-1].week.due_date
@@ -199,6 +211,10 @@ class SafetyAwareView:
                 # double-count those lbs here.
                 deficit = self.safety_target - max(0.0, self._physical_pool)
                 self._drainage += deficit * duration_days
+                if detail_sink is not None and deficit > 0:
+                    # One row per stretch the pool sits below target.
+                    detail_sink('drainage', item_id, duration_days, deficit,
+                                deficit * duration_days)
 
             if ev[0] == 'chunk':
                 _, available, roll = ev
@@ -215,6 +231,13 @@ class SafetyAwareView:
             duration_days = (last_due - last_t).total_seconds() / _SECONDS_PER_DAY
             deficit = self.safety_target - max(0.0, self._physical_pool)
             self._drainage += deficit * duration_days
+            if detail_sink is not None and deficit > 0:
+                detail_sink('drainage', item_id, duration_days, deficit,
+                            deficit * duration_days)
+
+        # Excess has no time dimension: one aggregate row (days = None).
+        if detail_sink is not None and self._excess > 0:
+            detail_sink('excess', item_id, None, self._excess, self._excess)
 
     def _distribute_chunk(
         self, avail_time: datetime, available: float,
@@ -287,7 +310,16 @@ class SafetyAwareView:
                 if chunk_time is not None:
                     hold = order.week.due_date - chunk_time
                     beyond_lead = max(timedelta(0), hold - self.lead_time)
-                    self._carrying += take * (beyond_lead.total_seconds() / _SECONDS_PER_DAY)
+                    beyond_lead_days = (
+                        beyond_lead.total_seconds() / _SECONDS_PER_DAY
+                    )
+                    self._carrying += take * beyond_lead_days
+                    if self._detail_sink is not None and beyond_lead_days > 0:
+                        # One row per fill held beyond lead time.
+                        self._detail_sink(
+                            'carrying', self._rls_item.item.id,
+                            beyond_lead_days, take, take * beyond_lead_days,
+                        )
             available -= take
         return available
 

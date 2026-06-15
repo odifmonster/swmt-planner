@@ -398,27 +398,46 @@ class Costing:
         `cost_summary` row per component — keyed `{move_id}_{label}` and linked
         (FK) to the current `iteration_log` row — and return the same total
         `score_after_move` would. Each row carries the component's `raw`
-        (unweighted) quantity and weighted `cost`. See debuglog/DESIGN.md."""
+        (unweighted) quantity and weighted `cost`. Also writes the
+        `inv_cost_detail` and `priority_detail` leaf rows. See
+        debuglog/DESIGN.md."""
         w = self._weights
+        move_id = debuglog.get_last_pk_val('iteration_log')
 
-        # Demand quantities, summed across items (cost_if for the items the
-        # plan touches, current view trackers for the rest).
+        # Per-window `inv_cost_detail` sink: the demand views report each
+        # lateness / drainage / carrying / excess window (with its unweighted
+        # `contribution`); we weight it and write the row. Linked to its
+        # `cost_summary` parent by `summary_id`; `icost_id` (PK) and `move_id`
+        # (FK) auto-fill. The rows for a given label sum to its cost_summary
+        # `cost`.
+        inv_weight = {
+            'lateness': w.lateness, 'drainage': w.drainage,
+            'carrying': w.carrying, 'excess': w.excess,
+        }
+
+        def inv_sink(label, item_id, days, qty, contribution):
+            debuglog.add_row(
+                'inv_cost_detail',
+                summary_id=f'{move_id}_{label}',
+                label=label, item=item_id, days=days, qty=qty,
+                weight=inv_weight[label],
+                value=inv_weight[label] * contribution,
+            )
+
+        # Demand quantities, summed across items — every item runs through
+        # cost_if (with no extra jobs for the ones the plan doesn't touch) so
+        # its windows are emitted; the returned scalars are the same as the
+        # hot path's cost_if / view-tracker mix.
         jobs_by_item: dict[str, list[Job]] = {}
         for job in move.plan.jobs:
             jobs_by_item.setdefault(job.item.id, []).append(job)
         lateness_q = drainage_q = carrying_q = excess_q = 0.0
         for item_id, rls in state.rls_items.items():
-            if item_id in jobs_by_item:
-                cc = rls.cost_if(jobs_by_item[item_id])
-                lateness_q += cc.lateness
-                drainage_q += cc.drainage
-                carrying_q += cc.carrying
-                excess_q += cc.excess
-            else:
-                lateness_q += rls.raw_view.lateness
-                drainage_q += rls.safety_view.drainage
-                carrying_q += rls.safety_view.carrying
-                excess_q += rls.safety_view.excess
+            cc = rls.cost_if(jobs_by_item.get(item_id, []), inv_sink)
+            lateness_q += cc.lateness
+            drainage_q += cc.drainage
+            carrying_q += cc.carrying
+            excess_q += cc.excess
 
         # Schedule quantities, summed across machines (the affected machine
         # combines its committed activities with the plan's).
@@ -441,9 +460,10 @@ class Costing:
             wl_q += swl
 
         # Cross-cutting quantities (priority opportunity-cost, level-loading
-        # work-hour delta, old-machine flag).
+        # work-hour delta, old-machine flag). Passing `debuglog` also emits the
+        # per-deferred-order `priority_detail` rows.
         machine = state.machines[move.machine_id]
-        priority_q = self._priority_raw(move, ctx)
+        priority_q = self._priority_raw(move, ctx, debuglog)
         dp_time = (
             machine.schedule_tail if move.start_at == 'schedule_tail'
             else machine.next_runout
@@ -473,7 +493,6 @@ class Costing:
             ('old_machine', 'other', old_q, w.old_machine),
         ]
 
-        move_id = debuglog.get_last_pk_val('iteration_log')
         total = 0.0
         for label, kind, raw, weight in components:
             cost = weight * raw
@@ -520,6 +539,7 @@ class Costing:
 
     def _priority_raw(
         self, move: Move, ctx: ScoringContext,
+        debuglog: 'DebugLog | None' = None,
     ) -> float:
         """Unweighted priority quantity: the summed `lbs × 2^days_late`
         opportunity-cost shape over the higher-priority regular orders this
@@ -528,7 +548,11 @@ class Costing:
         earliest_dp_excluding[move.machine_id])` (falling back to
         `ctx.earliest_dp_time`). Safety orders are skipped — their miss-cost is
         drainage, not lateness. `_priority_cost` is this times `w.priority`.
-        See "Priority cost" in DESIGN.md."""
+        See "Priority cost" in DESIGN.md.
+
+        When `debuglog` is given, one `priority_detail` row is written per
+        deferred order (its `cost` is the weighted contribution; the `move_id`
+        FK auto-links to the current `iteration_log` row)."""
         move_key = OrderKey(
             item_id=move.item.id, week_idx=move.week_idx,
         )
@@ -542,6 +566,7 @@ class Costing:
             move.machine_id, ctx.earliest_dp_time,
         )
         one_day = timedelta(days=1)
+        w_priority = self._weights.priority
 
         lateness_lb_days = 0.0
         for key, rank in ctx.priorities.items():
@@ -553,7 +578,18 @@ class Costing:
                 continue
             fill_time = max(order.due_date + one_day, other_dp)
             days_late = (fill_time - order.due_date) / one_day
-            lateness_lb_days += order.lbs * (2.0 ** days_late)
+            contribution = order.lbs * (2.0 ** days_late)
+            lateness_lb_days += contribution
+            if debuglog is not None:
+                debuglog.add_row(
+                    'priority_detail',
+                    item=key.item_id,
+                    week_idx=order.week_idx,
+                    remaining_lbs=order.lbs,
+                    late_day=days_late,
+                    weight=w_priority,
+                    cost=w_priority * contribution,
+                )
 
         return lateness_lb_days
 

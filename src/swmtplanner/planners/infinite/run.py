@@ -42,10 +42,11 @@ _REQUIRED_KEYS = (
 
 
 def _build_debug_log() -> DebugLog:
-    """Construct the phase-1 `DebugLog`: the `iteration_log` and `cost_summary`
-    tables with their keys / links configured (see
-    `swmtplanner/debuglog/DESIGN.md`). The planner populates it as it runs;
-    this just sets up the empty, schema-fixed log."""
+    """Construct the `DebugLog`: all tables with their keys / links configured
+    (see `swmtplanner/debuglog/DESIGN.md`). The planner populates the
+    `iteration_log` / `cost_summary` tables as it runs (phase 1); the cost
+    detail and output tables (phase 2) are set up here but not yet populated.
+    This just sets up the empty, schema-fixed log."""
     dl = DebugLog(
         iteration_log=[
             ('iteration_idx', None),
@@ -66,10 +67,76 @@ def _build_debug_log() -> DebugLog:
             ('raw', 0.0),
             ('cost', 0.0),
         ],
+        inv_cost_detail=[
+            ('icost_id', None),
+            ('summary_id', None),
+            ('move_id', None),
+            ('label', None),
+            ('item', None),
+            ('days', None),
+            ('qty', 0.0),
+            ('weight', 0.0),
+            ('value', 0.0),
+        ],
+        sched_cost_detail=[
+            ('activity_id', None),
+            ('move_id', None),
+            ('machine', None),
+            ('start', None),
+            ('end', None),
+            ('desc', None),
+            ('weight', None),                       # blank for cost-free types
+            ('cost', None),
+        ],
+        priority_detail=[                           # key-less
+            ('move_id', None),
+            ('item', None),
+            ('week_idx', None),
+            ('remaining_lbs', 0.0),
+            ('late_day', None),
+            ('weight', 0.0),
+            ('cost', 0.0),
+        ],
+        production=[
+            ('knit_id', None),
+            ('move_id', None),
+            ('roll_id', None),
+            ('job_id', None),
+            ('item', None),
+            ('start', None),
+            ('end', None),
+            ('lbs', 0.0),
+        ],
+        demand=[
+            ('order_id', None),
+            ('item', None),
+            ('due_date', None),
+            ('demand', 0.0),
+            ('covered_on_hand', 0.0),
+            ('remaining', 0.0),
+        ],
+        unmet_demand=[                              # key-less
+            ('item', None),
+            ('week_idx', None),
+            ('unmet_lbs', 0.0),
+        ],
     )
+    # Primary keys (set before the foreign keys that reference them).
     dl.set_pk('iteration_log', 'move_id', ctr_name='move_id')
     dl.set_pk('cost_summary', 'summary_id')                 # non-auto composite
+    dl.set_pk('inv_cost_detail', 'icost_id', ctr_name='icost_id')
+    dl.set_pk('sched_cost_detail', 'activity_id')           # the Activity's id
+    dl.set_pk('production', 'knit_id')                      # the Knit's id
+    dl.set_pk('demand', 'order_id')
+
+    # Foreign keys.
+    dl.set_fk('iteration_log', 'order_id', 'demand', 'order_id')
     dl.set_fk('cost_summary', 'move_id', 'iteration_log', 'move_id')
+    dl.set_fk('inv_cost_detail', 'summary_id', 'cost_summary', 'summary_id')
+    dl.set_fk('inv_cost_detail', 'move_id', 'iteration_log', 'move_id')
+    dl.set_fk('sched_cost_detail', 'move_id', 'iteration_log', 'move_id')
+    dl.set_fk('priority_detail', 'move_id', 'iteration_log', 'move_id')
+    dl.set_fk('production', 'move_id', 'iteration_log', 'move_id')
     return dl
 
 
