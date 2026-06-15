@@ -57,6 +57,22 @@ class ConstructionTests(unittest.TestCase):
         self.assertEqual(dl._counters.ctr_names, ())
         self.assertEqual(dl._data, {})
 
+    def test_tables_property_lists_names_in_declaration_order(self):
+        dl = DebugLog(
+            iteration_log=[('move_id', None), ('role', 'rejected')],
+            notes=[('text', None)],
+        )
+        self.assertEqual(dl.tables, ('iteration_log', 'notes'))
+
+    def test_tables_property_unaffected_by_keys_and_rows(self):
+        # `tables` reflects the registered tables, not their keys or row data.
+        dl = _linked_log()
+        before = dl.tables
+        self.assertEqual(before, ('il', 'cs'))
+        dl.add_row('il', iteration_idx=0)
+        dl.add_row('cs', summary_id='1_x', cost=1.0)
+        self.assertEqual(dl.tables, before)
+
 
 # ===================================================================
 # 2.1 set_pk — invalid inputs

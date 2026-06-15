@@ -38,6 +38,15 @@ class DebugLog:
         # depends on whether the table has a primary key (see _table_data).
         self._data: dict[str, dict[str, Any]] = {}
 
+    # ----- public read API -----
+
+    @property
+    def tables(self) -> tuple[str, ...]:
+        """The names of the tables registered with this log, in declaration
+        order. Lets a caller enumerate the log (e.g. to dump each table via
+        `get_df`) without knowing the schema up front."""
+        return tuple(self._tables)
+
     # ----- internal helpers -----
 
     def _column(self, table: str, column: str) -> dict[str, Any]:

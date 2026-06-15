@@ -267,8 +267,19 @@ and how each cost was incurred.
      priority-cost coverage; `INF_PLAN_TEST_SPEC.md` §1.2.7 updated to match.
      `_schedule_quantities_for` stays — still used by the live
      `_emit_cost_summary` debuglog path.
-   - The CLI keeps `--verbose`; it builds + populates the `DebugLog` (no extra
-     output file yet — rendering is Phases 3–4). 365 green.
+   - The CLI keeps `--verbose`; it builds + populates the `DebugLog` and dumps
+     each table to a TSV in `debuglog_<YYYYMMDD>/` (see Phase 2 note below). The
+     HTML dashboard rendering is still Phases 3–4. 367 green.
+   - **Design-doc sweep. ✅ done (uncommitted).** `planners/infinite/DESIGN.md`
+     was swept of the old verbose-mode design now that the code is gone
+     (consistency only — already implemented): the `cost_breakdown*` /
+     `CostBreakdown` / `PriorityContribution` definitions, the `PlanReport`
+     `*_detail` fields + all the verbose record types in the `loop/` section,
+     the whole "Verbose iteration log" CLI subsection (the ten-TSV schema), and
+     Phase 3 were removed/rewritten to point at `swmtplanner/debuglog/DESIGN.md`
+     and describe the live `debuglog`/`--verbose` path (−457 lines). The
+     `debuglog/DESIGN.md` itself is unchanged (it already describes the new
+     design).
 
    - **Phase 1 — simplified iteration log + cost summary. ✅ done
      (uncommitted).** `DebugLog` carries two tables, both built **live as the
@@ -291,9 +302,13 @@ and how each cost was incurred.
        `kind` ∈ {inventory, schedule, other}, keyed `{move_id}_{label}` with a
        `move_id` FK; per-move `Σ cost == iteration_log.total_cost`. Added
        `_priority_raw` (which `_priority_cost` now delegates to).
-     - **Not exported yet** — the populated log isn't written anywhere
-       (Phase 1 has no dashboard; rendering is Phases 3–4). `--verbose` builds
-       and populates it but produces no extra output file.
+     - **TSV export (added).** `--verbose` now dumps every populated table to a
+       `debuglog_<YYYYMMDD>/` folder next to the workbook — one `{table}.tsv`
+       per table, via a new `DebugLog.tables` property (tuple of registered
+       table names, declaration order) + `get_df`. Keyed tables keep their PK
+       index column; key-less tables drop the RangeIndex
+       (`index=df.index.name is not None`). The HTML *dashboard* rendering is
+       still Phases 3–4; this is the plain-table dump.
    - **Phase 2 — cost-detail + output tables. ✅ population complete
      (uncommitted).** Table layout fully designed in `debuglog/DESIGN.md`
      (per-table columns, keys, links, granularity); all six tables are now

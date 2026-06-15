@@ -294,12 +294,21 @@ def run(
     write_plan_report_xlsx(report, output_path)
 
     if verbose:
-        # The DebugLog's tables are set up and threaded into the planner, but
-        # population and rendering land in later debuglog phases — for now the
-        # log is wired through, not yet written or exported.
+        # Dump every populated DebugLog table to a TSV (one file per table,
+        # named for the table) in a debuglog_<YYYYMMDD>/ folder next to the
+        # workbook. Keyed tables keep their primary-key index column; key-less
+        # tables drop the meaningless RangeIndex.
+        log_dir = output_dir / f'debuglog_{sd.strftime("%Y%m%d")}'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for name in debuglog.tables:
+            df = debuglog.get_df(name)
+            df.to_csv(
+                log_dir / f'{name}.tsv', sep='\t',
+                index=df.index.name is not None,
+            )
         typer.echo(
-            '  (--verbose: debug-log tables set up and passed to the planner; '
-            'population/rendering land in later debuglog phases)'
+            f'  (--verbose) wrote {len(debuglog.tables)} debug-log '
+            f'table(s) to {log_dir}'
         )
 
     typer.echo('Done.')

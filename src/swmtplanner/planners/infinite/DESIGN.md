@@ -171,35 +171,7 @@ CostWeights
 
 Costing
   score(state) -> float                                  # current state's score (no ctx — cross-cutting costs are per-move)
-  score_after_move(state, move, ctx) -> float            # post-commit score, pure
-  cost_breakdown(state) -> CostBreakdown                 # current state's breakdown; serves as the baseline for delta computation in verbose mode
-  cost_breakdown_after_move(state, move, ctx) -> CostBreakdown   # same total broken down per component, pure
-
-CostBreakdown                                            # plain named record returned by cost_breakdown and cost_breakdown_after_move
-  # demand-side weighted totals + absolute per-item breakdown (the loop subtracts baseline to derive deltas for the per-cost detail tables in verbose mode)
-  lateness: float                                        # weighted total across all rls_items for the state this CostBreakdown describes
-  lateness_by_item: dict[str, float]                     # absolute weighted per-item contribution for that state; only items with a non-zero contribution are present
-  drainage: float
-  drainage_by_item: dict[str, float]
-  carrying: float
-  carrying_by_item: dict[str, float]
-  excess: float
-  excess_by_item: dict[str, float]
-  # schedule weighted scalars (no per-item structure — these are not summed across items)
-  tape_out_single, tape_out_both: float
-  style_change, runner_change, pattern_change: float
-  idle_time: float
-  waste_lbs: float
-  # cross-cutting weighted scalars; priority gets an absolute per-item breakdown (not delta), since priority cost is per-move and does not exist in the baseline
-  priority: float
-  priority_by_item: dict[str, PriorityContribution]      # absolute weighted per-item contribution; at most one entry per item (each item contributes at most one regular order to the candidate pool per iteration, so its higher-priority counterpart is unique); empty for cost_breakdown(state)
-  level_loading, old_machine: float                      # no per-item structure (level_loading is per-machine; old_machine is a flat per-move flag)
-  total: float                                           # sum of the fourteen weighted components above
-
-PriorityContribution                                     # value type for CostBreakdown.priority_by_item; the item_id is the enclosing dict key
-  week_idx: int                                          # week (0..3) of the item's deferred regular order
-  remaining_lbs: float                                   # unfulfilled lbs of the order at the time of evaluation (O.remaining_lbs)
-  priority: float                                        # absolute weighted contribution: w.priority × remaining_lbs × 2^days_late(O, move)
+  score_after_move(state, move, ctx, debuglog=None) -> float   # post-commit score, pure; with a DebugLog, also records the per-component cost breakdown into the log
 ```
 
 `ctx` is a `ScoringContext` (see "Plant-wide coordination" below) that
@@ -207,10 +179,10 @@ bundles the priorities dict, the earliest DP time, and the
 new-machine-availability dict so the scorer can
 compute the cross-cutting cost contributions without re-running the
 priority sort or the candidate-wide min-DP scan. Only
-`score_after_move` and `cost_breakdown_after_move` consume `ctx`;
-`score(state)` reports the per-item + per-machine portion of the score
-for a state with no in-iteration move under consideration (e.g., the
-post-loop final score in `PlanReport.total_score`).
+`score_after_move` consumes `ctx`; `score(state)` reports the per-item
++ per-machine portion of the score for a state with no in-iteration
+move under consideration (e.g., the post-loop final score in
+`PlanReport.total_score`).
 
 `score_after_move` is the loop's hot path. It computes what `score`
 would return if `move` were committed, without actually mutating
@@ -219,31 +191,13 @@ contributions, on inspecting `move.plan.activities` for the schedule-side
 changeover contributions, and on the `ctx` lookups for the cross-
 cutting contributions.
 
-`cost_breakdown_after_move` returns the same total broken down into
-one weighted scalar per component, plus absolute per-item dicts for
-the four demand-side costs (`lateness_by_item`, `drainage_by_item`,
-`carrying_by_item`, `excess_by_item`) *and* for priority cost
-(`priority_by_item`, with `PriorityContribution` values so each
-entry also carries the deferred order's `week_idx` and
-`remaining_lbs`). `cost_breakdown(state)` returns the same shape
-for the current (baseline) state with no move applied — its
-`priority`, `level_loading`, and `old_machine` fields are 0
-(`priority_by_item` is empty) because those costs are per-move.
-
-The verbose loop calls `cost_breakdown` once at the start of each
-iteration to capture the baseline, then `cost_breakdown_after_move`
-per candidate. The demand-side detail tables hold *deltas* derived
-by the loop as `after_move.{cost}_by_item[item] -
-baseline.{cost}_by_item[item]`, with zero-delta items dropped. The
-priority detail table holds the *absolute* per-item contributions
-from `after_move.priority_by_item` directly, since the baseline has
-none to subtract; each row also reports the deferred order's
-`week_idx` and `remaining_lbs` so an operator can see exactly which
-urgent orders this move is passing over and how much unfulfilled
-demand each represents (see "Verbose iteration log" under the CLI
-section). The hot loop keeps calling `score_after_move`; the
-breakdown path is only walked when `plan` is invoked with
-`verbose=True`.
+`score_after_move` also accepts an optional `debuglog` keyword: when a
+`DebugLog` is passed, it records the move's full per-component cost
+breakdown (and the supporting cost-detail leaf rows) into the log as it
+scores, then returns the same scalar total. When absent (the hot path)
+nothing is logged. The debug/audit log lives in the standalone
+top-level `swmtplanner.debuglog` module — see `debuglog/DESIGN.md` for
+its table schema and the planner's population flow.
 
 ### `coordination/` (Phase 2)
 
@@ -273,7 +227,7 @@ Move
                           # (the eligible RegularOrder.lbs / SafetyOrder.lbs); for the debug log
   plan: ProductionPlan    # cached output of machine.plan_production
 
-plan(state, costing) -> PlanReport
+plan(state, costing, debuglog=None) -> PlanReport
 ```
 
 `plan` is the entrypoint. It iterates:
@@ -317,110 +271,6 @@ PlanReport
   unmet_lbs_by_item_week: dict[tuple[str, int], float]
   # which orders ship late and when they finish filling
   late_orders: tuple[RawOrder, ...]
-  # per-iteration audit trail (populated only when plan(..., verbose=True);
-  # all ten are None when verbose=False)
-  iteration_log:    tuple[IterationLogRecord, ...]   | None
-  cost_detail:      tuple[CostDetailRecord, ...]     | None
-  lateness_detail:  tuple[LatenessDetailRecord, ...] | None
-  drainage_detail:  tuple[DrainageDetailRecord, ...] | None
-  carrying_detail:  tuple[CarryingDetailRecord, ...] | None
-  excess_detail:    tuple[ExcessDetailRecord, ...]   | None
-  priority_detail:  tuple[PriorityDetailRecord, ...] | None
-  schedule_detail:  tuple[ScheduleDetailRecord, ...] | None
-  job_detail:       tuple[JobDetailRecord, ...]      | None
-  roll_detail:      tuple[RollDetailRecord, ...]     | None
-
-IterationLogRecord                              # one row of iteration_log.tsv; one record per (iteration, scored candidate)
-  iteration_idx: int                            # 0-indexed main-loop iteration
-  role: Literal['committed', 'rejected']        # whether this candidate was the one committed
-  score_rank: int                               # rank across all scored candidates in the iteration (0 = lowest score; the committed move is always 0)
-  item_score_rank: int                          # rank within this item's candidates (0 = lowest-scoring same-item candidate; the committed move is always 0)
-  # candidate identity
-  item_id: str
-  target_type: Literal['regular', 'safety']
-  target_week: int | None                       # week_idx for regular orders; None for safety
-  machine_id: str
-  machine_is_new: bool                          # convenience flag; reads from state.machines[machine_id].is_new
-  start_at: Literal['schedule_tail', 'next_runout']
-  idle_hours: float                             # move.idle_for converted to hours
-  # summary + foreign keys into the detail tables
-  total_score: float                            # equals cost_detail[move_id].total
-  move_id: int                                  # this candidate's id; foreign key into cost_detail, schedule_detail, and job_detail (one row / group per scored candidate)
-
-CostDetailRecord                                # one row of cost_detail.tsv; one record per scored candidate
-  move_id: int                                  # primary key; matches iteration_log.move_id
-  # weighted scalars (same numeric values as the CostBreakdown totals)
-  lateness, drainage, carrying, excess: float
-  tape_out_single, tape_out_both: float
-  style_change, runner_change, pattern_change, idle_time, waste_lbs: float
-  priority, level_loading, old_machine: float
-  total: float                                  # sum of the fourteen weighted components above
-  # foreign keys into the per-cost detail tables; None when no item contributes to the corresponding cost
-  lateness_detail_id: int | None
-  drainage_detail_id: int | None
-  carrying_detail_id: int | None
-  excess_detail_id:   int | None
-  priority_detail_id: int | None                # None when no higher-priority order is being skipped (priority cost == 0)
-
-LatenessDetailRecord                            # one row of lateness_detail.tsv; one record per (candidate, item whose lateness contribution would change from baseline)
-  lateness_detail_id: int                       # groups all rows from one candidate's lateness deltas
-  item_id: str
-  lateness_delta: float                         # weighted per-item delta: w.lateness × (after_move.raw_view.lateness - baseline.raw_view.lateness); rows with delta == 0 are omitted
-
-DrainageDetailRecord                            # same shape, for drainage
-  drainage_detail_id: int
-  item_id: str
-  drainage_delta: float
-
-CarryingDetailRecord                            # same shape, for carrying
-  carrying_detail_id: int
-  item_id: str
-  carrying_delta: float
-
-ExcessDetailRecord                              # same shape, for excess
-  excess_detail_id: int
-  item_id: str
-  excess_delta: float
-
-PriorityDetailRecord                            # one row of priority_detail.tsv; one record per (candidate, item whose deferred regular order is higher-priority than this move's order)
-  priority_detail_id: int                       # groups all rows from one candidate's priority breakdown
-  item_id: str                                  # owner of the higher-priority deferred order; appears at most once per priority_detail_id (each item contributes at most one regular order to the candidate pool per iteration)
-  week_idx: int                                 # week (0..3) of the deferred order
-  remaining_lbs: float                          # unfulfilled lbs of the deferred order at the time of evaluation (O.remaining_lbs)
-  priority: float                               # absolute weighted contribution: w.priority × remaining_lbs × 2^days_late(O, move); not a delta — baseline has no priority cost
-
-ScheduleDetailRecord                            # one row of schedule_detail.tsv; one record per Activity in a candidate's move.plan.activities
-  move_id: int                                  # groups all rows from one candidate's plan.activities
-  activity_id: str                              # the Activity's own id (Activity.id); unique across the run
-  machine_id: str
-  start: datetime
-  end: datetime
-  description: str                              # human-readable rendering of the activity and its key fields (e.g. "Knit item=ABC lbs=1400", "TapeOut both", "PatternChange ABC→XYZ", "Doff", "Threading both")
-
-JobDetailRecord                                 # one row of job_detail.tsv; one record per Job in a candidate's move.plan.jobs
-  move_id: int                                  # foreign key into iteration_log; groups all jobs from one candidate (a move yields 1 or 2 jobs)
-  job_id: str                                   # the Job's own id (Job is HasID); groups this job's roll_detail rows
-  item_id: str                                  # job.item.id
-  total_rolls: int                              # job.total_rolls
-  total_lbs: float                              # job.total_lbs
-
-RollDetailRecord                                # one row of roll_detail.tsv; one record per Roll in a candidate's job
-  move_id: int                                  # foreign key into iteration_log
-  job_id: str                                   # foreign key into job_detail (the owning Job)
-  roll_idx: int                                 # unique id for this roll; auto-incremented across the verbose run (Roll has no id of its own)
-  lbs: float                                    # roll.lbs
-  completion_time: datetime                     # roll.completion_time
-
-IterLogCounters                                 # loop-owned bundle of auto-incrementing id counters for the verbose tables; built once per verbose run, each field a zero-arg callable returning the next int in its own independent sequence
-  move_id: () -> int                            # per scored candidate (collapsed the former cost_id + sched_id)
-  roll_idx: () -> int                           # per RollDetailRecord; Roll carries no id of its own, so the loop assigns one
-  lateness_detail_id: () -> int                 # per non-empty lateness delta group
-  drainage_detail_id: () -> int                 # per non-empty drainage delta group
-  carrying_detail_id: () -> int                 # per non-empty carrying delta group
-  excess_detail_id: () -> int                   # per non-empty excess delta group
-  priority_detail_id: () -> int                 # per non-empty priority group
-  # activity_id and job_id are NOT counters here — they are record-owned
-  # ids (Activity.id, Job.id); only Roll, which has no id, needs a counter
 ```
 
 The full schedules also remain on the `Machine` instances inside
@@ -435,97 +285,16 @@ order's `late_lbs` and `late_fill_date` come from
 `RawView.recompute` (see `demand/DESIGN.md`). The CLI uses this
 sequence to build the operator-facing `late_orders` sheet.
 
-`iteration_log` is populated only when `plan` is called with
-`verbose=True`. Each main-loop iteration that commits a move
-contributes up to 16 records, selected by a two-level group-then-
-top-k rule:
-
-1. Group the iteration's candidates by `item_id`.
-2. Rank items by their lowest-scoring candidate (each item's best
-   shot at being committed); select the top 4 items.
-3. Within each selected item, log the top 4 lowest-scoring
-   candidates of that item.
-
-The committed move — always the lowest-scoring candidate of the
-lowest-scoring item — is logged with `score_rank == 0`,
-`item_score_rank == 0`, `role == 'committed'`. All other logged
-candidates are `role == 'rejected'`. If the iteration has fewer
-than 4 candidate items, all items are logged; if a selected item
-has fewer than 4 candidates, all of that item's candidates are
-logged. The two-level rule separates two questions the old global
-top-4 conflated — "why this candidate?" (same-item siblings) and
-"why this item?" (runner-up items) — and puts both within reach in
-a single block.
-
-**Tie-breaking.** Ranks are deterministic so the log is
-reproducible. When two items' lowest candidates score equal, items
-are ordered by `item_id`. When two candidates score equal — used to
-compute both `score_rank` (across the pool) and `item_score_rank`
-(within an item) — the order is by `item_id`, then `machine_id`,
-then decision point with `next_runout` ordered before
-`schedule_tail`.
-
-The nine companion detail tuples on `PlanReport` are populated in
-lockstep with `iteration_log`. At the start of each iteration the
-loop captures a baseline `CostBreakdown` via
-`Costing.cost_breakdown(state)`; for each scored candidate it then
-calls `Costing.cost_breakdown_after_move(state, move, ctx)` and,
-using the baseline, emits in addition to the candidate's
-`IterationLogRecord`:
-
-- one `CostDetailRecord` holding the fourteen weighted post-commit
-  scalars and per-cost detail-table FKs;
-- one row per `item_id` whose contribution to a given demand-side
-  cost would *change* from baseline (`after_move.{cost}_by_item -
-  baseline.{cost}_by_item`), with zero-delta items dropped; rows
-  go into `lateness_detail`, `drainage_detail`, `carrying_detail`,
-  or `excess_detail` as appropriate and are grouped by their
-  respective `*_detail_id`;
-- one row per `item_id` in `after_move.priority_by_item` (i.e.,
-  each item whose deferred regular order is higher-priority than
-  this move's order), grouped by `priority_detail_id`; each row
-  carries the deferred order's `week_idx` and `remaining_lbs`
-  alongside the *absolute* weighted contribution (no baseline to
-  subtract from);
-- one `ScheduleDetailRecord` per `Activity` in `move.plan.activities`,
-  grouped by `move_id`;
-- one `JobDetailRecord` per `Job` in `move.plan.jobs` (1 or 2 per
-  candidate), grouped by `move_id`;
-- one `RollDetailRecord` per `Roll` in each job's `rolls`, grouped
-  by `job_id` (and carrying `move_id`).
-
-In practice the move touches the jobs and on_hand of at most two items:
-`move.item` and `machine.current_status.current_item`, so the four
-demand-side delta dicts have at most two entries each — that item,
-and the previous running item if `move.start_at == 'next_runout'`, and
-only if the demand-side costs on those items actually change. The
-priority dict can have many entries, one per item with a deferred
-higher-priority regular order — each item appears at most once,
-since the candidate enumerator picks at most one regular order per
-item per iteration, so its higher-priority counterpart is unique.
-The per-item attribution exposes *which* urgent orders are being
-passed over and how much unfulfilled demand each carries, which is
-exactly the diagnostic an operator needs when an urgent order
-doesn't get committed.
-
-Cross-table links are ids owned by the loop, bundled in
-`IterLogCounters`. `move_id` (the scored candidate), `roll_idx`, and
-the five `*_detail_id` counters are auto-incremented integers, each
-starting at 1 at the beginning of the verbose run. `activity_id` and
-`job_id` are not counters — they are the record-owned ids `Activity.id`
-and `Job.id`; `roll_idx` exists as a counter only because `Roll` has
-no id of its own. `job_id` is reused as the `job_detail`→`roll_detail`
-link.
-A `*_detail_id` is omitted (`None` on the
-`CostDetailRecord`, blank cell in the TSV) when the corresponding
-cost would have no contributing rows (no non-zero deltas for the
-four demand-side costs; no higher-priority skipped orders for
-priority), and the matching detail table emits no rows for that
-candidate.
-
-With `verbose=False` (the default), all ten tuples are `None`,
-`Costing.cost_breakdown` is never called, and the loop skips the
-breakdown path entirely — the verbose mode is strictly opt-in.
+The per-iteration decision trail — *why* each move was chosen over
+the alternatives — is no longer reconstructed onto `PlanReport`.
+Instead, `plan` accepts an optional `debuglog` (a `DebugLog`); when
+present, the loop takes a debug scoring path that scores and ranks the
+full candidate list and writes each candidate's iteration-log row and
+cost breakdown into the log as it runs, then commits the lowest-cost
+move exactly as the hot path does. When absent (the default), the loop
+scores via the scalar `score_after_move` and nothing is logged. The
+log object, its tables, and the population flow are owned by the
+standalone `swmtplanner.debuglog` module — see `debuglog/DESIGN.md`.
 
 ## Candidate enumeration
 
@@ -1000,7 +769,7 @@ the config alone suffices for a full run.
 | `--demand`     | `-d`  | path to demand JSON, *or* an inline JSON string             |
 | `--weights`    | `-w`  | path to weights JSON, *or* an inline JSON string            |
 | `--output-dir` | `-o`  | output directory (defaults to cwd)                          |
-| `--verbose`    | `-v`  | flag; emit a per-iteration TSV audit log alongside the XLSX |
+| `--verbose`    | `-v`  | flag; build and populate the in-memory `DebugLog` audit trail during the run (see `debuglog/DESIGN.md`) |
 
 Non-`start_date` override values are interpreted as **inline JSON**
 when the first non-whitespace character is `{` or `[`, otherwise as
@@ -1098,223 +867,25 @@ resolved `start_date`. Six sheets:
   reports when the order will finish filling (the latest contributing
   chunk's arrival time), even if some demand remains unmet.
 
-When `--verbose` is set, an additional set of TSV files is written
-in a `verbose_<YYYYMMDD>/` subdirectory next to the workbook — see
-"Verbose iteration log" below.
+When `--verbose` is set, the planner additionally builds and populates
+an in-memory `DebugLog` audit trail during the run — see "Verbose
+audit log" below.
 
 See `report.py` for the per-sheet layouts.
 
-### Verbose iteration log
+### Verbose audit log
 
-The `--verbose` flag turns on a per-iteration audit log written as
-ten TSV files in a `<output_dir>/verbose_<YYYYMMDD>/`
-subdirectory next to the workbook. The files form a small joinable
-schema: the headline `iteration_log.tsv` holds one row per scored
-candidate keyed by `move_id`, which joins to companion tables that
-store the full weighted cost breakdown, per-item demand-cost deltas,
-per-item priority-cost attribution, the candidate's full activity
-plan, and the production it generates (jobs and their rolls).
-
-| File                   | Grain                                                  | Joined to iteration_log via            |
-|---|---|---|
-| `iteration_log.tsv`    | One row per scored candidate                           | (primary key: `move_id`)               |
-| `cost_detail.tsv`      | One row per scored candidate                           | `move_id`                              |
-| `lateness_detail.tsv`  | One row per (candidate, item) with a non-zero lateness delta vs the iteration's baseline | `cost_detail.lateness_detail_id` |
-| `drainage_detail.tsv`  | One row per (candidate, item) with a non-zero drainage delta vs the iteration's baseline | `cost_detail.drainage_detail_id` |
-| `carrying_detail.tsv`  | One row per (candidate, item) with a non-zero carrying delta vs the iteration's baseline | `cost_detail.carrying_detail_id` |
-| `excess_detail.tsv`    | One row per (candidate, item) with a non-zero excess delta vs the iteration's baseline   | `cost_detail.excess_detail_id`   |
-| `priority_detail.tsv`  | One row per (candidate, item) with at least one higher-priority regular order being skipped by this move | `cost_detail.priority_detail_id` |
-| `schedule_detail.tsv`  | One row per Activity in `move.plan.activities`         | `move_id`                              |
-| `job_detail.tsv`       | One row per `Job` in `move.plan.jobs`                  | `move_id`                              |
-| `roll_detail.tsv`      | One row per `Roll` in a job's `rolls`                  | `job_detail.job_id` (and `move_id`)    |
-
-For each main-loop iteration the CLI records up to 16 candidates —
-grouped by item, with the top 4 items (ranked by their
-lowest-scoring candidate) each contributing their top 4
-lowest-scoring candidates. The committed move is always the first
-row of the first item. Operators understand *why* the planner chose
-a particular move by reading `iteration_log.tsv` (committed row
-next to its same-item siblings and runner-up items), expanding any
-row into its weighted cost breakdown by joining `cost_detail.tsv`
-on `move_id`, drilling into per-item *deltas* for any of the four demand-side
-costs (how each affected item's contribution would change from the
-iteration's baseline) by joining the appropriate `*_detail.tsv` on
-the matching `*_detail_id`, drilling into the *absolute* per-item
-attribution of priority cost (which urgent orders this move would
-defer) by joining `priority_detail.tsv` on `priority_detail_id`,
-and inspecting the candidate's full activity plan by joining
-`schedule_detail.tsv` on `move_id`, and its production output by
-joining `job_detail.tsv` on `move_id` and `roll_detail.tsv` on
-`job_id`.
-
-#### `iteration_log.tsv` columns (in order)
-
-| Column            | Type         | Notes                                                                                          |
-|---|---|---|
-| `iteration`       | int          | 0-indexed main-loop iteration.                                                                 |
-| `role`            | str          | `committed` or `rejected`.                                                                     |
-| `score_rank`      | int          | Rank across all scored candidates in the iteration (0 = lowest score; the committed move is always 0). |
-| `item_score_rank` | int          | Rank within this item's candidates (0 = lowest-scoring same-item candidate; the committed move is always 0). |
-| `item_id`         | str          | The move's target item.                                                                        |
-| `target_type`     | str          | `regular` or `safety` — which kind of order the move was placed against.                       |
-| `target_week`     | int \| blank | Week index (0–3) for a regular order; blank cell for a safety order.                           |
-| `machine_id`      | str          | The move's machine.                                                                            |
-| `machine_is_new`  | bool         | `state.machines[machine_id].is_new` — useful for explaining the `old_machine` cost.            |
-| `start_at`        | str          | `schedule_tail` or `next_runout`.                                                               |
-| `idle_hours`      | float        | `move.idle_for` expressed in hours (carrying-avoidance idle).                                  |
-| `total_score`     | float        | The candidate's `score_after_move(state, move, ctx)`; equals `cost_detail[move_id].total`.     |
-| `move_id`         | int          | This candidate's id; foreign key into `cost_detail.tsv`, `schedule_detail.tsv`, and `job_detail.tsv`. |
-
-#### `cost_detail.tsv` columns (in order)
-
-| Column                | Type         | Notes                                                                                          |
-|---|---|---|
-| `move_id`             | int          | Primary key; matches `iteration_log.move_id`.                                                  |
-| `lateness`            | float        | Weighted total: `w.lateness × sum_i raw_view_i.lateness` for the post-commit state.            |
-| `drainage`            | float        | Weighted total from per-item `safety_view.drainage` (summed).                                  |
-| `carrying`            | float        | Weighted total from per-item `safety_view.carrying` (summed).                                  |
-| `excess`              | float        | Weighted total from per-item `safety_view.excess` (summed).                                    |
-| `tape_out_single`     | float        | Weighted count of `TapeOut(bars='top'|'btm')` in the affected machine's combined activities.   |
-| `tape_out_both`       | float        | Weighted count of `TapeOut(bars='both')`.                                                      |
-| `style_change`        | float        | Weighted count of `StyleChange` (new-machine changeover).                                      |
-| `runner_change`       | float        | Weighted count of `RunnerChange` (legacy, within pattern family).                              |
-| `pattern_change`      | float        | Weighted count of `PatternChange` (legacy, cross pattern family).                              |
-| `idle_time`           | float        | Weighted sum of `Idle` work-hour durations.                                                    |
-| `waste_lbs`           | float        | Weighted sum of `Waste.lbs` (discarded yarn) in the affected machine's combined activities.    |
-| `priority`            | float        | Cross-cutting: `w.priority × sum_O O.lbs × 2^days_late(O)` over higher-priority regular orders — see "Priority cost". |
-| `level_loading`       | float        | Cross-cutting: `work_hours_delta × w.level_loading` per "Level-loading".                       |
-| `old_machine`         | float        | Cross-cutting: `w.old_machine` when applicable, else 0; see "New-machine preference".          |
-| `total`               | float        | Sum of the fourteen weighted components above; equals `iteration_log.total_score`.               |
-| `lateness_detail_id`  | int \| blank | Foreign key into `lateness_detail.tsv`. Blank when no item has a non-zero `lateness` delta from baseline. |
-| `drainage_detail_id`  | int \| blank | Foreign key into `drainage_detail.tsv`. Blank when no item has a non-zero `drainage` delta from baseline. |
-| `carrying_detail_id`  | int \| blank | Foreign key into `carrying_detail.tsv`. Blank when no item has a non-zero `carrying` delta from baseline. |
-| `excess_detail_id`    | int \| blank | Foreign key into `excess_detail.tsv`. Blank when no item has a non-zero `excess` delta from baseline.    |
-| `priority_detail_id`  | int \| blank | Foreign key into `priority_detail.tsv`. Blank when no higher-priority order is being skipped (priority cost == 0). |
-
-#### Demand-cost detail TSVs — `lateness_detail.tsv` shown; same shape for `drainage`, `carrying`, `excess`
-
-| Column                | Type  | Notes                                                                                          |
-|---|---|---|
-| `lateness_detail_id`  | int   | Groups all rows from one candidate's lateness deltas.                                          |
-| `item_id`             | str   | The RlsItem whose lateness contribution would change if this candidate were committed.         |
-| `lateness_delta`      | float | Weighted per-item delta vs the iteration's baseline: `w.lateness × (after_move.raw_view.lateness - baseline.raw_view.lateness)`. Sign reflects whether the candidate would worsen (>0) or improve (<0) this item's lateness. |
-
-`drainage_detail.tsv`, `carrying_detail.tsv`, and
-`excess_detail.tsv` use the analogous `<cost>_detail_id` and
-`<cost>_delta` column names. Rows are emitted only for items with
-a non-zero delta in the corresponding cost — in practice the move
-only changes its target item's demand-side costs, so each detail
-group typically has at most one row (and is omitted entirely when
-the candidate would not move that cost). A candidate whose only
-effect is on, say, drainage will produce a single row in
-`drainage_detail.tsv` and no rows in the other three demand-detail
-tables (with the matching `*_detail_id` cells in `cost_detail.tsv`
-left blank).
-
-#### `priority_detail.tsv` columns (in order)
-
-| Column                | Type  | Notes                                                                                          |
-|---|---|---|
-| `priority_detail_id`  | int   | Groups all rows from one candidate's priority breakdown.                                       |
-| `item_id`             | str   | Owner of the higher-priority deferred regular order. Appears at most once per `priority_detail_id` — each item contributes at most one regular order to the candidate pool per iteration. |
-| `week_idx`            | int   | Week (0..3) of the deferred order.                                                             |
-| `remaining_lbs`       | float | Unfulfilled lbs of the deferred order at the time of evaluation (`O.remaining_lbs`).           |
-| `priority`            | float | *Absolute* weighted contribution: `w.priority × remaining_lbs × 2^days_late(O, move)`. Sums across rows in the group equal `cost_detail.priority`. |
-
-`priority_detail.tsv` is structurally analogous to the four
-demand-cost detail tables but holds **absolute** weighted
-contributions, not deltas. Priority cost is a per-move quantity
-that doesn't exist in the baseline state, so there's nothing to
-subtract from — the absolute value is the most informative thing to
-log. The `week_idx` and `remaining_lbs` columns turn each row into
-a full picture of *what* is being deferred, not just *how much*
-that costs, so an operator scanning `priority_detail.tsv` for an
-iteration where an urgent order didn't get committed sees which
-competing items pulled the planner's attention elsewhere, which
-weeks of theirs are at stake, and how much demand is sitting
-unfulfilled.
-
-Multiple rows per candidate are common here (unlike the demand-cost
-detail tables): any item whose own deferred regular order is
-higher-priority than this move's order contributes a row. Rows are
-emitted only when the per-item weighted contribution is non-zero,
-so an item present in `ctx.priorities` but ranked below the move
-produces no row.
-
-#### `schedule_detail.tsv` columns (in order)
-
-| Column         | Type     | Notes                                                                                          |
-|---|---|---|
-| `move_id`      | int      | Groups all rows from one candidate's `move.plan.activities`.                                   |
-| `activity_id`  | str      | The `Activity`'s own id (`Activity.id`); unique across the run.                                 |
-| `machine_id`   | str      | The candidate's machine.                                                                       |
-| `start`        | datetime | Activity start.                                                                                |
-| `end`          | datetime | Activity end.                                                                                  |
-| `description`  | str      | Human-readable rendering of the activity and its key fields (e.g. `"Knit item=ABC lbs=1400"`, `"TapeOut both"`, `"PatternChange ABC→XYZ"`, `"Doff"`, `"Threading both"`). |
-
-#### `job_detail.tsv` columns (in order)
-
-| Column         | Type     | Notes                                                                                          |
-|---|---|---|
-| `move_id`      | int      | Foreign key into `iteration_log.tsv`; groups all jobs from one candidate (a move yields 1 or 2 jobs). |
-| `job_id`       | str      | The `Job`'s own id (`Job.id`); groups this job's `roll_detail` rows.                            |
-| `item_id`      | str      | `job.item.id`.                                                                                 |
-| `total_rolls`  | int      | `job.total_rolls`.                                                                             |
-| `total_lbs`    | float    | `job.total_lbs`.                                                                               |
-
-#### `roll_detail.tsv` columns (in order)
-
-| Column            | Type     | Notes                                                                                          |
-|---|---|---|
-| `move_id`         | int      | Foreign key into `iteration_log.tsv`.                                                          |
-| `job_id`          | str      | Foreign key into `job_detail.tsv` (the owning `Job`).                                          |
-| `roll_idx`        | int      | Unique id for this roll, auto-incremented across the verbose run (`Roll` has no id of its own). |
-| `lbs`             | float    | `roll.lbs`.                                                                                    |
-| `completion_time` | datetime | `roll.completion_time` — when the roll is ready to ship.                                        |
-
-#### Row ordering and id semantics
-
-Rows in `iteration_log.tsv` are emitted in main-loop order, so a
-top-to-bottom read is a chronological decision trace. Within an
-iteration block, rows are grouped by item (top-ranked item first,
-ranked by the item's lowest-scoring candidate); within each item
-group `item_score_rank` orders the rows (0 first). The committed
-row is therefore the very first row of each iteration block.
-
-The companion tables are emitted in `move_id` order —
-i.e., parallel to the candidate sequence in `iteration_log.tsv`, so
-each TSV reads top-to-bottom in the same chronological direction.
-The auto-incremented counters (`move_id`, `roll_idx`, and the five
-`*_detail_id`s, bundled in `IterLogCounters`) restart at 1 at the
-beginning of each verbose run and are independent of one another.
-`move_id` is 1:1 with scored candidates and is the single handle the
-cost, schedule, and job detail tables all join on — this refactor
-collapsed the former separate `cost_id` and `sched_id` (always 1:1
-with each other) into it. `activity_id` and `job_id` are not
-counters — they are the record-owned ids `Activity.id` and `Job.id`;
-`roll_detail` joins to `job_detail` on `job_id` directly. `roll_idx`
-is a counter only because `Roll` has no id of its own. Cross-file
-joins are by id only.
-
-#### Internal flow
-
-At the start of each main-loop iteration in verbose mode, the loop
-captures a baseline via `Costing.cost_breakdown(state)`; for each
-scored candidate it then calls
-`Costing.cost_breakdown_after_move(state, move, ctx)` and derives
-the per-item deltas for the four demand-cost detail tables by
-subtracting `baseline.{cost}_by_item` from the candidate's
-`{cost}_by_item` (zero-delta items dropped). Priority detail rows
-come directly from `after_move.priority_by_item` (absolute, no
-subtraction); the `job_detail` and `roll_detail` rows come straight
-from `move.plan.jobs` and each job's `rolls`, needing no baseline.
-The resulting records flow through `plan(...,
-verbose=True)` into the ten detail tuples on `PlanReport`; the
-CLI converts each tuple into the corresponding TSV. With
-`--verbose` off, the loop never calls `cost_breakdown` or
-`cost_breakdown_after_move`, and all ten `PlanReport` detail
-tuples stay `None` — the verbose path adds work only when
-explicitly requested.
+The `--verbose` flag turns on a per-iteration decision trail that
+explains *why* each committed move was chosen over the alternatives.
+It is built into a `DebugLog` — a standalone, generic, config-driven
+table container in the top-level `swmtplanner.debuglog` module —
+threaded into `plan(..., debuglog=...)` and populated live as the loop
+runs (iteration log, per-component cost summary, the cost-detail leaf
+tables, the per-`Knit` production ledger) plus a post-loop copy of the
+`demand` / `unmet_demand` tables. The log's table schema, keys/links,
+population flow, and (later) the HTML dashboard that renders it are all
+specified in `swmtplanner/debuglog/DESIGN.md`. With `--verbose` off,
+no log is built and the loop stays entirely on the scalar hot path.
 
 ### Why a config file (with overrides)
 
@@ -1420,64 +991,36 @@ priority + level-loading + new-machine preference isn't enough — may
 include plant-wide total excess, per-machine utilization imbalance,
 and aggregate changeover time.
 
-### Phase 3 — verbose iteration audit log
+### Phase 3 — verbose audit log (the `debuglog` module)
 
-A decision-trace output that explains *why* each committed move was
-chosen over the alternatives. No change to the planner's behavior
-or output schedule — only an additional set of TSVs produced when
-the CLI's `--verbose` flag is set. See "Verbose iteration log"
-under the CLI section for the file layout.
+A decision-trace audit that explains *why* each committed move was
+chosen over the alternatives. No change to the planner's behavior or
+output schedule — it is built only when the CLI's `--verbose` flag is
+set. Realized as the standalone top-level `swmtplanner.debuglog`
+module rather than as `PlanReport` fields, so the audit machinery
+stays decoupled from the planner's headline output.
 
-- Extend `Costing` with two methods: `cost_breakdown(state) ->
-  CostBreakdown` (current-state baseline; per-move cross-cutting
-  costs are 0 and `priority_by_item` is empty) and
-  `cost_breakdown_after_move(state, move, ctx) -> CostBreakdown`
-  (same total as `score_after_move`, broken into the fourteen
-  weighted scalars). Both return CostBreakdowns whose
-  `lateness_by_item`, `drainage_by_item`, `carrying_by_item`, and
-  `excess_by_item` dicts hold *absolute* weighted per-item
-  contributions for the state they describe, and whose
-  `priority_by_item` dict (value type `PriorityContribution`)
-  carries each deferred order's `week_idx`, `remaining_lbs`, and
-  weighted contribution.
-- Extend `plan` with a `verbose: bool = False` keyword and ten
-  internal record accumulators (one per output table). When
-  `verbose=True`, the loop calls `Costing.cost_breakdown(state)`
-  once at the start of each iteration to capture a baseline
-  breakdown, then for each of up to 16 candidates — the top 4
-  items (ranked by each item's lowest-scoring candidate) each
-  contributing up to 4 of their lowest-scoring candidates — emits
-  an `IterationLogRecord`, a `CostDetailRecord`, one row per
-  *non-zero-delta* item in each of the four demand-cost detail
-  tables (delta computed as `after_move.{cost}_by_item -
-  baseline.{cost}_by_item`), one row per non-zero entry in
-  `after_move.priority_by_item` for the priority detail table
-  (absolute values, no subtraction), one `ScheduleDetailRecord`
-  per `Activity` in `move.plan.activities`, one `JobDetailRecord`
-  per `Job` in `move.plan.jobs`, and one `RollDetailRecord` per
-  `Roll` in each job's `rolls`. Cross-table ids — `move_id`,
-  `roll_idx`, and the five `*_detail_id`s — are auto-incremented
-  integer counters owned by the loop; `activity_id` and `job_id` are
-  the record-owned `Activity.id` and `Job.id`; a
-  `*_detail_id` is `None` when the corresponding cost has no
-  contributing rows (no non-zero deltas for the demand-side costs;
-  no higher-priority skipped orders for priority). The committed
-  move is always the first record of the iteration's batch.
-- Extend `PlanReport` with ten `tuple[..., ...] | None` fields:
-  `iteration_log`, `cost_detail`, `lateness_detail`,
-  `drainage_detail`, `carrying_detail`, `excess_detail`,
-  `priority_detail`, `schedule_detail`, `job_detail`, `roll_detail`.
-  All ten are `None` when `verbose=False` and populated otherwise.
-- Add `--verbose` / `-v` to the CLI; when set, the CLI calls
-  `plan(..., verbose=True)` and writes one TSV per `PlanReport`
-  detail tuple into `<output_dir>/verbose_<YYYYMMDD>/` next to the
-  XLSX.
+- `DebugLog` is a generic, config-driven container of named tables
+  (no hard-coded schema). The planner declares the tables it needs and
+  threads the log through the methods that populate it.
+- `Costing.score_after_move` and `plan` take an optional `debuglog`
+  keyword; when present, the loop scores and ranks the full candidate
+  list and the methods write their rows into the log live (iteration
+  log, per-component cost summary, the cost-detail leaf tables, the
+  per-`Knit` production ledger), with a post-loop copy of the
+  `demand` / `unmet_demand` tables. When absent, the hot path runs
+  unchanged and nothing is logged.
+- The CLI's `--verbose` / `-v` flag builds the `DebugLog` and passes
+  it to `plan(..., debuglog=...)`. An HTML dashboard that renders the
+  populated log is the final piece.
 
-Delivers: an audit trail that turns "the greedy committed X" into
-"the greedy committed X because its lateness was Y vs the next
-candidate's Z, and its priority rank was W". Used for diagnosis and
-weight tuning — not part of the operator-facing deliverables when
-`--verbose` is off.
+The full table schema, keys/links, population flow, and the phased
+build-out (including the dashboard) live in
+`swmtplanner/debuglog/DESIGN.md`. Delivers an audit trail that turns
+"the greedy committed X" into "the greedy committed X because its
+lateness was Y vs the next candidate's Z, and its priority rank was
+W" — for diagnosis and weight tuning, not an operator-facing
+deliverable when `--verbose` is off.
 
 ### Phase 4 — local search post-pass
 

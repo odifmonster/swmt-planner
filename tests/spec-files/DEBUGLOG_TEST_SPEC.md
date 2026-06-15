@@ -3,9 +3,10 @@
 Light white-box coverage of `swmtplanner.debuglog.DebugLog` — the generic,
 config-driven table container. These tests **deliberately inspect the object's
 internal state** (`_tables`, `_counters`, `_data`) because the schema/link
-bookkeeping is the non-obvious part worth pinning down; there is no public
-read API for it. The `get_df` rendering is **out of scope** for this pass (it
-is verified by running the program, not unit tests).
+bookkeeping is the non-obvious part worth pinning down; the only public read
+API is the `tables` property (covered below). The `get_df` rendering is **out
+of scope** for this pass (it is verified by running the program, not unit
+tests).
 
 Shared fixtures: small tables built with `DebugLog(...)`, e.g. a keyed
 `iteration_log=[('move_id', None), ('iteration_idx', None), ('role',
@@ -22,6 +23,10 @@ Shared fixtures: small tables built with `DebugLog(...)`, e.g. a keyed
    `'table_name'` yet.
 2. `_counters.ctr_names == ()` (no counters created).
 3. `_data == {}` (no row storage until the first `add_row`).
+4. The `tables` property returns the declared table names as a tuple in
+   declaration order (e.g. `('iteration_log', 'notes')`), and is unaffected by
+   `set_pk` / `set_fk` / `add_row` (it reflects the registered tables, not
+   their keys or row data).
 
 ## 2. `set_pk` / `set_fk` invalid inputs
 

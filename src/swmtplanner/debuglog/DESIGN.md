@@ -104,6 +104,10 @@ rows, so new tables (phases 2–4) are added by configuration, not new types.
 - **`get_df(table, **kwargs)`** — return `pandas.DataFrame(rows,
   columns=<declared columns>, **kwargs)`; the extra kwargs are forwarded to the
   `DataFrame` constructor (e.g. `index=`, `dtype=`). Built flat — no MultiIndex.
+- **`tables`** (property) — the names of the registered tables, in declaration
+  order, as a `tuple[str, ...]`. Lets a caller enumerate the log without
+  knowing its schema up front — e.g. the CLI dumps every table to a TSV via
+  `for name in log.tables: log.get_df(name).to_csv(dir / f'{name}.tsv', ...)`.
 
 **Keys are immutable once set.** A column that is already a primary key cannot
 be made a foreign key (and vice versa); a primary key cannot be redefined with
