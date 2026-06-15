@@ -236,9 +236,8 @@ The priority cost is the opportunity-cost estimate the cost layer
 charges per move for deferring higher-priority regular orders — see
 "Priority cost" in `planners/infinite/DESIGN.md` for the full
 formula. Each scenario below asserts on
-`Costing.cost_breakdown_after_move(state, move, ctx).priority`
-directly so other weights don't have to be zeroed (set `w.priority =
-1.0` for ease of comparison).
+`Costing._priority_cost(move, ctx)` directly so other weights don't
+have to be zeroed (set `w.priority = 1.0` for ease of comparison).
 
 The setups share a four-item state chosen so the priority sort lands
 in a predictable order:

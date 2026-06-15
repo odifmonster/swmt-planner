@@ -8,20 +8,8 @@ from swmtplanner.demand.rlsitem import CostComponents, RlsItem
 
 from swmtplanner.planners.infinite.coordination import build_context
 from swmtplanner.planners.infinite.costing import Costing
-# NOTE: the verbose iteration-log build path has been divorced from the live
-# planner pending the `debuglog/` rework (see debuglog/DESIGN.md). The record
-# types below are still imported for the (now always-`None`) `PlanReport`
-# detail fields, which remain as reference. The builders that *populated* them
-# (`IterLogAccumulators`, `IterLogCounters`, `build_candidate_records`,
-# `candidate_sort_key`) live in `iterlog.py`, kept for reference but no longer
-# called here.
-from swmtplanner.planners.infinite.iterlog import (
-    IterationLogRecord,
-    CostDetailRecord,
-    LatenessDetailRecord, DrainageDetailRecord,
-    CarryingDetailRecord, ExcessDetailRecord,
-    PriorityDetailRecord,
-    ScheduleDetailRecord,
+from swmtplanner.planners.infinite.report import (
+    demand_dataframe, unmet_demand_dataframe,
 )
 from swmtplanner.planners.infinite.state import State
 
@@ -44,12 +32,10 @@ class PlanReport:
     around. The schedules themselves also still live on the `Machine`
     instances inside `state` — this is a copy.
 
-    The eight `*_log` / `*_detail` tuples are the old verbose audit
-    trail. **They are now always `None`** — the build path that populated
-    them has been divorced from the live planner pending the `debuglog/`
-    rework (see `debuglog/DESIGN.md`). The fields and their record types
-    (in `iterlog.py`) are kept as reference for that rework; nothing
-    currently writes them."""
+    The verbose audit trail is no longer reconstructed onto the report:
+    when a run wants it, the planner populates a `DebugLog` live as it runs
+    (see `debuglog/DESIGN.md`), so `PlanReport` carries only the finished
+    plan snapshot."""
     schedules: dict[str, tuple['Activity', ...]]
     jobs_by_item: dict[str, tuple['Job', ...]]
     total_score: float
@@ -57,14 +43,6 @@ class PlanReport:
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple['RawOrder', ...]
     rls_items: dict[str, RlsItem]
-    iteration_log: tuple[IterationLogRecord, ...] | None = None
-    cost_detail: tuple[CostDetailRecord, ...] | None = None
-    lateness_detail: tuple[LatenessDetailRecord, ...] | None = None
-    drainage_detail: tuple[DrainageDetailRecord, ...] | None = None
-    carrying_detail: tuple[CarryingDetailRecord, ...] | None = None
-    excess_detail: tuple[ExcessDetailRecord, ...] | None = None
-    priority_detail: tuple[PriorityDetailRecord, ...] | None = None
-    schedule_detail: tuple[ScheduleDetailRecord, ...] | None = None
 
 
 def plan(
@@ -87,12 +65,16 @@ def plan(
     `state.commit_move`) and returns a `PlanReport` summarizing the
     result.
 
-    `debuglog` is an optional `DebugLog` (its `iteration_log` / `cost_summary`
-    tables already configured by the caller). It is **accepted but not yet
-    populated** — the code that writes the iteration log / cost summary lands
-    in a later step; for now passing it is a no-op and the hot loop is the only
-    path. (The old `verbose`-flag audit reconstruction stays divorced; the
-    `PlanReport` detail tuples remain `None`.)"""
+    `debuglog` is an optional `DebugLog` (its tables already configured by the
+    caller — see `run.py`'s `_build_debug_log`). When present, the planner takes
+    a debug scoring path that populates the log as it runs: `iteration_log` and
+    `cost_summary` (plus the `inv_cost_detail` / `sched_cost_detail` /
+    `priority_detail` leaf tables and the per-`Knit` `production` table) are
+    written live per candidate, and the post-hoc `demand` / `unmet_demand`
+    copies are written once from the finished report. When absent, the hot path
+    (scalar score, pick the min) runs and nothing is logged. (The old
+    `verbose`-flag audit reconstruction stays divorced; the `PlanReport` detail
+    tuples remain `None`.)"""
     horizon = _compute_horizon(state)
 
     move_count = 0
@@ -136,7 +118,10 @@ def plan(
         move_count += 1
 
     print()
-    return _build_report(state, costing)
+    report = _build_report(state, costing)
+    if debuglog is not None:
+        _emit_demand_tables(debuglog, report)
+    return report
 
 
 def _targeted_order_id(move: 'Move') -> str | None:
@@ -170,6 +155,7 @@ def _log_iteration(
             machine=move.machine_id,
             decision_point=move.start_at,
         )
+        _emit_production(debuglog, move)
         total = costing.score_after_move(state, move, ctx, debuglog=debuglog)
         scored.append((total, move_id, move))
 
@@ -185,6 +171,61 @@ def _log_iteration(
             role='committed' if rank == 0 else 'rejected',
         )
     return scored[0][2]
+
+
+def _emit_production(debuglog: 'DebugLog', move: 'Move') -> None:
+    """Write one `production` row per `Knit` across the move's plan jobs
+    (`move.plan.jobs` → `Roll.knits`), spanning the candidate's whole plan
+    whether or not it is committed. `roll_id` is synthesized as
+    `f'{job_id}_{roll_index}'` (a `Roll` has no id of its own), so a roll
+    straddling a beam swap has its two knits sharing one `roll_id`. The
+    `knit_id` PK is the `Knit`'s own id (globally unique across plans); the
+    `move_id` FK auto-links to the current `iteration_log` row. See
+    debuglog/DESIGN.md."""
+    for job in move.plan.jobs:
+        for roll_idx, roll in enumerate(job.rolls):
+            roll_id = f'{job.id}_{roll_idx}'
+            for knit in roll.knits:
+                debuglog.add_row(
+                    'production',
+                    knit_id=knit.id,
+                    roll_id=roll_id,
+                    job_id=job.id,
+                    item=knit.item.id,
+                    start=knit.start,
+                    end=knit.end,
+                    lbs=knit.lbs,
+                )
+
+
+def _emit_demand_tables(debuglog: 'DebugLog', report: PlanReport) -> None:
+    """Populate the two post-hoc output tables from the finished `report` —
+    faithful copies of the regular Excel output's `demand` / `unmet_demand`
+    sheets, built via `report.py`'s dataframe builders so they match the
+    regular output column-for-column. Unlike the loop-populated tables these
+    are snapshots of the final plan, so they are written once after the loop.
+    `demand`'s `order_id` is its (non-auto) primary key — unique per
+    order/safety across items; `unmet_demand` is key-less. The
+    `iteration_log.order_id → demand.order_id` FK resolves now that `demand`
+    exists (FK existence isn't checked at insert, so building it last is fine).
+    """
+    for row in demand_dataframe(report).itertuples(index=False):
+        debuglog.add_row(
+            'demand',
+            order_id=row.order_id,
+            item=row.item,
+            due_date=row.due_date,
+            demand=row.demand,
+            covered_on_hand=row.covered_on_hand,
+            remaining=row.remaining,
+        )
+    for row in unmet_demand_dataframe(report).itertuples(index=False):
+        debuglog.add_row(
+            'unmet_demand',
+            item=row.item,
+            week_idx=row.week_idx,
+            unmet_lbs=row.unmet_lbs,
+        )
 
 
 def _compute_horizon(state: State) -> datetime:
@@ -208,11 +249,7 @@ def _build_report(state: State, costing: Costing) -> PlanReport:
     machines' activity tuples and the rls_items' job tuples; reads the
     final score and per-item cost components from the demand views;
     summarizes whatever remaining `safety_view.orders` still have unmet
-    demand.
-
-    The `*_detail` verbose tuples are left at their `None` default — the
-    old iteration-log build path is divorced pending the `debuglog/`
-    rework (see `debuglog/DESIGN.md`)."""
+    demand."""
     return PlanReport(
         schedules={
             m_id: m.activities for m_id, m in state.machines.items()

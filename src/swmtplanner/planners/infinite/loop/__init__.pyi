@@ -7,14 +7,6 @@ from swmtplanner.demand.order import RawOrder
 from swmtplanner.demand.rlsitem import CostComponents, RlsItem
 from swmtplanner.debuglog import DebugLog
 from swmtplanner.planners.infinite.costing import Costing
-from swmtplanner.planners.infinite.iterlog import (
-    IterationLogRecord, build_iteration_log_record,
-    CostDetailRecord,
-    LatenessDetailRecord, DrainageDetailRecord,
-    CarryingDetailRecord, ExcessDetailRecord,
-    PriorityDetailRecord,
-    ScheduleDetailRecord,
-)
 from swmtplanner.planners.infinite.state import Move, State
 from swmtplanner.planners.infinite.coordination import (
     RegularOrder, SafetyOrder, eligible_orders,
@@ -23,7 +15,6 @@ from swmtplanner.planners.infinite.coordination import (
 __all__ = [
     'DecisionPoint', 'RegularOrder', 'SafetyOrder',
     'eligible_decision_points', 'eligible_orders', 'enumerate_candidates',
-    'IterationLogRecord', 'build_iteration_log_record',
     'PlanReport', 'plan',
 ]
 
@@ -48,14 +39,6 @@ class PlanReport:
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple[RawOrder, ...]
     rls_items: dict[str, RlsItem]
-    iteration_log: tuple[IterationLogRecord, ...] | None = ...
-    cost_detail: tuple[CostDetailRecord, ...] | None = ...
-    lateness_detail: tuple[LatenessDetailRecord, ...] | None = ...
-    drainage_detail: tuple[DrainageDetailRecord, ...] | None = ...
-    carrying_detail: tuple[CarryingDetailRecord, ...] | None = ...
-    excess_detail: tuple[ExcessDetailRecord, ...] | None = ...
-    priority_detail: tuple[PriorityDetailRecord, ...] | None = ...
-    schedule_detail: tuple[ScheduleDetailRecord, ...] | None = ...
 
 
 def plan(

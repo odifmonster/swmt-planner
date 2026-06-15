@@ -29,9 +29,6 @@ from .costing import (
     Costing, load_weights, weights_from_dict,
 )
 from .loop import plan
-# NOTE: `write_verbose_log_tsvs` / `write_dashboard_html` still live in
-# `report.py` (kept for reference) but are no longer wired in — the verbose
-# log/dashboard build path is divorced pending the `debuglog/` rework.
 from .report import write_plan_report_xlsx
 from .state import State
 

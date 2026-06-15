@@ -818,9 +818,8 @@ class PriorityCostTests(unittest.TestCase):
     Verifies the opportunity-cost shape of `Costing._priority_cost`
     against four scenarios that span the three priority buckets
     (urgent regular / safety / future regular). All tests use a shared
-    four-item state and assert on
-    `cost_breakdown_after_move(...).priority` with `w.priority = 1.0`
-    and every other weight = 0."""
+    four-item state and assert on `Costing._priority_cost(...)` with
+    `w.priority = 1.0` and every other weight = 0."""
 
     # Greige fixtures for the four items. Same beam/tgt_wt/family across
     # the board — only `safety` and the `machines` dict matter for the
@@ -948,16 +947,17 @@ class PriorityCostTests(unittest.TestCase):
         # 1.2.7.1: move targets U_LOW.reg (rank 1). No higher-priority
         # order exists → priority cost is 0.
         move = self._move(self.u_low_reg.item, self.u_low_reg.week_idx)
-        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
-        self.assertEqual(bd.priority, 0.0)
+        self.assertEqual(self.costing._priority_cost(move, self.ctx), 0.0)
 
     def test_same_urgency_less_depleted_pays_for_more_depleted(self):
         # 1.2.7.2: move targets U_HIGH.reg (rank 2). Only U_LOW.reg is
         # higher-priority. floor binds → days_late=1 → factor=2.
         # Expected: w × U_LOW.lbs × 2 = 1.0 × 100 × 2 = 200.
         move = self._move(self.u_high_reg.item, self.u_high_reg.week_idx)
-        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
-        self.assertAlmostEqual(bd.priority, self.u_low_reg.lbs * 2.0)
+        self.assertAlmostEqual(
+            self.costing._priority_cost(move, self.ctx),
+            self.u_low_reg.lbs * 2.0,
+        )
 
     def test_safety_move_pays_for_both_urgent_regulars(self):
         # 1.2.7.3: move targets SAFETY.safety (rank 3). U_LOW.reg and
@@ -965,9 +965,10 @@ class PriorityCostTests(unittest.TestCase):
         # w × (U_LOW.lbs + U_HIGH.lbs) × 2 = 1.0 × (100+200) × 2 = 600.
         # week_idx=None marks a safety move.
         move = self._move(self.safety_order.item, week_idx=None)
-        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
         expected = (self.u_low_reg.lbs + self.u_high_reg.lbs) * 2.0
-        self.assertAlmostEqual(bd.priority, expected)
+        self.assertAlmostEqual(
+            self.costing._priority_cost(move, self.ctx), expected,
+        )
 
     def test_future_move_pays_same_as_safety_move(self):
         # 1.2.7.4: move targets FUTURE.reg (rank 4). Higher-priority
@@ -975,9 +976,10 @@ class PriorityCostTests(unittest.TestCase):
         # safety order is filtered out by the regulars-only scope, so
         # priority cost matches scenario 3.
         move = self._move(self.future_reg.item, self.future_reg.week_idx)
-        bd = self.costing.cost_breakdown_after_move(self.state, move, self.ctx)
         expected = (self.u_low_reg.lbs + self.u_high_reg.lbs) * 2.0
-        self.assertAlmostEqual(bd.priority, expected)
+        self.assertAlmostEqual(
+            self.costing._priority_cost(move, self.ctx), expected,
+        )
 
 
 # --- 1.3 Candidate enumeration --------------------------------------------
