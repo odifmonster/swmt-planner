@@ -11,6 +11,7 @@ Invoke as `python -m swmtplanner.planners.infinite.run <config.json>
 `pyproject.toml`."""
 
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -27,6 +28,9 @@ from swmtplanner.debuglog import DebugLog
 
 from .costing import (
     Costing, load_weights, weights_from_dict,
+)
+from .dashboard import (
+    DatabaseConfigError, PersistenceError, persist_run, resolve_conn_config,
 )
 from .loop import plan
 from .report import write_plan_report_xlsx
@@ -168,6 +172,14 @@ _Weights = Annotated[str | None, typer.Option(
     '--weights', '-w',
     help='Override cost weights. Path or inline JSON.',
 )]
+_DBConnect = Annotated[str | None, typer.Option(
+    '--db-conn', '-b',
+    help='Override database connection information. Path or inline JSON.'
+)]
+_Label = Annotated[str | None, typer.Option(
+    '--label', '-l',
+    help='Set this run\'s label. Only used in verbose mode.'
+)]
 _OutDir = Annotated[Path | None, typer.Option(
     '--output-dir', '-o',
     file_okay=False, dir_okay=True,
@@ -176,11 +188,9 @@ _OutDir = Annotated[Path | None, typer.Option(
 )]
 _Verbose = Annotated[bool, typer.Option(
     '--verbose', '-v',
-    help='Emit a per-iteration audit-log TSV alongside the XLSX. Each '
-         'row covers one scored candidate (the committed move plus up '
-         'to three next-lowest-scoring rejects per iteration) with its '
-         'full cost breakdown — useful for diagnosing planner decisions '
-         'and tuning weights.',
+    help='Persist the full per-iteration debug log to the configured MySQL '
+         'database (a run-tagged row-set for the knit-debug investigation '
+         'app). Requires --label and prompts for run notes in vi.',
 )]
 
 
@@ -192,6 +202,8 @@ def run(
     machines: _Machines = None,
     demand: _Demand = None,
     weights: _Weights = None,
+    dbconn: _DBConnect = None,
+    label: _Label = None,
     output_dir: _OutDir = None,
     verbose: _Verbose = False,
 ) -> None:
@@ -210,6 +222,20 @@ def run(
     config_dir = config.parent
 
     sd = start_date or datetime.strptime(cfg['start_date'], '%Y-%m-%d')
+
+    # ---- Verbose-mode prerequisites (gathered up front) ----
+    # A verbose run is persisted to MySQL as a labelled, annotated run, so both
+    # a --label and (interactively-entered) notes are required before the work
+    # begins — fail fast, and collect the notes immediately via the editor.
+    db_block = _resolve_db_block(dbconn, cfg.get('database'))
+    notes = None
+    if verbose:
+        if not label:
+            raise typer.BadParameter(
+                '--label is required when running with --verbose',
+                param_hint='--label',
+            )
+        notes = _gather_notes()
 
     # ---- Resolve inputs ----
     greige_by_id = _resolve(
@@ -294,24 +320,93 @@ def run(
     write_plan_report_xlsx(report, output_path)
 
     if verbose:
-        # Dump every populated DebugLog table to a TSV (one file per table,
-        # named for the table) in a debuglog_<YYYYMMDD>/ folder next to the
-        # workbook. Keyed tables keep their primary-key index column; key-less
-        # tables drop the meaningless RangeIndex.
-        log_dir = output_dir / f'debuglog_{sd.strftime("%Y%m%d")}'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        for name in debuglog.tables:
-            df = debuglog.get_df(name)
-            df.to_csv(
-                log_dir / f'{name}.tsv', sep='\t',
-                index=df.index.name is not None,
-            )
-        typer.echo(
-            f'  (--verbose) wrote {len(debuglog.tables)} debug-log '
-            f'table(s) to {log_dir}'
-        )
+        _persist_debuglog(db_block, debuglog, report, sd, label, notes)
 
     typer.echo('Done.')
+
+
+def _persist_debuglog(
+    db_block, debuglog, report, start_date, label, notes,
+) -> int | None:
+    """Persist the verbose `debuglog` to the local MySQL store when a
+    `database` connection block is configured, returning the new `run_id` (or
+    `None` when not persisted). Resolves the writer `ConnConfig` from `db_block`
+    and writes the run tagged with its metadata (`start_date`, `total_score`,
+    `n_unmet`, `label`, `notes`).
+
+    Non-fatal: the schedule output (XLSX) has already been written, so a missing
+    block or a config/persistence error is reported as a warning, not a crash."""
+    if db_block is None:
+        typer.echo(
+            '  (--verbose) no database connection configured; debug log '
+            'not persisted'
+        )
+        return None
+    try:
+        conn = resolve_conn_config(db_block, 'writer')
+        run_id = persist_run(
+            debuglog, conn,
+            start_date=start_date.date(),
+            total_score=report.total_score,
+            n_unmet=len(report.unmet_lbs_by_item_week),
+            label=label, notes=notes,
+        )
+        typer.echo(
+            f'  (--verbose) persisted debug log to MySQL as run_id {run_id}'
+        )
+        return run_id
+    except (DatabaseConfigError, PersistenceError) as exc:
+        typer.echo(
+            f'  (--verbose) WARNING: debug log not persisted: {exc}', err=True,
+        )
+        return None
+
+
+def _resolve_db_block(cli_value: str | None, config_value: Any) -> Any:
+    """The `database` connection block: the `--db-conn` override (inline JSON
+    when it starts with `{`/`[`, else a path to a JSON file) when given, else
+    the config's `database` value (a dict, or `None` when absent)."""
+    if cli_value is not None:
+        if _looks_like_inline_json(cli_value):
+            return json.loads(cli_value)
+        return json.loads(Path(cli_value).read_text())
+    return config_value
+
+
+def _next_temp_path() -> Path:
+    """`temp.txt`, or the first `tempN.txt` (N = 1, 2, …) not already present in
+    the current working directory."""
+    candidate = Path('temp.txt')
+    n = 1
+    while candidate.exists():
+        candidate = Path(f'temp{n}.txt')
+        n += 1
+    return candidate
+
+
+def _gather_notes() -> str:
+    """Collect this run's notes interactively: open `vi` on a fresh temp file,
+    wait for the user to write and quit, return the file's contents, and delete
+    the file. The notes must contain non-whitespace text — exits with an error
+    otherwise."""
+    path = _next_temp_path()
+    path.touch()
+    try:
+        try:
+            subprocess.Popen(['vi', str(path)]).wait()
+        except FileNotFoundError:
+            typer.echo(
+                "Aborted: could not launch 'vi' to collect run notes.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        notes = path.read_text()
+    finally:
+        path.unlink(missing_ok=True)
+    if not notes.strip():
+        typer.echo('Aborted: run notes must not be empty.', err=True)
+        raise typer.Exit(code=1)
+    return notes
 
 
 # ----- helpers ------------------------------------------------------------

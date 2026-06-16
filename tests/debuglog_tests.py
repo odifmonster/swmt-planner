@@ -7,7 +7,7 @@ bookkeeping is the part worth pinning down and there is no public read API."""
 
 import unittest
 
-from swmtplanner.debuglog import DebugLog
+from swmtplanner.debuglog import DebugLog, TableSchema, ForeignKey
 
 
 def _cols(table_schema):
@@ -427,6 +427,83 @@ class MultipleForeignKeyTests(unittest.TestCase):
         self.dl.add_row('cs2', sid2='b')
         self.assertEqual(self.dl._data['cs']['rows']['a'][0], 1)
         self.assertEqual(self.dl._data['cs2']['rows']['b'][0], 1)
+
+
+# ===================================================================
+# 9. `schema` link metadata
+# ===================================================================
+
+class SchemaTests(unittest.TestCase):
+
+    def test_counter_backed_fk_resolves_to_owning_table(self):
+        # `_linked_log`: il.move_id is a counter PK; cs.move_id is an FK onto it.
+        dl = _linked_log()
+        schema = dl.schema
+        self.assertEqual(list(schema), ['il', 'cs'])     # declaration order
+        self.assertEqual(
+            schema['il'],
+            TableSchema(
+                columns=('move_id', 'iteration_idx', 'role'),
+                pk='move_id', fks=(),
+            ),
+        )
+        self.assertEqual(
+            schema['cs'],
+            TableSchema(
+                columns=('summary_id', 'move_id', 'cost'),
+                pk='summary_id',
+                fks=(ForeignKey('move_id', 'il', 'move_id'),),
+            ),
+        )
+
+    def test_non_auto_fk_resolves_via_stored_table_name(self):
+        # A leaf FK onto cs.summary_id (a non-auto PK) stores the table name;
+        # a sibling FK onto il.move_id (a counter PK) rides the counter.
+        leaf = DebugLog(
+            il=[('move_id', None)],
+            cs=[('summary_id', None), ('move_id', None)],
+            leaf=[('icost_id', None), ('summary_id', None), ('move_id', None)],
+        )
+        leaf.set_pk('il', 'move_id', ctr_name='move_id')
+        leaf.set_pk('cs', 'summary_id')
+        leaf.set_pk('leaf', 'icost_id', ctr_name='icost_id')
+        leaf.set_fk('cs', 'move_id', 'il', 'move_id')
+        leaf.set_fk('leaf', 'summary_id', 'cs', 'summary_id')   # onto non-auto PK
+        leaf.set_fk('leaf', 'move_id', 'il', 'move_id')         # onto counter PK
+        self.assertEqual(
+            leaf.schema['leaf'],
+            TableSchema(
+                columns=('icost_id', 'summary_id', 'move_id'),
+                pk='icost_id',
+                fks=(
+                    ForeignKey('summary_id', 'cs', 'summary_id'),
+                    ForeignKey('move_id', 'il', 'move_id'),
+                ),
+            ),
+        )
+
+    def test_keyless_table_reports_none_pk(self):
+        dl = DebugLog(
+            il=[('move_id', None)],
+            notes=[('move_id', None), ('text', None)],     # key-less, but an FK
+        )
+        dl.set_pk('il', 'move_id', ctr_name='move_id')
+        dl.set_fk('notes', 'move_id', 'il', 'move_id')
+        self.assertEqual(
+            dl.schema['notes'],
+            TableSchema(
+                columns=('move_id', 'text'),
+                pk=None,
+                fks=(ForeignKey('move_id', 'il', 'move_id'),),
+            ),
+        )
+
+    def test_schema_reflects_only_schema_not_rows(self):
+        dl = _linked_log()
+        before = dl.schema
+        dl.add_row('il', iteration_idx=0)
+        dl.add_row('cs', summary_id='1_x', cost=1.0)
+        self.assertEqual(dl.schema, before)
 
 
 if __name__ == '__main__':

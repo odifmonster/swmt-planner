@@ -1,10 +1,30 @@
 #!/usr/bin/env python
 
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
 from swmtplanner.support import Counters
+
+
+@dataclass(frozen=True)
+class ForeignKey:
+    """One foreign-key link out of a table: `column` points at
+    `ref_table.ref_column` (the referenced table's primary key)."""
+    column: str
+    ref_table: str
+    ref_column: str
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    """The key/link structure of one table, as exposed by `DebugLog.schema`:
+    the declared columns (same order as `get_df`), the primary-key column (or
+    `None` for a key-less table), and one `ForeignKey` per foreign-key column."""
+    columns: tuple[str, ...]
+    pk: str | None
+    fks: tuple[ForeignKey, ...]
 
 
 class DebugLog:
@@ -46,6 +66,42 @@ class DebugLog:
         order. Lets a caller enumerate the log (e.g. to dump each table via
         `get_df`) without knowing the schema up front."""
         return tuple(self._tables)
+
+    @property
+    def schema(self) -> dict[str, TableSchema]:
+        """The PK / FK structure of every table, as `{table: TableSchema}` in
+        declaration order — the inter-table link metadata the dashboard reads to
+        document tables and render foreign-key links. Recomputed per access from
+        the (small, fixed-once-rows-exist) schema. Each foreign key resolves to
+        its `ref_table` / `ref_column`: a link onto a non-auto primary key stores
+        the foreign table directly, while a link onto a counter-backed primary
+        key stores only the counter name, which is mapped back here to the table
+        whose primary key owns that counter."""
+        # counter name -> (owning table, its pk column), for counter-backed PKs.
+        ctr_owner: dict[str, tuple[str, str]] = {}
+        for table, schema in self._tables.items():
+            pk = schema['@pk_col_name']
+            if pk is not None and 'ctr_name' in schema[pk]:
+                ctr_owner[schema[pk]['ctr_name']] = (table, pk)
+
+        result: dict[str, TableSchema] = {}
+        for table, schema in self._tables.items():
+            cols = tuple(c for c in schema if not c.startswith('@'))
+            fks = []
+            for col in cols:
+                meta = schema[col]
+                if meta['key_type'] != 'foreign':
+                    continue
+                if 'table_name' in meta:                     # onto a non-auto PK
+                    ref_table = meta['table_name']
+                    ref_column = self._tables[ref_table]['@pk_col_name']
+                else:                                        # onto a counter PK
+                    ref_table, ref_column = ctr_owner[meta['ctr_name']]
+                fks.append(ForeignKey(col, ref_table, ref_column))
+            result[table] = TableSchema(
+                columns=cols, pk=schema['@pk_col_name'], fks=tuple(fks),
+            )
+        return result
 
     # ----- internal helpers -----
 

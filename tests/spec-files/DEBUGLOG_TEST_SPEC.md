@@ -3,10 +3,10 @@
 Light white-box coverage of `swmtplanner.debuglog.DebugLog` — the generic,
 config-driven table container. These tests **deliberately inspect the object's
 internal state** (`_tables`, `_counters`, `_data`) because the schema/link
-bookkeeping is the non-obvious part worth pinning down; the only public read
-API is the `tables` property (covered below). The `get_df` rendering is **out
-of scope** for this pass (it is verified by running the program, not unit
-tests).
+bookkeeping is the non-obvious part worth pinning down; the public read API is
+the `tables` and `schema` properties (both covered below). The `get_df`
+rendering is **out of scope** for this pass (it is verified by running the
+program, not unit tests).
 
 Shared fixtures: small tables built with `DebugLog(...)`, e.g. a keyed
 `iteration_log=[('move_id', None), ('iteration_idx', None), ('role',
@@ -112,3 +112,23 @@ after one PK `add_row` the counter reads `1`; an FK `add_row` sets the FK to
 Two distinct tables may each `set_fk` onto the **same** PK column. Both FK
 columns inherit that PK's counter, and an `add_row` on each (FK unset) links
 both to the same current PK value.
+
+## 9. `schema` link metadata
+
+The `schema` property returns `{table: TableSchema}` in declaration order,
+exposing the PK / FK structure (`TableSchema(columns, pk, fks)` with
+`ForeignKey(column, ref_table, ref_column)`), independent of row data.
+
+1. For a counter-backed PK table linked to by an FK table (the `_linked_log`
+   fixture: `il.move_id` counter PK, `cs.move_id` FK onto it): `schema['il']`
+   has `pk == 'move_id'`, `fks == ()`, and `columns` in declared order;
+   `schema['cs']` has `pk == 'summary_id'` and a single
+   `ForeignKey('move_id', 'il', 'move_id')` — i.e. the counter-backed referent
+   is resolved back to its owning table and PK column.
+2. A foreign key onto a **non-auto** primary key resolves via the stored table
+   name: e.g. a leaf table with `set_fk(leaf, 'summary_id', 'cs', 'summary_id')`
+   yields `ForeignKey('summary_id', 'cs', 'summary_id')`.
+3. A **key-less** table reports `pk is None` and `fks == ()` (unless it carries
+   a foreign key, which it still lists); `columns` is the declared list.
+4. `schema` reflects only the schema, not rows — it is unchanged before and
+   after `add_row`.

@@ -1,14 +1,31 @@
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
-__all__ = ['DebugLog']
+__all__ = ['DebugLog', 'TableSchema', 'ForeignKey']
+
+
+@dataclass(frozen=True)
+class ForeignKey:
+    column: str
+    ref_table: str
+    ref_column: str
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    columns: tuple[str, ...]
+    pk: str | None
+    fks: tuple[ForeignKey, ...]
 
 
 class DebugLog:
     def __init__(self, **tables: list[tuple[str, Any]]) -> None: ...
     @property
     def tables(self) -> tuple[str, ...]: ...
+    @property
+    def schema(self) -> dict[str, TableSchema]: ...
     def set_pk(
         self, table: str, column: str, ctr_name: str | None = ...,
     ) -> None: ...

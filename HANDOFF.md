@@ -267,9 +267,9 @@ and how each cost was incurred.
      priority-cost coverage; `INF_PLAN_TEST_SPEC.md` §1.2.7 updated to match.
      `_schedule_quantities_for` stays — still used by the live
      `_emit_cost_summary` debuglog path.
-   - The CLI keeps `--verbose`; it builds + populates the `DebugLog` and dumps
-     each table to a TSV in `debuglog_<YYYYMMDD>/` (see Phase 2 note below). The
-     HTML dashboard rendering is still Phases 3–4. 367 green.
+   - The CLI keeps `--verbose`; it builds + populates the `DebugLog` and (Phase
+     3) writes the full investigation folder to `debuglog_<YYYYMMDD>/` — TSVs +
+     dashboard — via `dashboard.write_dashboard` (see the Phase-3 note below).
    - **Design-doc sweep. ✅ done (uncommitted).** `planners/infinite/DESIGN.md`
      was swept of the old verbose-mode design now that the code is gone
      (consistency only — already implemented): the `cost_breakdown*` /
@@ -302,13 +302,12 @@ and how each cost was incurred.
        `kind` ∈ {inventory, schedule, other}, keyed `{move_id}_{label}` with a
        `move_id` FK; per-move `Σ cost == iteration_log.total_cost`. Added
        `_priority_raw` (which `_priority_cost` now delegates to).
-     - **TSV export (added).** `--verbose` now dumps every populated table to a
-       `debuglog_<YYYYMMDD>/` folder next to the workbook — one `{table}.tsv`
-       per table, via a new `DebugLog.tables` property (tuple of registered
-       table names, declaration order) + `get_df`. Keyed tables keep their PK
-       index column; key-less tables drop the RangeIndex
-       (`index=df.index.name is not None`). The HTML *dashboard* rendering is
-       still Phases 3–4; this is the plain-table dump.
+     - **TSV export (added).** Introduced the `DebugLog.tables` property (tuple
+       of registered table names, declaration order) so a caller can dump every
+       table to a `{table}.tsv` via `get_df` (keyed tables keep their PK index
+       column; key-less drop the RangeIndex: `index=df.index.name is not None`).
+       The Phase-3 dashboard now owns writing these TSVs (+ schema/HTML/server)
+       — see the Phase-3 note below.
    - **Phase 2 — cost-detail + output tables. ✅ population complete
      (uncommitted).** Table layout fully designed in `debuglog/DESIGN.md`
      (per-table columns, keys, links, granularity); all six tables are now
@@ -358,10 +357,108 @@ and how each cost was incurred.
        (covered by `inv_cost_detail` lateness rows); the old `xref` is folded
        into `production` minus the roll→order link. `get_df` handles empty
        key-less tables (additive fix; exercised by an empty `unmet_demand`).
-   - **Phase 3 — raw dashboard. ⏸ pending.** Render the tables directly as
-     HTML with foreign-key links surfaced (debug view only, no drill-down).
-   - **Phase 4 — full dashboard. ⏸ pending.** Add the user-friendly
-     machine→jobs→order→cost drill-down alongside the raw view.
+   - **Phases 3+ — persistence & investigation. 🔁 RESET → MySQL + PyQt6
+     (design rewritten; code removed; uncommitted).** The earlier HTML/TSV
+     dashboard (in-memory embed, then served-folder + `serve.py` query server)
+     was **deleted** — the whole `planners/infinite/dashboard/` module, its
+     tests, and the `run.py` wiring are gone; `--verbose` now just builds the
+     `DebugLog` and persists nothing (a placeholder echo). The new direction
+     (per the user) is designed in a rewritten
+     `planners/infinite/dashboard/DESIGN.md`:
+     The **user provided the actual MySQL DDL** (db `swmtplanner`); the design
+     is now written against it (table names + the two flags below).
+     - **Shared manifest** (`planners/infinite/dashboard/manifest.py`, to build)
+       — the source of truth mapping each `DebugLog` table → its MySQL table +
+       columns + the DB FK graph + insert order. **Not** derived from
+       `DebugLog.schema` (the DB diverges). Table map: `iteration_log →
+       knititerlog`, `cost_summary → knitcostsum`, `inv_cost_detail →
+       knitinvcost`, `sched_cost_detail → knitschedcost`, `priority_detail →
+       knitpriority`, `production → knitprod`, `demand → knitdmnd`,
+       `unmet_demand → knitunmet`; run metadata → `knitruns`.
+     - **Write path** — INSERT a `knitruns` row (auto-inc `run_id` + `created_at`
+       default; tool sends `start_date`/`total_score`/`n_unmet`), read
+       `lastrowid`, then bulk-`executemany` each table **in FK-topological
+       order** (`knitruns → knitdmnd → knititerlog → knitcostsum → knitinvcost →
+       knitschedcost → knitprod`; `knitpriority`/`knitunmet` after parents) —
+       NOT `DebugLog.tables` order, because `knititerlog.order_id → knitdmnd` and
+       `knitprod.knit_id → knitschedcost.activity_id` (the latter an FK **not** in
+       `DebugLog.schema`). All column names backticked (reserved: `rank`, `desc`,
+       `start`/`end`, `value`); NaN/NaT/None → NULL. **Tool only INSERTs.**
+       Driver **PyMySQL**. `--emit-schema` dropped (user owns DDL).
+     - **Config** — optional `database` block in run-config JSON (documented in
+       the planner's own DESIGN.md too): shared `host/port/name` (name=
+       `swmtplanner`) + a **`writer`** and a **`reader`** credential sub-block.
+       **Two MySQL roles** enforce read-only at the grant level — writer
+       (`SELECT,INSERT,UPDATE`) is used by the planner to persist; reader
+       (`SELECT`) by the app, so the dashboard physically can't mutate data. Env
+       fallback `SWMT_DB_{HOST,PORT,NAME}` + `SWMT_DB_{WRITER,READER}_{USER,PASSWORD}`.
+     - **Read path** — **PyQt6** app, entry point **`knit-debug`**, under
+       `planners/infinite/dashboard/app/`. Home lists/selects/annotates runs from
+       `knitruns`; then run-scoped grids. **Every grid pages uniformly
+       (LIMIT/OFFSET + COUNT)** — including FK/PK lookups (user corrected: a
+       lookup can be large, so it's paged like any table, never "fetch all
+       matching"). Per-column filters → SQL `WHERE` (value-select / >,<,range /
+       LIKE). Committed-only = a query joining to `knititerlog` on `roll =
+       'committed'`, not a stored table. The app holds the manifest statically.
+     - **DDL reconciled** (both prior flags fixed by the user): `knititerlog`
+       column is now `role` (was a `roll` typo) and `knitunmet` now has
+       `unmet_lbs` (was an accidental omission). So the manifest's column map is
+       **pure identity** — only table names differ (`iteration_log→knititerlog`
+       etc.).
+     - **Decisions on file**: DB config = run-config `database` block (shared
+       conn + `writer`/`reader` roles) + env; schema = user-provisioned, tool
+       only inserts; app under `planners/infinite/`; driver PyMySQL; entry point
+       `knit-debug`.
+     - **Kept from prior work**: `DebugLog.schema`/`tables`/`get_df` — the writer
+       reads rows via `get_df`; the manifest (hand-authored) supersedes
+       `DebugLog.schema` for DB layout/links. 371 green after the deletion.
+     - **Built so far (Phase 1, uncommitted)**: `dashboard/manifest.py` (the
+       static DebugLog→MySQL map — `Column`/`ForeignKey`/`TableSpec`, the 8
+       tables in FK-topological order, `RUNS`/`ALL_TABLES`, lookups) and
+       `dashboard/config.py` (`resolve_conn_config(block, role, env)` →
+       `ConnConfig`, env-wins, writer/reader roles, `DatabaseConfigError`), with
+       `dashboard/__init__.py`. Tests in `tests/dashboard_tests.py` (+
+       `DASHBOARD_TEST_SPEC.md`): manifest-vs-live-`DebugLog` consistency
+       (table set / identity columns / pk / FK-superset — drift guard),
+       topological order, the extra prod→sched FK, and config resolution
+       (per-role, env-wins, env-only, null password, defaults, error cases).
+       388 green. No `pymysql`/`PyQt6` imported yet.
+     - **Writer built + tested (Phase 1, uncommitted)**: `dashboard/persistence.py`
+       — `persist_run(debuglog, conn, *, start_date, total_score, n_unmet,
+       label=None) -> run_id` (lazy `import pymysql`; INSERT `knitruns` →
+       `lastrowid`, then topological chunked `executemany` of run-tagged rows;
+       one transaction, rollback + `PersistenceError` on failure) + pure helpers
+       `to_sql` / `insert_sql` / `project_rows`. `pymysql>=1.2.0` added to
+       `pyproject.toml` (already in `requirements.txt`). Tests in
+       `tests/dashboard_tests.py` (+ spec §4–5): 7 pure-helper tests (no DB) and
+       4 **MySQL-gated** end-to-end tests (round-trip counts/metadata, `role`
+       round-trip, distinct run_ids + isolation, reader-role-can't-write) that
+       **ran green against the local `swmtplannertests`** (writer/reader roles;
+       `stroot` truncates per `setUp`; creds via `SWMT_TEST_*` env w/ defaults).
+       399 green.
+     - **`run.py` wiring done (Phase 1 ✅ complete, uncommitted)**: a
+       `_persist_debuglog(cfg, debuglog, report, start_date)` helper resolves the
+       writer `ConnConfig` from `cfg['database']` (skip + echo when absent),
+       calls `persist_run` with the report metadata (`start_date.date()`,
+       `total_score`, `n_unmet`), echoes the new `run_id`; config/persistence
+       errors are a non-fatal stderr warning (the XLSX already wrote). The
+       `--verbose` block now calls it. Two more MySQL-gated tests cover the glue
+       (persists from a config `database` block; skips without one). 401 green.
+     - **CLI label/notes/db-conn (uncommitted).** Two new options:
+       `--db-conn`/`-b` (override the `database` block; path or inline JSON) and
+       `--label`/`-l` (the run's label). In `--verbose` mode the CLI now
+       **requires `--label`** (fails fast) and **collects `notes` interactively
+       up front** via `_gather_notes` — opens `vi` on `temp.txt` (or the first
+       free `tempN.txt`), takes the file contents, deletes it, and errors if the
+       notes are whitespace-only. `persist_run` gained a `notes` param (now in
+       the `knitruns` INSERT); `_persist_debuglog(db_block, …, label, notes)`
+       threads both through. `_resolve_db_block` applies the `--db-conn`
+       override. Tests: `tests/run_tests.py` (+ `RUN_TEST_SPEC.md`) covers
+       `_resolve_db_block`, `_next_temp_path`, and `_gather_notes` (vi mocked:
+       returns contents / aborts on empty / aborts if vi missing — temp file
+       always cleaned up); the MySQL-gated wiring test now round-trips
+       label + multi-line notes. 408 green.
+     - **Next: the PyQt6 app (phases 2–4).**
 
 ### Step-3 tests — ✅ done (record of what was reworked)
 
@@ -381,26 +478,29 @@ and how each cost was incurred.
 
 ## Next concrete action
 
-**First: commit the uncommitted work** — `debuglog` Phase-2 population is now
-complete: `sched_cost_detail` + `production` (`Costing._emit_sched_cost_detail`
-/ `_activity_weight_cost`; `loop/plan.py`'s `_emit_production`; `costing.py`
-imports `report._activity_desc`) and `demand` / `unmet_demand` (`loop/plan.py`'s
-`_emit_demand_tables`, post-hoc from the report; `plan()` docstring corrected).
-365 green; all six populated tables verified by inspection (per-activity
-weight/cost classification, per-knit `{job_id}_{roll_idx}` roll ids, and
-`demand`/`unmet_demand` matching `report.py`'s builders column-for-column). The
-prior session's work (sub-step 1, verbose-path divorce, debuglog Phase 1, and
-Phase-2 setup + `inv_cost_detail`/`priority_detail`) is already committed
-(`1fab3fa` → `3cc34f7`).
+**State:** `debuglog` phases 1–2 are done (all eight tables populated live).
+The HTML/TSV dashboard was **reset**; the new persistence + investigation
+direction (local MySQL + PyQt6) is designed in
+`planners/infinite/dashboard/DESIGN.md` but **not yet built**. Suite at 371
+green. There is sizable uncommitted work across this whole debuglog arc
+(consider committing the stable parts — the debuglog population, the
+iterlog/cost_breakdown removals, the `DebugLog.schema` accessor — before
+building the DB layer).
 
-**Then: consider planner-wiring tests for `debuglog`.** Phase 2's table layout
-and population are complete (`debuglog/DESIGN.md`). The unit tests in
-`tests/debuglog_tests.py` cover the `DebugLog` class itself; the planner-side
-population of all six tables (`iteration_log`, `cost_summary`,
-`inv_cost_detail`, `priority_detail`, `sched_cost_detail`, `production`,
-`demand`, `unmet_demand`) has so far been verified only by inspection. A
-coverage spec + tests for the planner wiring is the natural next step (DESIGN/
-spec-first per the workflow) before Phases 3–4.
+**Then build the dashboard, design-first per phase** (see
+`planners/infinite/dashboard/DESIGN.md` for the full plan):
 
-Phases 3–4 (raw dashboard, full dashboard) follow — see
-`swmtplanner/debuglog/DESIGN.md`. DESIGN-first, narrow per turn, user reviews.
+1. **Persistence — ✅ complete** (manifest, config, `persistence.py` writer,
+   `run.py` `--verbose` wiring via `_persist_debuglog`, `pymysql` dep; 6 pure +
+   6 MySQL-gated tests green against `swmtplannertests`). Next is the app:
+2. **PyQt6 app shell + Home** (entry point `knit-debug`) — connect as **reader**;
+   list / select runs from `knitruns`. Mirror `pyqt6` into `pyproject.toml`
+   (consider an optional extra so headless installs skip it).
+3. **Raw grids + FK navigation** — run-scoped, **uniformly paged** `QTableView`s
+   (LIMIT/OFFSET + COUNT, FK/PK lookups paged too); FK/PK drill from the
+   manifest's link graph; schema view.
+4. **Per-column filters + committed-only** — SQL-backed `WHERE` filters
+   (value-select / >,<,range / LIKE) and the committed-only query.
+
+The DDL is reconciled (both prior flags fixed) — no blockers; Phase 1 is ready
+to build on request.

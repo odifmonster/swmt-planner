@@ -4,16 +4,23 @@ A standalone top-level module (`swmtplanner.debuglog`). Defines **`DebugLog`**:
 a generic, config-driven container of named tables — it hard-codes no schema of
 its own, so any caller can declare the tables it needs. The infinite planner
 uses it as an optional, in-memory audit object threaded through its methods so
-they record *why* the schedule came out the way it did, plus the logic that
-renders a populated log (eventually an HTML dashboard). It lives at the top
+they record *why* the schedule came out the way it did. It lives at the top
 level (rather than under `planners/infinite/`) because it is planner-agnostic.
+
+**Persistence and investigation are external.** `DebugLog` is only the in-memory
+accumulator + its read API (`tables` / `schema` / `get_df`). Turning a populated
+log into durable, browsable output — writing it to a local MySQL store and
+investigating it through a PyQt6 app — is owned by the planner's dashboard
+module (`planners/infinite/dashboard/`, see its DESIGN.md), which consumes this
+read API. This module hard-codes nothing about MySQL, files, or UIs.
 
 ## Purpose
 
 The planner's normal output (the Excel workbook from `report.py`) answers
 *what* was scheduled. `DebugLog` answers *why*: it collects the demand /
 production / cross-reference tables, the per-iteration decision trail, and the
-cost attribution behind each move — then renders them for inspection.
+cost attribution behind each move — so a downstream layer can persist and
+investigate them.
 
 It is the realization of Step 4's "verbose mode" (originally sketched as
 `VerboseLog`): an **optional** object passed as a keyword argument into the
@@ -25,9 +32,11 @@ when absent, behavior is unchanged and nothing is logged. This is intended to
 
 This submodule owns:
 
-- the `DebugLog` object and the table / record types it holds;
-- the logic that turns a populated `DebugLog` into output (table dumps and,
-  from phase 3, an HTML dashboard).
+- the `DebugLog` object, the table / record types it holds, and its read API
+  (`tables` / `schema` / `get_df`).
+
+It does **not** own output: persistence (→ MySQL) and the investigation UI
+(→ PyQt6) live in `planners/infinite/dashboard/`.
 
 ## Phased implementation
 
@@ -105,16 +114,43 @@ rows, so new tables (phases 2–4) are added by configuration, not new types.
   columns=<declared columns>, **kwargs)`; the extra kwargs are forwarded to the
   `DataFrame` constructor (e.g. `index=`, `dtype=`). Built flat — no MultiIndex.
 - **`tables`** (property) — the names of the registered tables, in declaration
-  order, as a `tuple[str, ...]`. Lets a caller enumerate the log without
-  knowing its schema up front — e.g. the CLI dumps every table to a TSV via
-  `for name in log.tables: log.get_df(name).to_csv(dir / f'{name}.tsv', ...)`.
+  order, as a `tuple[str, ...]`. Lets a caller enumerate the log without knowing
+  its schema up front — e.g. the persistence writer walks `for name in
+  log.tables: log.get_df(name)` to insert each table's rows.
+- **`schema`** (property) — the inter-table link metadata, as
+  `dict[str, TableSchema]` keyed by table name in declaration order. Exposes the
+  PK / FK structure the persistence writer uses to lay out the run-tagged INSERTs
+  and the PyQt6 investigation app ships as static metadata to drive its
+  foreign-key navigation — without the caller poking at internals. Two small
+  frozen value types, both exported from `swmtplanner.debuglog`:
+
+  ```
+  TableSchema
+    columns: tuple[str, ...]      # declared column order (same as get_df's columns)
+    pk: str | None                # the primary-key column, or None for a key-less table
+    fks: tuple[ForeignKey, ...]   # one per foreign-key column, in declared order
+
+  ForeignKey
+    column: str                   # the foreign-key column in this table
+    ref_table: str                # the referenced table
+    ref_column: str               # the referenced table's primary-key column
+  ```
+
+  `ref_table` / `ref_column` are resolved from the stored link: a foreign key
+  onto a **non-auto** primary key stores the foreign table name directly; one
+  onto a **counter-backed** primary key stores only the counter name, so
+  `schema` maps that counter back to the table whose primary key owns it. The
+  property recomputes from the current schema on each access (cheap; the schema
+  is small and fixed once rows exist).
 
 **Keys are immutable once set.** A column that is already a primary key cannot
 be made a foreign key (and vice versa); a primary key cannot be redefined with
 a different counter name, nor switched from counter-backed to caller-supplied or
 back. `set_pk` / `set_fk` raise on all such attempts; re-declaring the identical
 key is a silent no-op. The PK/FK declarations double as the **inter-table link
-metadata** the phase-3 dashboard will read to render foreign-key links.
+metadata** the `schema` property exposes — used by the MySQL persistence writer
+(to lay out run-tagged tables) and the PyQt6 investigation app (to drive
+foreign-key navigation). See `planners/infinite/dashboard/DESIGN.md`.
 
 #### Counters
 
@@ -364,15 +400,13 @@ The regular **`late_orders`** sheet is **dropped** — the same lateness
 information (per-delivery `days` / `qty` / `value`) is in `inv_cost_detail`'s
 `lateness` rows.
 
-### Phase 3 — raw dashboard
+### Phases 3+ — persistence & investigation (external)
 
-Add **only the raw view** of the dashboard: render the phase-1/2 tables
-directly as HTML, surfacing the **foreign-key links** between them for
-inspection. This is the debug-oriented, tables-and-keys view — no
-user-friendly drill-down yet.
-
-### Phase 4 — full dashboard
-
-Add the **user-friendly dashboard** alongside the raw view: start from the
-schedule by machine and drill down (machine → its jobs / activities → the order
-each job fills → the cost breakdown) through nicely-formatted views.
+Once the log is populated (phases 1–2), turning it into durable, browsable
+output is owned by `planners/infinite/dashboard/` — **not** this module. That
+work persists a run's tables to a local **MySQL** store (run-tagged by an
+auto-incremented `run_id`) and investigates them through a **PyQt6** desktop app
+(select a run → raw, run-scoped, paged grids with foreign-key navigation and
+per-column filters). Those layers consume this module's `tables` / `schema` /
+`get_df` read API and add no coupling back. See
+`planners/infinite/dashboard/DESIGN.md` for that design and its phasing.

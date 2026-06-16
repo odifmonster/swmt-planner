@@ -11,6 +11,6 @@ that renders a populated log. Built up over four phases — see DESIGN.md. Phase
 wiring into the planner follows.
 """
 
-from .debuglog import DebugLog
+from .debuglog import DebugLog, TableSchema, ForeignKey
 
-__all__ = ['DebugLog']
+__all__ = ['DebugLog', 'TableSchema', 'ForeignKey']

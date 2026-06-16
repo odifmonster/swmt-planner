@@ -724,7 +724,8 @@ swmt-infinite-plan <config.json>
 
 ### Run-config JSON
 
-A top-level object with six required keys:
+A top-level object with six required keys, plus an optional `database`
+block:
 
 ```
 {
@@ -733,11 +734,12 @@ A top-level object with six required keys:
     "workcal":    <path-string | workcal object>,
     "machines":   <path-string | list of machine objects>,
     "demand":     <path-string | list of demand objects>,
-    "weights":    <path-string | weights object>
+    "weights":    <path-string | weights object>,
+    "database":   <db-config object>           # optional; only used with --verbose
 }
 ```
 
-Every key except `start_date` can hold **either** a string (a path
+Every required key except `start_date` can hold **either** a string (a path
 to a JSON file with the same shape that the per-input loader would
 read from disk) **or** the inline value (the object/list that the
 file would have contained). The two forms are interchangeable and
@@ -752,6 +754,36 @@ can be mixed freely from one key to the next, so a run-config can:
 String paths in the config are resolved against the directory
 holding the config file, so a whole input bundle can sit in one
 folder and move together as a unit.
+
+#### The `database` block (optional)
+
+Connection settings for the MySQL store the verbose `DebugLog` is persisted to
+(and that the `knit-debug` investigation app reads from). **Only consulted when
+`--verbose` is set**; a non-verbose run ignores it, and it may be omitted
+entirely. Shared connection fields plus a `writer` and a `reader` credential
+sub-block — two MySQL roles so the dashboard is read-only at the grant level
+(writer: `SELECT,INSERT,UPDATE`; reader: `SELECT`). The planner persists as the
+**writer**; the app reads as the **reader**.
+
+```
+"database": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "name": "swmtplanner",
+    "writer": { "user": "swmt_writer", "password": null },   # null → SWMT_DB_WRITER_PASSWORD
+    "reader": { "user": "swmt_reader", "password": null }     # null → SWMT_DB_READER_PASSWORD
+}
+```
+
+Any field may be left out of the file and supplied by environment variable
+(`SWMT_DB_HOST` / `SWMT_DB_PORT` / `SWMT_DB_NAME`; `SWMT_DB_WRITER_USER` /
+`SWMT_DB_WRITER_PASSWORD`; `SWMT_DB_READER_USER` / `SWMT_DB_READER_PASSWORD`),
+with the environment winning — so a committed config can hold non-secret
+defaults and leave passwords to the environment. Unlike the six input keys, the
+`database` block is **always inline** (not a path-string) and has no CLI
+override flag; it lives in the main config file (shared with the app). The full
+schema and persistence/investigation design are in
+`planners/infinite/dashboard/DESIGN.md`.
 
 ### CLI option overrides
 
@@ -768,8 +800,20 @@ the config alone suffices for a full run.
 | `--machines`   | `-m`  | path to machines JSON, *or* an inline JSON string           |
 | `--demand`     | `-d`  | path to demand JSON, *or* an inline JSON string             |
 | `--weights`    | `-w`  | path to weights JSON, *or* an inline JSON string            |
+| `--db-conn`    | `-b`  | override the `database` block — path to a JSON file, *or* an inline JSON string |
+| `--label`      | `-l`  | this run's `label` (required with `--verbose`; ignored otherwise) |
 | `--output-dir` | `-o`  | output directory (defaults to cwd)                          |
-| `--verbose`    | `-v`  | flag; build and populate the in-memory `DebugLog` audit trail during the run (see `debuglog/DESIGN.md`) |
+| `--verbose`    | `-v`  | flag; persist the run's `DebugLog` to MySQL (see below + `dashboard/DESIGN.md`) |
+
+**Verbose mode requires a label and notes.** A `--verbose` run is persisted as
+a labelled, annotated run, so before any work begins the CLI fails fast if
+`--label` is missing, and collects the run's **notes interactively**: it opens
+`vi` on a fresh temp file (`temp.txt`, or the first `tempN.txt` not already
+present in the cwd), waits for the user to write and quit, takes the file's
+contents as the notes, and deletes the file. The notes must contain
+non-whitespace text — the CLI exits with an error otherwise. `--db-conn`
+overrides the config's `database` block (e.g. to point a one-off run at a
+different server); absent both, a verbose run reports that nothing was persisted.
 
 Non-`start_date` override values are interpreted as **inline JSON**
 when the first non-whitespace character is `{` or `[`, otherwise as
@@ -882,10 +926,15 @@ table container in the top-level `swmtplanner.debuglog` module —
 threaded into `plan(..., debuglog=...)` and populated live as the loop
 runs (iteration log, per-component cost summary, the cost-detail leaf
 tables, the per-`Knit` production ledger) plus a post-loop copy of the
-`demand` / `unmet_demand` tables. The log's table schema, keys/links,
-population flow, and (later) the HTML dashboard that renders it are all
-specified in `swmtplanner/debuglog/DESIGN.md`. With `--verbose` off,
-no log is built and the loop stays entirely on the scalar hot path.
+`demand` / `unmet_demand` tables. The log's table schema, keys/links, and
+population flow are specified in `swmtplanner/debuglog/DESIGN.md`. With
+`--verbose` off, no log is built and the loop stays entirely on the scalar hot
+path.
+
+When `--verbose` is on and a `database` block is configured, the populated log
+is persisted to a local **MySQL** store (run-tagged by an auto-incremented
+`run_id`) and investigated through a **PyQt6** desktop app — both owned by
+`planners/infinite/dashboard/` (see its DESIGN.md), not the planner core.
 
 ### Why a config file (with overrides)
 
@@ -1011,12 +1060,14 @@ stays decoupled from the planner's headline output.
   `demand` / `unmet_demand` tables. When absent, the hot path runs
   unchanged and nothing is logged.
 - The CLI's `--verbose` / `-v` flag builds the `DebugLog` and passes
-  it to `plan(..., debuglog=...)`. An HTML dashboard that renders the
-  populated log is the final piece.
+  it to `plan(..., debuglog=...)`. Persisting the populated log to a
+  local MySQL store and investigating it through a PyQt6 app are the
+  final pieces, owned by `planners/infinite/dashboard/`.
 
-The full table schema, keys/links, population flow, and the phased
-build-out (including the dashboard) live in
-`swmtplanner/debuglog/DESIGN.md`. Delivers an audit trail that turns
+The full table schema, keys/links, and population flow live in
+`swmtplanner/debuglog/DESIGN.md`; the persistence + investigation design
+lives in `planners/infinite/dashboard/DESIGN.md`. Delivers an audit trail
+that turns
 "the greedy committed X" into "the greedy committed X because its
 lateness was Y vs the next candidate's Z, and its priority rank was
 W" — for diagnosis and weight tuning, not an operator-facing
