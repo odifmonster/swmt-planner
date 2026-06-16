@@ -342,6 +342,11 @@ class DebugLog:
                 raise KeyError(f'table {table!r} has no column {k!r}')
             row[col_map[k]] = self._resolve(self._tables[table][k], v)
 
+    def get_nrows(self, table: str) -> int:
+        self._ensure_table(table)
+        data = self._data.get(table)
+        if data is None: return 0
+        return len(data['rows'])
 
     def get_df(self, table: str, **kwargs: Any) -> pd.DataFrame:
         """Render `table` as a flat `pandas.DataFrame` (no MultiIndex). A keyed

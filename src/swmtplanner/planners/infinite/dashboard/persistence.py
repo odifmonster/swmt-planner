@@ -122,6 +122,7 @@ def persist_run(
             )
             run_id = cur.lastrowid
             for spec in manifest.TABLES:
+                print(f'Dumping {spec.debuglog} to {spec.table}...')
                 _insert_table(cur, debuglog, spec, run_id)
         connection.commit()
         return run_id
@@ -140,14 +141,19 @@ def _insert_table(cur, debuglog: 'DebugLog', spec: TableSpec, run_id: int) -> No
     any failure in `PersistenceError` naming the table."""
     sql = insert_sql(spec)
     chunk: list[tuple] = []
+    nrows = debuglog.get_nrows(spec.debuglog)
+    i = 0
     try:
         for row in project_rows(debuglog, spec, run_id):
+            print(f'{i+1} of {nrows} loaded', end='\r')
+            i += 1
             chunk.append(row)
             if len(chunk) >= _CHUNK:
                 cur.executemany(sql, chunk)
                 chunk = []
         if chunk:
             cur.executemany(sql, chunk)
+        print()
     except PersistenceError:
         raise
     except Exception as exc:
