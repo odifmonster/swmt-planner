@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 import pandas as pd
 
-from . import manifest
-from .manifest import TableSpec
+from .. import manifest
+from ..manifest import TableSpec
 
 if TYPE_CHECKING:
     from swmtplanner.debuglog import DebugLog
-    from .config import ConnConfig
+    from ..config import ConnConfig
 
 __all__ = ['persist_run', 'PersistenceError']
 
@@ -67,7 +67,7 @@ def insert_sql(spec: TableSpec) -> str:
     cols = (manifest.RUN_ID,) + spec.column_names
     collist = ', '.join(f'`{c}`' for c in cols)
     placeholders = ', '.join(['%s'] * len(cols))
-    return f'INSERT INTO `{spec.table}` ({collist}) VALUES ({placeholders})'
+    return f'INSERT INTO `{spec.name}` ({collist}) VALUES ({placeholders})'
 
 
 def project_rows(
@@ -78,7 +78,7 @@ def project_rows(
     table's primary key (its DataFrame index) is exposed as a column first, then
     columns are selected by name, so this is decoupled from `get_df`'s
     index/column split. Empty tables yield nothing."""
-    df = debuglog.get_df(spec.debuglog)
+    df = debuglog.get_df(spec.name)
     if df.index.name is not None:                # keyed: expose the PK as a column
         df = df.reset_index()
     cols = list(spec.column_names)
@@ -95,7 +95,7 @@ def persist_run(
 ) -> int:
     """Persist `debuglog` to MySQL as a new run and return its `run_id`.
 
-    Connects with the **writer** `ConnConfig` `conn`, inserts the `knitruns`
+    Connects with the **writer** `ConnConfig` `conn`, inserts the `runs`
     metadata row (the server assigns `run_id` and `created_at`), then
     bulk-inserts every manifest table's run-tagged rows in FK-topological order —
     all in one transaction, committed on success and rolled back on any failure.
@@ -114,7 +114,7 @@ def persist_run(
     try:
         with connection.cursor() as cur:
             cur.execute(
-                'INSERT INTO `knitruns` '
+                'INSERT INTO `runs` '
                 '(`start_date`, `total_score`, `n_unmet`, `label`, `notes`) '
                 'VALUES (%s, %s, %s, %s, %s)',
                 (to_sql(start_date), to_sql(total_score),
@@ -122,7 +122,7 @@ def persist_run(
             )
             run_id = cur.lastrowid
             for spec in manifest.TABLES:
-                print(f'Dumping {spec.debuglog} to {spec.table}...')
+                print(f'Dumping {spec.name}...')
                 _insert_table(cur, debuglog, spec, run_id)
         connection.commit()
         return run_id
@@ -141,7 +141,7 @@ def _insert_table(cur, debuglog: 'DebugLog', spec: TableSpec, run_id: int) -> No
     any failure in `PersistenceError` naming the table."""
     sql = insert_sql(spec)
     chunk: list[tuple] = []
-    nrows = debuglog.get_nrows(spec.debuglog)
+    nrows = debuglog.get_nrows(spec.name)
     i = 0
     try:
         for row in project_rows(debuglog, spec, run_id):
@@ -158,6 +158,6 @@ def _insert_table(cur, debuglog: 'DebugLog', spec: TableSpec, run_id: int) -> No
         raise
     except Exception as exc:
         raise PersistenceError(
-            f'failed writing table {spec.table!r} (is the schema '
+            f'failed writing table {spec.name!r} (is the schema '
             f'provisioned as DESIGN.md specifies?): {exc}'
         ) from exc

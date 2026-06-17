@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 
-"""Static manifest mapping the planner's `DebugLog` tables to the
-user-provisioned MySQL schema (database `swmtplanner`).
+"""Static manifest of the planner's MySQL schema (database `swmtinfinite`).
 
 The single source of truth shared by the persistence writer (INSERT layout +
 order) and the `knit-debug` investigation app (foreign-key navigation, column
-typing, the run registry). Hand-maintained to match the DDL — the table names
-differ from the `DebugLog`'s, the columns are identity, and the FK graph adds
-one link (`knitprod.knit_id -> knitschedcost.activity_id`) that
-`DebugLog.schema` doesn't carry. A test (`tests/dashboard_tests.py`) checks the
-manifest stays consistent with the live `DebugLog`.
+typing, the run registry). The MySQL base tables share their names with the
+`DebugLog` tables (the database is dedicated to the knitting planner, so no
+translation is needed), so each `TableSpec` carries a single `name` used both to
+read rows (`DebugLog.get_df(name)`) and to write them (`INSERT INTO name`). The
+manifest still records column types, the FK graph, and the FK-topological insert
+order — none of which the `DebugLog` itself exposes. A test
+(`tests/dashboard_tests.py`) checks it stays consistent with the live
+`DebugLog`.
 
 See `planners/infinite/dashboard/DESIGN.md`.
 """
@@ -24,10 +26,9 @@ ColumnType = Literal['int', 'float', 'str', 'datetime']
 
 @dataclass(frozen=True)
 class Column:
-    """One non-`run_id` column of a MySQL table. `name` is both the DB column
-    and the `DebugLog` column (identity today). `nullable` reflects whether the
-    value is genuinely optional in the data (so the app can offer a "(blank)"
-    filter), not merely the DDL's nullability."""
+    """One non-`run_id` column. `nullable` reflects whether the value is
+    genuinely optional in the data (so the app can offer a "(blank)" filter),
+    not merely the DDL's nullability."""
     name: str
     type: ColumnType
     nullable: bool = False
@@ -44,12 +45,11 @@ class ForeignKey:
 
 @dataclass(frozen=True)
 class TableSpec:
-    """One MySQL table. `debuglog` is the source `DebugLog` table name (None for
-    the run registry, which has no `DebugLog` counterpart). `columns` are the
+    """One MySQL table. `name` is the table — identical in the `DebugLog` (the
+    row source, for the 8 detail tables) and the database. `columns` are the
     non-`run_id` columns in DB order; `pk` is the table's own primary-key
     column(s) after the implicit leading `run_id` (empty for a key-less table)."""
-    debuglog: str | None
-    table: str
+    name: str
     columns: tuple[Column, ...]
     pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...] = field(default_factory=tuple)
@@ -60,16 +60,12 @@ class TableSpec:
 
 
 # The implicit run-tag column carried by every table, and the run registry that
-# owns it (auto-incremented server-side).
+# owns it (auto-incremented server-side). `runs` has no `DebugLog` counterpart.
 RUN_ID = 'run_id'
-RUNS_TABLE = 'knitruns'
+RUNS_TABLE = 'runs'
 
-# The run registry. `run_id` + `created_at` are server-filled; the writer
-# supplies `start_date` / `total_score` / `n_unmet`; `label` / `notes` start
-# NULL (and are only writable by the writer role, off by default in the app).
 RUNS = TableSpec(
-    debuglog=None,
-    table=RUNS_TABLE,
+    name=RUNS_TABLE,
     columns=(
         Column('run_id', 'int'),
         Column('created_at', 'datetime'),
@@ -83,11 +79,11 @@ RUNS = TableSpec(
 )
 
 # The eight DebugLog tables, in FK-topological insert order (parents first):
-# knitruns -> knitdmnd -> knititerlog -> knitcostsum -> knitinvcost
-#          -> knitschedcost -> knitprod ; knitpriority, knitunmet after parents.
+# runs -> demand -> iteration_log -> cost_summary -> inv_cost_detail
+#      -> sched_cost_detail -> production ; priority_detail, unmet_demand after.
 TABLES: tuple[TableSpec, ...] = (
     TableSpec(
-        'demand', 'knitdmnd',
+        'demand',
         columns=(
             Column('order_id', 'str'),
             Column('item', 'str'),
@@ -99,7 +95,7 @@ TABLES: tuple[TableSpec, ...] = (
         pk=('order_id',),
     ),
     TableSpec(
-        'iteration_log', 'knititerlog',
+        'iteration_log',
         columns=(
             Column('iteration_idx', 'int'),
             Column('move_id', 'int'),
@@ -112,10 +108,10 @@ TABLES: tuple[TableSpec, ...] = (
             Column('total_cost', 'float'),
         ),
         pk=('move_id',),
-        fks=(ForeignKey('order_id', 'knitdmnd', 'order_id'),),
+        fks=(ForeignKey('order_id', 'demand', 'order_id'),),
     ),
     TableSpec(
-        'cost_summary', 'knitcostsum',
+        'cost_summary',
         columns=(
             Column('summary_id', 'str'),
             Column('move_id', 'int'),
@@ -125,10 +121,10 @@ TABLES: tuple[TableSpec, ...] = (
             Column('cost', 'float'),
         ),
         pk=('summary_id',),
-        fks=(ForeignKey('move_id', 'knititerlog', 'move_id'),),
+        fks=(ForeignKey('move_id', 'iteration_log', 'move_id'),),
     ),
     TableSpec(
-        'inv_cost_detail', 'knitinvcost',
+        'inv_cost_detail',
         columns=(
             Column('icost_id', 'int'),
             Column('summary_id', 'str'),
@@ -142,12 +138,12 @@ TABLES: tuple[TableSpec, ...] = (
         ),
         pk=('icost_id',),
         fks=(
-            ForeignKey('summary_id', 'knitcostsum', 'summary_id'),
-            ForeignKey('move_id', 'knititerlog', 'move_id'),
+            ForeignKey('summary_id', 'cost_summary', 'summary_id'),
+            ForeignKey('move_id', 'iteration_log', 'move_id'),
         ),
     ),
     TableSpec(
-        'sched_cost_detail', 'knitschedcost',
+        'sched_cost_detail',
         columns=(
             Column('activity_id', 'str'),
             Column('move_id', 'int'),
@@ -159,10 +155,10 @@ TABLES: tuple[TableSpec, ...] = (
             Column('cost', 'float', nullable=True),
         ),
         pk=('activity_id',),
-        fks=(ForeignKey('move_id', 'knititerlog', 'move_id'),),
+        fks=(ForeignKey('move_id', 'iteration_log', 'move_id'),),
     ),
     TableSpec(
-        'production', 'knitprod',
+        'production',
         columns=(
             Column('knit_id', 'str'),
             Column('move_id', 'int'),
@@ -176,12 +172,12 @@ TABLES: tuple[TableSpec, ...] = (
         pk=('knit_id',),
         fks=(
             # A knit IS a scheduled activity — a DB link not in DebugLog.schema.
-            ForeignKey('knit_id', 'knitschedcost', 'activity_id'),
-            ForeignKey('move_id', 'knititerlog', 'move_id'),
+            ForeignKey('knit_id', 'sched_cost_detail', 'activity_id'),
+            ForeignKey('move_id', 'iteration_log', 'move_id'),
         ),
     ),
     TableSpec(
-        'priority_detail', 'knitpriority',
+        'priority_detail',
         columns=(
             Column('move_id', 'int'),
             Column('item', 'str'),
@@ -192,10 +188,10 @@ TABLES: tuple[TableSpec, ...] = (
             Column('cost', 'float'),
         ),
         pk=(),                                                # key-less
-        fks=(ForeignKey('move_id', 'knititerlog', 'move_id'),),
+        fks=(ForeignKey('move_id', 'iteration_log', 'move_id'),),
     ),
     TableSpec(
-        'unmet_demand', 'knitunmet',
+        'unmet_demand',
         columns=(
             Column('item', 'str'),
             Column('week_idx', 'int'),
@@ -208,17 +204,10 @@ TABLES: tuple[TableSpec, ...] = (
 # Lookups. `TABLES` is already the insert order; `ALL_TABLES` prepends the run
 # registry (which the writer fills first).
 ALL_TABLES: tuple[TableSpec, ...] = (RUNS,) + TABLES
-_BY_DEBUGLOG = {t.debuglog: t for t in TABLES}
-_BY_DB_TABLE = {t.table: t for t in ALL_TABLES}
+_BY_NAME = {t.name: t for t in ALL_TABLES}
 
 
-def spec_for_debuglog(name: str) -> TableSpec:
-    """The `TableSpec` whose `DebugLog` source table is `name`. Raises
-    `KeyError` if unknown (the run registry has no `DebugLog` source)."""
-    return _BY_DEBUGLOG[name]
-
-
-def spec_for_table(db_table: str) -> TableSpec:
-    """The `TableSpec` for the MySQL table named `db_table` (incl. the run
-    registry). Raises `KeyError` if unknown."""
-    return _BY_DB_TABLE[db_table]
+def spec_for_name(name: str) -> TableSpec:
+    """The `TableSpec` for the table named `name` (any of the eight detail
+    tables or the `runs` registry). Raises `KeyError` if unknown."""
+    return _BY_NAME[name]

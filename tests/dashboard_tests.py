@@ -15,14 +15,15 @@ import pandas as pd
 from swmtplanner.planners.infinite import Costing
 from swmtplanner.planners.infinite.loop import plan
 from swmtplanner.planners.infinite.run import _build_debug_log
-from swmtplanner.planners.infinite.dashboard import manifest, persistence
+from swmtplanner.planners.infinite.dashboard import manifest
 from swmtplanner.planners.infinite.dashboard.manifest import (
-    ForeignKey, spec_for_debuglog, spec_for_table,
+    ForeignKey, spec_for_name,
 )
 from swmtplanner.planners.infinite.dashboard.config import (
     ConnConfig, DatabaseConfigError, resolve_conn_config,
 )
-from swmtplanner.planners.infinite.dashboard.persistence import (
+from swmtplanner.planners.infinite.dashboard.sqldump import persistence
+from swmtplanner.planners.infinite.dashboard.sqldump.persistence import (
     PersistenceError, persist_run,
 )
 
@@ -46,29 +47,30 @@ class ManifestConsistencyTests(unittest.TestCase):
         self.schema = _build_debug_log().schema   # {debuglog table -> TableSchema}
 
     def test_table_set_matches_debuglog(self):
-        manifest_names = {t.debuglog for t in manifest.TABLES}
+        # Table names are identical to the DebugLog table names now.
+        manifest_names = {t.name for t in manifest.TABLES}
         self.assertEqual(manifest_names, set(self.schema))
 
     def test_columns_are_identity(self):
         for spec in manifest.TABLES:
-            with self.subTest(table=spec.debuglog):
+            with self.subTest(table=spec.name):
                 self.assertEqual(
                     set(spec.column_names),
-                    set(self.schema[spec.debuglog].columns),
+                    set(self.schema[spec.name].columns),
                 )
 
     def test_primary_keys_match(self):
         for spec in manifest.TABLES:
-            with self.subTest(table=spec.debuglog):
-                pk = self.schema[spec.debuglog].pk
+            with self.subTest(table=spec.name):
+                pk = self.schema[spec.name].pk
                 self.assertEqual(spec.pk, (pk,) if pk is not None else ())
 
     def test_manifest_fks_superset_of_debuglog(self):
-        by_dbg = {t.debuglog: t.table for t in manifest.TABLES}
+        # Names match, so the DebugLog FKs map identically into the manifest's.
         for spec in manifest.TABLES:
-            for fk in self.schema[spec.debuglog].fks:
-                mapped = ForeignKey(fk.column, by_dbg[fk.ref_table], fk.ref_column)
-                with self.subTest(table=spec.debuglog, fk=fk.column):
+            for fk in self.schema[spec.name].fks:
+                mapped = ForeignKey(fk.column, fk.ref_table, fk.ref_column)
+                with self.subTest(table=spec.name, fk=fk.column):
                     self.assertIn(mapped, spec.fks)
 
 
@@ -84,31 +86,28 @@ class ManifestStructureTests(unittest.TestCase):
             for fk in spec.fks:
                 self.assertIn(
                     fk.ref_table, seen,
-                    f'{spec.table}.{fk.column} -> {fk.ref_table} '
+                    f'{spec.name}.{fk.column} -> {fk.ref_table} '
                     f'references a table not inserted yet',
                 )
-            seen.add(spec.table)
+            seen.add(spec.name)
 
     def test_production_has_extra_schedule_link(self):
-        prod = spec_for_debuglog('production')
+        prod = spec_for_name('production')
         self.assertIn(
-            ForeignKey('knit_id', 'knitschedcost', 'activity_id'), prod.fks,
+            ForeignKey('knit_id', 'sched_cost_detail', 'activity_id'), prod.fks,
         )
 
     def test_run_registry(self):
-        self.assertEqual(manifest.RUNS.table, 'knitruns')
+        self.assertEqual(manifest.RUNS.name, 'runs')
         self.assertEqual(manifest.RUNS.pk, ('run_id',))
-        self.assertIsNone(manifest.RUNS.debuglog)
         self.assertEqual(manifest.ALL_TABLES, (manifest.RUNS,) + manifest.TABLES)
 
     def test_lookups(self):
-        self.assertEqual(spec_for_debuglog('demand').table, 'knitdmnd')
-        self.assertEqual(spec_for_table('knitprod').debuglog, 'production')
-        self.assertEqual(spec_for_table('knitruns'), manifest.RUNS)
+        self.assertEqual(spec_for_name('demand').name, 'demand')
+        self.assertEqual(spec_for_name('production').pk, ('knit_id',))
+        self.assertEqual(spec_for_name('runs'), manifest.RUNS)
         with self.assertRaises(KeyError):
-            spec_for_debuglog('nope')
-        with self.assertRaises(KeyError):
-            spec_for_table('nope')
+            spec_for_name('nope')
 
 
 # ===================================================================
@@ -117,7 +116,7 @@ class ManifestStructureTests(unittest.TestCase):
 
 def _block(**over):
     b = {
-        'host': 'db.local', 'port': 3307, 'name': 'swmtplanner',
+        'host': 'db.local', 'port': 3307, 'name': 'swmtinfinite',
         'writer': {'user': 'w_user', 'password': 'w_pw'},
         'reader': {'user': 'r_user', 'password': 'r_pw'},
     }
@@ -130,7 +129,7 @@ class ConfigResolutionTests(unittest.TestCase):
     def test_resolves_per_role_from_block(self):
         w = resolve_conn_config(_block(), 'writer', env={})
         self.assertEqual(
-            w, ConnConfig('db.local', 3307, 'swmtplanner', 'w_user', 'w_pw'),
+            w, ConnConfig('db.local', 3307, 'swmtinfinite', 'w_user', 'w_pw'),
         )
         r = resolve_conn_config(_block(), 'reader', env={})
         self.assertEqual(r.user, 'r_user')
@@ -215,10 +214,10 @@ class PersistenceHelperTests(unittest.TestCase):
         )
 
     def test_insert_sql_backticks_and_order(self):
-        spec = spec_for_debuglog('sched_cost_detail')
+        spec = spec_for_name('sched_cost_detail')
         sql = persistence.insert_sql(spec)
         self.assertTrue(sql.startswith(
-            'INSERT INTO `knitschedcost` (`run_id`, `activity_id`, `move_id`, '
+            'INSERT INTO `sched_cost_detail` (`run_id`, `activity_id`, `move_id`, '
         ))
         for col in ('desc', 'start', 'end'):       # reserved words backticked
             self.assertIn(f'`{col}`', sql)
@@ -227,7 +226,7 @@ class PersistenceHelperTests(unittest.TestCase):
     def test_project_rows_shape_and_counts(self):
         for name in ('iteration_log', 'cost_summary', 'priority_detail',
                      'production', 'unmet_demand'):
-            spec = spec_for_debuglog(name)
+            spec = spec_for_name(name)
             rows = list(persistence.project_rows(self.dl, spec, run_id=42))
             self.assertEqual(len(rows), len(self.dl.get_df(name)), name)
             for r in rows:
@@ -235,14 +234,14 @@ class PersistenceHelperTests(unittest.TestCase):
                 self.assertEqual(len(r), 1 + len(spec.column_names))
 
     def test_project_rows_exposes_keyed_pk(self):
-        spec = spec_for_debuglog('iteration_log')
+        spec = spec_for_name('iteration_log')
         mi = spec.column_names.index('move_id')                   # the PK (index in get_df)
         rows = list(persistence.project_rows(self.dl, spec, run_id=1))
         self.assertTrue(rows)
         self.assertTrue(all(isinstance(r[1 + mi], int) for r in rows))
 
     def test_project_rows_empty_table_yields_nothing(self):
-        spec = spec_for_debuglog('unmet_demand')                  # empty in this fixture
+        spec = spec_for_name('unmet_demand')                  # empty in this fixture
         self.assertEqual(list(persistence.project_rows(self.dl, spec, 1)), [])
 
 
@@ -252,13 +251,13 @@ class PersistenceHelperTests(unittest.TestCase):
 
 _HOST = os.environ.get('SWMT_TEST_DB_HOST', '127.0.0.1')
 _PORT = int(os.environ.get('SWMT_TEST_DB_PORT', '3306'))
-_DB = os.environ.get('SWMT_TEST_DB_NAME', 'swmtplannertests')
-_WRITER = (os.environ.get('SWMT_TEST_WRITER_USER', 'swmtwritetests'),
-           os.environ.get('SWMT_TEST_WRITER_PASSWORD', 'Writer-Password'))
-_READER = (os.environ.get('SWMT_TEST_READER_USER', 'swmtreadtests'),
-           os.environ.get('SWMT_TEST_READER_PASSWORD', 'Reader-Password'))
-_ADMIN = (os.environ.get('SWMT_TEST_ADMIN_USER', 'stroot'),
-          os.environ.get('SWMT_TEST_ADMIN_PASSWORD', 'SwmtR00tT3sts!'))
+_DB = os.environ.get('SWMT_TEST_DB_NAME', 'swmtinftest')
+_WRITER = (os.environ.get('SWMT_TEST_WRITER_USER', 'knitwritetest'),
+           os.environ.get('SWMT_TEST_WRITER_PASSWORD', 'testpass'))
+_READER = (os.environ.get('SWMT_TEST_READER_USER', 'knitreadtest'),
+           os.environ.get('SWMT_TEST_READER_PASSWORD', 'testpass'))
+_ADMIN = (os.environ.get('SWMT_TEST_ADMIN_USER', 'ktroot'),
+          os.environ.get('SWMT_TEST_ADMIN_PASSWORD', 'InfTestRoot'))
 
 
 def _connect(creds, autocommit=True):
@@ -292,7 +291,7 @@ class PersistRunMySQLTests(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute('SET FOREIGN_KEY_CHECKS=0')
                 for spec in manifest.ALL_TABLES:
-                    cur.execute(f'TRUNCATE TABLE `{spec.table}`')
+                    cur.execute(f'TRUNCATE TABLE `{spec.name}`')
                 cur.execute('SET FOREIGN_KEY_CHECKS=1')
             conn.commit()
         finally:
@@ -320,9 +319,9 @@ class PersistRunMySQLTests(unittest.TestCase):
             start_date=datetime.date(2026, 5, 18), total_score=123.5, n_unmet=7,
         )
         self.assertIsInstance(rid, int)
-        self.assertEqual(self._count('knitruns'), 1)
+        self.assertEqual(self._count('runs'), 1)
         score, n_unmet, start_date = self._query(
-            'SELECT total_score, n_unmet, start_date FROM knitruns '
+            'SELECT total_score, n_unmet, start_date FROM runs '
             'WHERE run_id=%s', (rid,),
         )[0]
         self.assertAlmostEqual(score, 123.5)
@@ -332,8 +331,8 @@ class PersistRunMySQLTests(unittest.TestCase):
         # successful insert also proves the FK-topological order held.
         for spec in manifest.TABLES:
             self.assertEqual(
-                self._count(spec.table, rid),
-                len(self.dl.get_df(spec.debuglog)), spec.table,
+                self._count(spec.name, rid),
+                len(self.dl.get_df(spec.name)), spec.name,
             )
 
     def test_role_column_round_trips(self):
@@ -342,12 +341,12 @@ class PersistRunMySQLTests(unittest.TestCase):
             start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
         )
         roles = {r[0] for r in self._query(
-            'SELECT DISTINCT role FROM knititerlog WHERE run_id=%s', (rid,),
+            'SELECT DISTINCT role FROM iteration_log WHERE run_id=%s', (rid,),
         )}
         self.assertTrue(roles <= {'committed', 'rejected'})
         self.assertIn('committed', roles)
         db_committed = self._query(
-            "SELECT COUNT(*) FROM knititerlog WHERE run_id=%s AND role='committed'",
+            "SELECT COUNT(*) FROM iteration_log WHERE run_id=%s AND role='committed'",
             (rid,),
         )[0][0]
         il = self.dl.get_df('iteration_log')
@@ -358,21 +357,21 @@ class PersistRunMySQLTests(unittest.TestCase):
         rid1 = persist_run(self.dl, self.writer_conn, **kw)
         rid2 = persist_run(self.dl, self.writer_conn, **kw)
         self.assertNotEqual(rid1, rid2)
-        self.assertEqual(self._count('knitruns'), 2)
+        self.assertEqual(self._count('runs'), 2)
         for spec in manifest.TABLES:
-            n = len(self.dl.get_df(spec.debuglog))
-            self.assertEqual(self._count(spec.table, rid1), n, spec.table)
-            self.assertEqual(self._count(spec.table, rid2), n, spec.table)
-            self.assertEqual(self._count(spec.table), 2 * n, spec.table)
+            n = len(self.dl.get_df(spec.name))
+            self.assertEqual(self._count(spec.name, rid1), n, spec.name)
+            self.assertEqual(self._count(spec.name, rid2), n, spec.name)
+            self.assertEqual(self._count(spec.name), 2 * n, spec.name)
 
     def test_reader_role_cannot_write(self):
-        self.assertEqual(self._count('knitruns'), 0)
+        self.assertEqual(self._count('runs'), 0)
         with self.assertRaises(PersistenceError):
             persist_run(
                 self.dl, self.reader_conn,
                 start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
             )
-        self.assertEqual(self._count('knitruns'), 0)   # rollback / denied: nothing written
+        self.assertEqual(self._count('runs'), 0)   # rollback / denied: nothing written
 
     def test_run_py_wiring_persists_with_label_and_notes(self):
         # The run.py `--verbose` glue: resolve the writer config from a
@@ -388,13 +387,13 @@ class PersistRunMySQLTests(unittest.TestCase):
             'baseline run', 'first line\nsecond line\n',
         )
         self.assertIsInstance(rid, int)
-        self.assertEqual(self._count('knitruns'), 1)
+        self.assertEqual(self._count('runs'), 1)
         self.assertEqual(
-            self._count('knititerlog', rid),
+            self._count('iteration_log', rid),
             len(self.dl.get_df('iteration_log')),
         )
         n_unmet, label, notes = self._query(
-            'SELECT n_unmet, label, notes FROM knitruns WHERE run_id=%s', (rid,),
+            'SELECT n_unmet, label, notes FROM runs WHERE run_id=%s', (rid,),
         )[0]
         self.assertEqual(n_unmet, len(self.report.unmet_lbs_by_item_week))
         self.assertEqual(label, 'baseline run')
@@ -406,7 +405,7 @@ class PersistRunMySQLTests(unittest.TestCase):
             None, self.dl, self.report, datetime.datetime(2026, 5, 18),
             'lbl', 'notes',
         ))
-        self.assertEqual(self._count('knitruns'), 0)
+        self.assertEqual(self._count('runs'), 0)
 
 
 if __name__ == '__main__':

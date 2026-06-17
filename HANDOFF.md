@@ -365,46 +365,36 @@ and how each cost was incurred.
      `DebugLog` and persists nothing (a placeholder echo). The new direction
      (per the user) is designed in a rewritten
      `planners/infinite/dashboard/DESIGN.md`:
-     The **user provided the actual MySQL DDL** (db `swmtplanner`); the design
-     is now written against it (table names + the two flags below).
-     - **Shared manifest** (`planners/infinite/dashboard/manifest.py`, to build)
-       — the source of truth mapping each `DebugLog` table → its MySQL table +
-       columns + the DB FK graph + insert order. **Not** derived from
-       `DebugLog.schema` (the DB diverges). Table map: `iteration_log →
-       knititerlog`, `cost_summary → knitcostsum`, `inv_cost_detail →
-       knitinvcost`, `sched_cost_detail → knitschedcost`, `priority_detail →
-       knitpriority`, `production → knitprod`, `demand → knitdmnd`,
-       `unmet_demand → knitunmet`; run metadata → `knitruns`.
-     - **Write path** — INSERT a `knitruns` row (auto-inc `run_id` + `created_at`
-       default; tool sends `start_date`/`total_score`/`n_unmet`), read
-       `lastrowid`, then bulk-`executemany` each table **in FK-topological
-       order** (`knitruns → knitdmnd → knititerlog → knitcostsum → knitinvcost →
-       knitschedcost → knitprod`; `knitpriority`/`knitunmet` after parents) —
-       NOT `DebugLog.tables` order, because `knititerlog.order_id → knitdmnd` and
-       `knitprod.knit_id → knitschedcost.activity_id` (the latter an FK **not** in
-       `DebugLog.schema`). All column names backticked (reserved: `rank`, `desc`,
-       `start`/`end`, `value`); NaN/NaT/None → NULL. **Tool only INSERTs.**
-       Driver **PyMySQL**. `--emit-schema` dropped (user owns DDL).
-     - **Config** — optional `database` block in run-config JSON (documented in
-       the planner's own DESIGN.md too): shared `host/port/name` (name=
-       `swmtplanner`) + a **`writer`** and a **`reader`** credential sub-block.
-       **Two MySQL roles** enforce read-only at the grant level — writer
-       (`SELECT,INSERT,UPDATE`) is used by the planner to persist; reader
-       (`SELECT`) by the app, so the dashboard physically can't mutate data. Env
-       fallback `SWMT_DB_{HOST,PORT,NAME}` + `SWMT_DB_{WRITER,READER}_{USER,PASSWORD}`.
+     The DB is **dedicated to the knitting planner**: db `swmtinfinite` (test
+     copy `swmtinftest`), and the base tables now share their names with the
+     `DebugLog` tables — **no translation**.
+     - **Shared manifest** (`dashboard/manifest.py`) — the source of truth for
+       the table set, column types, PKs, the FK graph, and FK-topological insert
+       order. `TableSpec` carries a single **`name`** (used both as the `get_df`
+       key and the DB table); `spec_for_name` looks one up. **Not** derived from
+       `DebugLog.schema` (adds types, the topo order, and one extra FK —
+       `production.knit_id → sched_cost_detail.activity_id`).
+     - **Write path** (`sqldump/persistence.py`) — INSERT a `runs` row (auto-inc
+       `run_id` + `created_at` default; tool sends start_date/total_score/n_unmet
+       + label/notes), read `lastrowid`, then bulk-`executemany` each table in
+       FK-topological order (`runs → demand → iteration_log → cost_summary →
+       inv_cost_detail → sched_cost_detail → production`; `priority_detail` /
+       `unmet_demand` after parents) — NOT `DebugLog.tables` order (the demand FK
+       target). All column names backticked (reserved `rank`/`desc`/`start`/`end`/
+       `value`); NaN/NaT/None → NULL. **Tool only INSERTs.** Driver **PyMySQL**.
+     - **Config** — optional `database` block in run-config JSON: shared
+       `host/port/name` (name=`swmtinfinite`) + a **`writer`** and a **`reader`**
+       credential sub-block. **Two MySQL roles** enforce read-only at the grant
+       level — writer (`SELECT,INSERT,UPDATE`) persists; reader (`SELECT`) for
+       the app. Env fallback `SWMT_DB_{HOST,PORT,NAME}` +
+       `SWMT_DB_{WRITER,READER}_{USER,PASSWORD}`.
      - **Read path** — **PyQt6** app, entry point **`knit-debug`**, under
-       `planners/infinite/dashboard/app/`. Home lists/selects/annotates runs from
-       `knitruns`; then run-scoped grids. **Every grid pages uniformly
-       (LIMIT/OFFSET + COUNT)** — including FK/PK lookups (user corrected: a
-       lookup can be large, so it's paged like any table, never "fetch all
-       matching"). Per-column filters → SQL `WHERE` (value-select / >,<,range /
-       LIKE). Committed-only = a query joining to `knititerlog` on `roll =
-       'committed'`, not a stored table. The app holds the manifest statically.
-     - **DDL reconciled** (both prior flags fixed by the user): `knititerlog`
-       column is now `role` (was a `roll` typo) and `knitunmet` now has
-       `unmet_lbs` (was an accidental omission). So the manifest's column map is
-       **pure identity** — only table names differ (`iteration_log→knititerlog`
-       etc.).
+       `dashboard/app/` (later). Home lists/selects runs from `runs`; then
+       run-scoped grids, **every grid paged (LIMIT/OFFSET + COUNT)** incl. FK/PK
+       lookups; per-column SQL `WHERE` filters. **Committed-only** is realized as
+       DB **views** (`committed_sched` / `committed_prod`) — read-only; the
+       writer never touches them. The read/pagination data layer lives in
+       `sqlload/` (design pending); the app holds the manifest statically.
      - **Decisions on file**: DB config = run-config `database` block (shared
        conn + `writer`/`reader` roles) + env; schema = user-provisioned, tool
        only inserts; app under `planners/infinite/`; driver PyMySQL; entry point
@@ -425,7 +415,7 @@ and how each cost was incurred.
        388 green. No `pymysql`/`PyQt6` imported yet.
      - **Writer built + tested (Phase 1, uncommitted)**: `dashboard/persistence.py`
        — `persist_run(debuglog, conn, *, start_date, total_score, n_unmet,
-       label=None) -> run_id` (lazy `import pymysql`; INSERT `knitruns` →
+       label=None) -> run_id` (lazy `import pymysql`; INSERT `runs` →
        `lastrowid`, then topological chunked `executemany` of run-tagged rows;
        one transaction, rollback + `PersistenceError` on failure) + pure helpers
        `to_sql` / `insert_sql` / `project_rows`. `pymysql>=1.2.0` added to
@@ -433,8 +423,8 @@ and how each cost was incurred.
        `tests/dashboard_tests.py` (+ spec §4–5): 7 pure-helper tests (no DB) and
        4 **MySQL-gated** end-to-end tests (round-trip counts/metadata, `role`
        round-trip, distinct run_ids + isolation, reader-role-can't-write) that
-       **ran green against the local `swmtplannertests`** (writer/reader roles;
-       `stroot` truncates per `setUp`; creds via `SWMT_TEST_*` env w/ defaults).
+       **ran green against the local `swmtinftest`** (writer/reader roles;
+       `ktroot` truncates per `setUp`; creds via `SWMT_TEST_*` env w/ defaults).
        399 green.
      - **`run.py` wiring done (Phase 1 ✅ complete, uncommitted)**: a
        `_persist_debuglog(cfg, debuglog, report, start_date)` helper resolves the
@@ -451,14 +441,26 @@ and how each cost was incurred.
        up front** via `_gather_notes` — opens `vi` on `temp.txt` (or the first
        free `tempN.txt`), takes the file contents, deletes it, and errors if the
        notes are whitespace-only. `persist_run` gained a `notes` param (now in
-       the `knitruns` INSERT); `_persist_debuglog(db_block, …, label, notes)`
+       the `runs` INSERT); `_persist_debuglog(db_block, …, label, notes)`
        threads both through. `_resolve_db_block` applies the `--db-conn`
        override. Tests: `tests/run_tests.py` (+ `RUN_TEST_SPEC.md`) covers
        `_resolve_db_block`, `_next_temp_path`, and `_gather_notes` (vi mocked:
        returns contents / aborts on empty / aborts if vi missing — temp file
        always cleaned up); the MySQL-gated wiring test now round-trips
        label + multi-line notes. 408 green.
-     - **Next: the PyQt6 app (phases 2–4).**
+     - **Dashboard restructured into write/read submodules (uncommitted).**
+       `dashboard/` now: shared `manifest.py` + `config.py` at the top; the write
+       path in **`sqldump/`** (`persistence.py` moved there); the read/pagination
+       data layer (separate from the GUI) in **`sqlload/`** (created empty —
+       design pending); the GUI `app/` later. `manifest`/`config` stay shared
+       (both halves need them; keeping them out of `sqldump` avoids a
+       `sqlload → sqldump` dependency — confirm in the sqlload design).
+       **Every dashboard module now has a `.pyi` stub** (`__init__`, `manifest`,
+       `config`, `sqldump/__init__`, `sqldump/persistence`, `sqlload/__init__`).
+       `dashboard/__init__` re-exports `persist_run`/`PersistenceError` from
+       `sqldump`, so `run.py` is unchanged. 408 green.
+     - **Next: design `sqlload`** (the user has specific ideas for how loading /
+       pagination should work), then the PyQt6 app (phases 2–4).
 
 ### Step-3 tests — ✅ done (record of what was reworked)
 
@@ -492,9 +494,9 @@ building the DB layer).
 
 1. **Persistence — ✅ complete** (manifest, config, `persistence.py` writer,
    `run.py` `--verbose` wiring via `_persist_debuglog`, `pymysql` dep; 6 pure +
-   6 MySQL-gated tests green against `swmtplannertests`). Next is the app:
+   6 MySQL-gated tests green against `swmtinftest`). Next is the app:
 2. **PyQt6 app shell + Home** (entry point `knit-debug`) — connect as **reader**;
-   list / select runs from `knitruns`. Mirror `pyqt6` into `pyproject.toml`
+   list / select runs from `runs`. Mirror `pyqt6` into `pyproject.toml`
    (consider an optional extra so headless installs skip it).
 3. **Raw grids + FK navigation** — run-scoped, **uniformly paged** `QTableView`s
    (LIMIT/OFFSET + COUNT, FK/PK lookups paged too); FK/PK drill from the

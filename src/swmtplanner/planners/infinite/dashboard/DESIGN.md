@@ -15,87 +15,89 @@ links are baked into a manifest both halves share). Two halves around the DB:
 
 ```
   planner run ──(write path)──▶  local MySQL  ◀──(read path)── PyQt6 app
-   DebugLog → INSERTs            (db: swmtplanner)         paged SELECTs, per
+   DebugLog → INSERTs            (db: swmtinfinite)        paged SELECTs, per
    (tool only inserts)          run-tagged row-sets        run_id, filtered
 ```
 
+The database is **dedicated to the knitting planner** (`swmtinfinite`; the test
+copy is `swmtinftest`), so the MySQL base tables share their names with the
+`DebugLog` tables — no translation. The `dashboard/` package: shared `manifest`
++ `config` at the top; the write path in `sqldump/`; the read/pagination layer
+in `sqlload/`; the GUI in `app/` (later).
+
 ## The shared manifest (source of truth)
 
-The MySQL schema is **user-provisioned** (DDL given below, already run) and its
-table/column names differ from the `DebugLog`'s. A hand-maintained
-**manifest** — a small static module in this package (e.g.
-`planners/infinite/dashboard/manifest.py`) — is the single source of truth that
-maps the `DebugLog` to the database and records the link graph. Both halves
-import it: the writer to lay out INSERTs, the app to drive FK navigation,
-typing, and the table list. It is **not** derived from `DebugLog.schema`,
-because the DB schema diverges from it (renamed tables/columns, an extra FK).
+The MySQL schema is **user-provisioned** (DDL below, already run). A
+hand-maintained **manifest** (`manifest.py`) is the single source of truth for
+the table set, column types, primary keys, the FK graph, and the FK-topological
+insert order. Both halves import it: the writer to lay out INSERTs, the app to
+drive FK navigation, typing, and the table list. It is **not** derived from
+`DebugLog.schema` — it adds column *types*, the FK-topological order, and one FK
+link `DebugLog.schema` doesn't carry (see below).
 
-Per table the manifest records:
+Per table the manifest records a `TableSpec`:
 
-- **`debuglog`** — the in-memory `DebugLog` table name (source of rows).
-- **`table`** — the MySQL table name.
-- **`columns`** — ordered `(debuglog_col, db_col, type, nullable)`; `debuglog_col`
-  is how the writer reads the value, `db_col` how it INSERTs / the app queries.
-- **`pk`** — the DB primary-key column(s) after `run_id` (or none).
-- **`fks`** — `(db_col → ref_table.ref_col)`, the **full DB FK graph** (incl.
-  links not in `DebugLog.schema`), for the app's drill-down and the writer's
-  insert ordering.
+- **`name`** — the table name, **identical** in the `DebugLog` (the row source,
+  for the 8 detail tables) and the database. So `get_df(name)` reads the rows
+  and `INSERT INTO name` writes them — no debuglog↔db translation.
+- **`columns`** — ordered `(name, type, nullable)`; `type` ∈
+  `int/float/str/datetime` drives the app's per-column filter modes.
+- **`pk`** — the primary-key column(s) after the implicit leading `run_id`
+  (empty for a key-less table).
+- **`fks`** — `(column → ref_table.ref_column)`, the **full DB FK graph** (incl.
+  the extra link below), for the app's drill-down and the writer's insert order.
 
-### DebugLog → MySQL mapping
+### Tables
 
-| DebugLog table | MySQL table | notes |
-|---|---|---|
-| `iteration_log` | `knititerlog` | |
-| `cost_summary` | `knitcostsum` | |
-| `inv_cost_detail` | `knitinvcost` | |
-| `sched_cost_detail` | `knitschedcost` | |
-| `priority_detail` | `knitpriority` | no PK in DDL (FK on `run_id,move_id` only) |
-| `production` | `knitprod` | |
-| `demand` | `knitdmnd` | |
-| `unmet_demand` | `knitunmet` | |
-| *(run metadata)* | `knitruns` | not a `DebugLog` table; owns `run_id` |
+The eight `DebugLog` tables persist under their own names — `iteration_log`,
+`cost_summary`, `inv_cost_detail`, `sched_cost_detail`, `priority_detail`,
+`production`, `demand`, `unmet_demand` — plus the **`runs`** registry (run
+metadata; owns the auto-incremented `run_id`; not a `DebugLog` table).
+`priority_detail` and `unmet_demand` are key-less (no PK in the DDL beyond the
+`run_id` FK). Columns are name-for-name identical to the `DebugLog`'s.
 
-Columns match **name-for-name** in every table — the DDL was reconciled to the
-`DebugLog` (`knititerlog.role`, `knitunmet.unmet_lbs`). So the manifest's
-`db_col` equals its `debuglog_col` throughout; the column mapping is kept in the
-manifest structure (for generality + types) but is identity today. Only the
-**table names** differ.
+The DB also defines two **views** — **`committed_sched`** and
+**`committed_prod`** — the committed-move slices of `sched_cost_detail` /
+`production` (the "committed-only" derivation, realized as DB views rather than
+app-side queries). They are **read-only** (the writer never touches them); the
+`sqlload`/app side reads them. Out of scope for the writer + manifest's writable
+table set; folded into the `sqlload` design.
 
 ### FK graph (from the DDL)
 
 ```
-knitdmnd.run_id                      → knitruns.run_id
-knititerlog (run_id, order_id)       → knitdmnd (run_id, order_id)      # order_id may be NULL
-knitcostsum (run_id, move_id)        → knititerlog (run_id, move_id)
-knitinvcost (run_id, move_id)        → knititerlog (run_id, move_id)
-knitinvcost (run_id, summary_id)     → knitcostsum (run_id, summary_id)
-knitschedcost (run_id, move_id)      → knititerlog (run_id, move_id)
-knitpriority (run_id, move_id)       → knititerlog (run_id, move_id)
-knitprod (run_id, move_id)           → knititerlog (run_id, move_id)
-knitprod (run_id, knit_id)           → knitschedcost (run_id, activity_id)   # NEW link: a knit IS a scheduled activity
-knitunmet.run_id                     → knitruns.run_id
+demand.run_id                       → runs.run_id
+iteration_log (run_id, order_id)    → demand (run_id, order_id)       # order_id may be NULL
+cost_summary (run_id, move_id)      → iteration_log (run_id, move_id)
+inv_cost_detail (run_id, move_id)   → iteration_log (run_id, move_id)
+inv_cost_detail (run_id, summary_id)→ cost_summary (run_id, summary_id)
+sched_cost_detail (run_id, move_id) → iteration_log (run_id, move_id)
+priority_detail (run_id, move_id)   → iteration_log (run_id, move_id)
+production (run_id, move_id)         → iteration_log (run_id, move_id)
+production (run_id, knit_id)         → sched_cost_detail (run_id, activity_id)   # NEW link: a knit IS a scheduled activity
+unmet_demand.run_id                 → runs.run_id
 ```
 
-The `knitprod.knit_id → knitschedcost.activity_id` link is **not** in
+The `production.knit_id → sched_cost_detail.activity_id` link is **not** in
 `DebugLog.schema` (there `knit_id` is just `production`'s PK). The manifest adds
 it, so the app can jump from a produced knit to its scheduled activity, and the
-writer knows `knitprod` must follow `knitschedcost`.
+writer knows `production` must follow `sched_cost_detail`.
 
 ### Insert order (FK-topological)
 
 Parents before children, so the real FK constraints hold:
 
 ```
-knitruns → knitdmnd → knititerlog → knitcostsum → knitinvcost
-        → knitschedcost → knitprod ; knitpriority , knitunmet (anytime after their parents)
+runs → demand → iteration_log → cost_summary → inv_cost_detail
+     → sched_cost_detail → production ; priority_detail , unmet_demand (after parents)
 ```
 
-`demand` (`knitdmnd`) is built **last** in the `DebugLog` but must be inserted
-**before** `iteration_log` (its `order_id` FK target). So the writer drives
-insertion from the manifest's topological order, **not** `DebugLog.tables`
-declaration order. Assumption the DDL bakes in: every non-NULL
-`iteration_log.order_id` appears in `demand` (it does — `demand` has every
-regular + safety order; run-up jobs carry `order_id = NULL`, allowed by the FK).
+`demand` is built **last** in the `DebugLog` but must be inserted **before**
+`iteration_log` (its `order_id` FK target). So the writer drives insertion from
+the manifest's topological order, **not** `DebugLog.tables` declaration order.
+Assumption the DDL bakes in: every non-NULL `iteration_log.order_id` appears in
+`demand` (it does — `demand` has every regular + safety order; run-up jobs carry
+`order_id = NULL`, allowed by the FK).
 
 ## Configuration — the `database` block
 
@@ -112,7 +114,7 @@ fields plus a `writer` and a `reader` credential sub-block, with
 "database": {
   "host": "127.0.0.1",
   "port": 3306,
-  "name": "swmtplanner",
+  "name": "swmtinfinite",
   "writer": { "user": "swmt_writer", "password": null },   // null → SWMT_DB_WRITER_PASSWORD
   "reader": { "user": "swmt_reader", "password": null }     // null → SWMT_DB_READER_PASSWORD
 }
@@ -140,20 +142,20 @@ fields plus a `writer` and a `reader` credential sub-block, with
 ## The MySQL schema (provided, user-owned)
 
 The tool **only INSERTs** — never `CREATE`/`ALTER`. The schema below is the DDL
-you ran (db `swmtplanner`); the manifest mirrors it exactly. The writer fails
+you ran (db `swmtinfinite`); the manifest mirrors it exactly. The writer fails
 fast with a clear message if a table/column is missing.
 
-- `knitruns` — `run_id BIGINT AUTO_INCREMENT PK`, `created_at DATETIME(6)
+- `runs` — `run_id BIGINT AUTO_INCREMENT PK`, `created_at DATETIME(6)
   DEFAULT CURRENT_TIMESTAMP(6)`, `start_date DATE`, `total_score DOUBLE`,
   `n_unmet INT`, `label VARCHAR(255)`, `notes TEXT`.
-- Keyed detail tables carry `PRIMARY KEY (run_id, <pk>)`: `knitdmnd(order_id)`,
-  `knititerlog(move_id)`, `knitcostsum(summary_id)`, `knitinvcost(icost_id)`,
-  `knitschedcost(activity_id)`, `knitprod(knit_id)`.
-- Key-less tables (`knitpriority`, `knitunmet`) have only the `run_id` FK (no PK
+- Keyed detail tables carry `PRIMARY KEY (run_id, <pk>)`: `demand(order_id)`,
+  `iteration_log(move_id)`, `cost_summary(summary_id)`, `inv_cost_detail(icost_id)`,
+  `sched_cost_detail(activity_id)`, `production(knit_id)`.
+- Key-less tables (`priority_detail`, `unmet_demand`) have only the `run_id` FK (no PK
   in the DDL — fine for INSERT-only).
-- Reserved words backticked in the DDL: `knititerlog.rank`,
-  `knitschedcost.desc`, `knitschedcost.start`/`end`, `knitprod.start`/`end`,
-  `knitinvcost.value`. The writer backticks **all** column names regardless.
+- Reserved words backticked in the DDL: `iteration_log.rank`,
+  `sched_cost_detail.desc`, `sched_cost_detail.start`/`end`, `production.start`/`end`,
+  `inv_cost_detail.value`. The writer backticks **all** column names regardless.
 
 ## Write path — `persistence.py`
 
@@ -182,7 +184,7 @@ shape and the `PlanReport` type. `PersistenceError` is the module's error type.
    pure helpers below import without the driver installed.
 2. INSERT the run row → `run_id` (auto-increment + `created_at` are
    server-filled; `start_date` truncated to its DATE column):
-   `INSERT INTO knitruns (start_date, total_score, n_unmet, label) VALUES (…)`,
+   `INSERT INTO runs (start_date, total_score, n_unmet, label) VALUES (…)`,
    then `run_id = cursor.lastrowid`.
 3. For each `spec` in `manifest.TABLES` (already FK-topological), bulk-insert its
    run-tagged rows (see helpers) via chunked `executemany`.
@@ -250,7 +252,7 @@ cannot modify the data.
 
 ### Home — select a run
 
-Queries `knitruns` (most recent first): `run_id`, `created_at`, `start_date`,
+Queries `runs` (most recent first): `run_id`, `created_at`, `start_date`,
 `total_score`, `n_unmet`, `label`. You pick one to investigate. (Annotating
 `label`/`notes` or deleting a run are writes — out of scope for the read-only
 reader role; if wanted later, they'd need a writer connection, kept off by
@@ -270,14 +272,14 @@ Carries over the proven "raw view" concepts, SQL-backed and run-scoped:
 - **Foreign-key / PK navigation** — clicking a FK cell opens the referenced
   table with an added filter (`WHERE run_id = :rid AND ref_col = :val`) — then
   paged like any grid. PK cells offer the same "show only this row" filter.
-  Links come from the manifest's FK graph (incl. `knitprod.knit_id →
-  knitschedcost.activity_id`).
+  Links come from the manifest's FK graph (incl. `production.knit_id →
+  sched_cost_detail.activity_id`).
 - **Per-column filters** — pushed to SQL `WHERE`: **value select** (`IN`),
   **>/</range** on numeric & datetime columns, **starts-with/contains** (`LIKE`)
   on text columns; column types come from the manifest. Filters AND together and
   with the FK/PK filter; re-querying resets to page 1.
-- **Committed-only** — a toggle, realized as a query (join `knitschedcost` /
-  `knitprod` to `knititerlog` on `(run_id, move_id)` where `roll = 'committed'`)
+- **Committed-only** — a toggle, realized as a query (join `sched_cost_detail` /
+  `production` to `iteration_log` on `(run_id, move_id)` where `roll = 'committed'`)
   — **not** a stored table.
 - **Schema view** — the FK graph from the manifest, documenting the tables and
   links (like the old Home schema cards).
@@ -300,8 +302,8 @@ holds only data.
    view.
 4. **Per-column filters + committed-only** — the SQL-backed filters and toggle.
 
-(The DDL is reconciled to the `DebugLog`: `knititerlog.role` and
-`knitunmet.unmet_lbs` are both present, so the manifest column mapping is pure
+(The DDL is reconciled to the `DebugLog`: `iteration_log.role` and
+`unmet_demand.unmet_lbs` are both present, so the manifest column mapping is pure
 identity — only table names differ.)
 
 ## Open items
