@@ -29,9 +29,8 @@ from swmtplanner.debuglog import DebugLog
 from .costing import (
     Costing, load_weights, weights_from_dict,
 )
-from .dashboard import (
-    DatabaseConfigError, PersistenceError, persist_run, resolve_conn_config,
-)
+from swmtplanner.dashboard import DatabaseConfigError, resolve_conn_config
+from .sqldump import PersistenceError, persist_run
 from .loop import plan
 from .report import write_plan_report_xlsx
 from .state import State
@@ -343,7 +342,7 @@ def _persist_debuglog(
         )
         return None
     try:
-        conn = resolve_conn_config(db_block, 'writer')
+        conn = resolve_conn_config(db_block)
         run_id = persist_run(
             debuglog, conn,
             start_date=start_date.date(),

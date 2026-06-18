@@ -757,33 +757,35 @@ folder and move together as a unit.
 
 #### The `database` block (optional)
 
-Connection settings for the MySQL store the verbose `DebugLog` is persisted to
-(and that the `knit-debug` investigation app reads from). **Only consulted when
-`--verbose` is set**; a non-verbose run ignores it, and it may be omitted
-entirely. Shared connection fields plus a `writer` and a `reader` credential
-sub-block — two MySQL roles so the dashboard is read-only at the grant level
-(writer: `SELECT,INSERT,UPDATE`; reader: `SELECT`). The planner persists as the
-**writer**; the app reads as the **reader**.
+Connection settings for the MySQL store the verbose `DebugLog` is persisted to.
+**Only consulted when `--verbose` is set**; a non-verbose run ignores it, and it
+may be omitted entirely. The planner connects as the **writer** user
+(`SELECT,INSERT,UPDATE`), so the block names a single connection directly —
+`host` / `port` / `name` / `user` / `password`:
 
 ```
 "database": {
     "host": "127.0.0.1",
     "port": 3306,
-    "name": "swmtplanner",
-    "writer": { "user": "swmt_writer", "password": null },   # null → SWMT_DB_WRITER_PASSWORD
-    "reader": { "user": "swmt_reader", "password": null }     # null → SWMT_DB_READER_PASSWORD
+    "name": "swmtinfinite",
+    "user": "swmt_writer",
+    "password": null            # null → SWMT_DB_PASSWORD
 }
 ```
 
-Any field may be left out of the file and supplied by environment variable
-(`SWMT_DB_HOST` / `SWMT_DB_PORT` / `SWMT_DB_NAME`; `SWMT_DB_WRITER_USER` /
-`SWMT_DB_WRITER_PASSWORD`; `SWMT_DB_READER_USER` / `SWMT_DB_READER_PASSWORD`),
-with the environment winning — so a committed config can hold non-secret
-defaults and leave passwords to the environment. Unlike the six input keys, the
-`database` block is **always inline** (not a path-string) and has no CLI
-override flag; it lives in the main config file (shared with the app). The full
-schema and persistence/investigation design are in
-`planners/infinite/dashboard/DESIGN.md`.
+The read-only investigation app is a separate concern with its own
+**reader**-user connection from `SWMT_DASHBOARD_CONFIG` (see
+`swmtplanner/dashboard/DESIGN.md`); read-only is enforced at the MySQL grant
+level on that user. Any field may be left out of the file and supplied by
+environment variable (`SWMT_DB_HOST` / `SWMT_DB_PORT` / `SWMT_DB_NAME` /
+`SWMT_DB_USER` / `SWMT_DB_PASSWORD`), with the environment winning — so a
+committed config can hold non-secret defaults and leave the password to the
+environment. (The read-only app uses a separate `SWMT_DASHBOARD_*` namespace, so
+the writer's `SWMT_DB_*` variables never bleed into it.) The block is normally
+**inline** in the main config file, but `--db-conn` can override it (path or
+inline JSON) for a one-off run. The debug schema and write path are in
+**Debug-log persistence to MySQL** below; the read-only viewer is
+`swmtplanner/dashboard/DESIGN.md`.
 
 ### CLI option overrides
 
@@ -803,7 +805,7 @@ the config alone suffices for a full run.
 | `--db-conn`    | `-b`  | override the `database` block — path to a JSON file, *or* an inline JSON string |
 | `--label`      | `-l`  | this run's `label` (required with `--verbose`; ignored otherwise) |
 | `--output-dir` | `-o`  | output directory (defaults to cwd)                          |
-| `--verbose`    | `-v`  | flag; persist the run's `DebugLog` to MySQL (see below + `dashboard/DESIGN.md`) |
+| `--verbose`    | `-v`  | flag; persist the run's `DebugLog` to MySQL (see **Debug-log persistence to MySQL** below) |
 
 **Verbose mode requires a label and notes.** A `--verbose` run is persisted as
 a labelled, annotated run, so before any work begins the CLI fails fast if
@@ -933,8 +935,9 @@ path.
 
 When `--verbose` is on and a `database` block is configured, the populated log
 is persisted to a local **MySQL** store (run-tagged by an auto-incremented
-`run_id`) and investigated through a **PyQt6** desktop app — both owned by
-`planners/infinite/dashboard/` (see its DESIGN.md), not the planner core.
+`run_id`); see **Debug-log persistence to MySQL** below. It is then investigated
+through the generic **PyQt6** debug dashboard (`swmtplanner/dashboard/`, a
+viewer the planner hands its manifest to — not the planner core).
 
 ### Why a config file (with overrides)
 
@@ -955,6 +958,136 @@ The config-plus-overrides shape supports two normal workflows:
 It's also intentional groundwork for a future user-friendlier shell
 (dashboard for editing weights and triggering runs) — the JSON-only
 inputs make that wrapper straightforward to build.
+
+## Debug-log persistence to MySQL
+
+When `--verbose` is set and a `database` block is configured, the populated
+`DebugLog` is persisted to a **local MySQL** store as one row-set per run, tagged
+by an auto-incremented `run_id`. The database is **dedicated to this planner**
+(`swmtinfinite`; the test copy is `swmtinftest`), so the MySQL base tables share
+their names with the `DebugLog` tables — no translation. This is the
+**planner-owned** half (the planner owns its schema and the writer); the
+read-only investigation app is the generic `swmtplanner/dashboard/` viewer, which
+this planner hands its manifest to.
+
+### The manifest (this planner's concrete schema)
+
+The dashboard's manifest **dataclasses** (`TableSpec` / `Column` / `ForeignKey`)
+are generic and defined in `swmtplanner/dashboard/manifest.py`. This planner
+builds the **concrete instance** — the single source of truth for its table set,
+column types, primary keys, the FK graph, and the FK-topological insert order —
+in its own `manifest` (under `planners/infinite/`). Both the writer (to lay out
+INSERTs in order) and the dashboard app (handed this manifest, to drive FK
+navigation / typing / the table list) use it. It is **not** derived from
+`DebugLog.schema` — it adds column *types*, the FK-topological order, and one FK
+link `DebugLog.schema` doesn't carry (see below).
+
+### Tables
+
+The eight `DebugLog` tables persist under their own names — `iteration_log`,
+`cost_summary`, `inv_cost_detail`, `sched_cost_detail`, `priority_detail`,
+`production`, `demand`, `unmet_demand` — plus the **`runs`** registry (run
+metadata; owns the auto-incremented `run_id`; not a `DebugLog` table).
+`priority_detail` and `unmet_demand` are key-less (their `order_by` is
+`move_id, item, week_idx` and `item, week_idx` respectively). Columns are
+name-for-name identical to the `DebugLog`'s.
+
+The DB also defines two **views** — **`committed_sched`** and
+**`committed_prod`** — the committed-move slices of `sched_cost_detail` /
+`production`. They are **read-only** (the writer never touches them); the
+dashboard's planner-specific "committed-only" view reads them. Out of scope for
+the writer + the manifest's writable table set.
+
+### FK graph (from the DDL)
+
+```
+demand.run_id                       → runs.run_id
+iteration_log (run_id, order_id)    → demand (run_id, order_id)       # order_id may be NULL
+cost_summary (run_id, move_id)      → iteration_log (run_id, move_id)
+inv_cost_detail (run_id, move_id)   → iteration_log (run_id, move_id)
+inv_cost_detail (run_id, summary_id)→ cost_summary (run_id, summary_id)
+sched_cost_detail (run_id, move_id) → iteration_log (run_id, move_id)
+priority_detail (run_id, move_id)   → iteration_log (run_id, move_id)
+production (run_id, move_id)         → iteration_log (run_id, move_id)
+production (run_id, knit_id)         → sched_cost_detail (run_id, activity_id)   # NEW link: a knit IS a scheduled activity
+unmet_demand.run_id                 → runs.run_id
+```
+
+The `production.knit_id → sched_cost_detail.activity_id` link is **not** in
+`DebugLog.schema` (there `knit_id` is just `production`'s PK). The manifest adds
+it, so the app can jump from a produced knit to its scheduled activity, and the
+writer knows `production` must follow `sched_cost_detail`.
+
+### Insert order (FK-topological)
+
+Parents before children, so the real FK constraints hold:
+
+```
+runs → demand → iteration_log → cost_summary → inv_cost_detail
+     → sched_cost_detail → production ; priority_detail , unmet_demand (after parents)
+```
+
+`demand` is built **last** in the `DebugLog` but must be inserted **before**
+`iteration_log` (its `order_id` FK target). So the writer drives insertion from
+the manifest's topological order, **not** `DebugLog.tables` declaration order.
+Assumption the DDL bakes in: every non-NULL `iteration_log.order_id` appears in
+`demand` (it does — `demand` has every regular + safety order; run-up jobs carry
+`order_id = NULL`, allowed by the FK).
+
+### The MySQL schema (provided, user-owned)
+
+The tool **only INSERTs** — never `CREATE`/`ALTER`. The schema below is the DDL
+already run (db `swmtinfinite`); the manifest mirrors it exactly. The writer
+fails fast with a clear message if a table/column is missing.
+
+- `runs` — `run_id BIGINT AUTO_INCREMENT PK`, `created_at DATETIME(6)
+  DEFAULT CURRENT_TIMESTAMP(6)`, `start_date DATE`, `total_score DOUBLE`,
+  `n_unmet INT`, `label VARCHAR(255)`, `notes TEXT`.
+- Keyed detail tables carry `PRIMARY KEY (run_id, <pk>)`: `demand(order_id)`,
+  `iteration_log(move_id)`, `cost_summary(summary_id)`, `inv_cost_detail(icost_id)`,
+  `sched_cost_detail(activity_id)`, `production(knit_id)`.
+- Key-less tables (`priority_detail`, `unmet_demand`) have only the `run_id` FK (no PK
+  in the DDL — fine for INSERT-only).
+- Reserved words backticked in the DDL: `iteration_log.rank`,
+  `sched_cost_detail.desc`, `sched_cost_detail.start`/`end`, `production.start`/`end`,
+  `inv_cost_detail.value`. The writer backticks **all** column names regardless.
+
+### Write path — `persistence.py`
+
+A single module (under `planners/infinite/`) that persists a populated
+`DebugLog` to MySQL using `DebugLog`'s read API + the manifest. It reuses nothing
+beyond the manifest and issues no `CREATE`/`ALTER`.
+
+```
+persist_run(
+    debuglog, conn,                       # ConnConfig for the WRITER role
+    *, start_date, total_score, n_unmet, label=None, notes=None,
+) -> int                                  # the new run_id
+```
+
+`run.py` resolves the writer `ConnConfig` (from the `database` block's `writer`
+sub-block; `ConnConfig`/`DatabaseConfigError`/the resolver are the generic ones
+in `swmtplanner/dashboard/config.py`) and pulls the run-metadata scalars off the
+`PlanReport`, so `persistence.py` stays decoupled from both the config-block
+shape and the `PlanReport` type. `PersistenceError` is the module's error type.
+
+**Algorithm**: connect as the writer (`autocommit=False`; `import pymysql` is
+lazy so the pure helpers import without the driver) → INSERT the `runs` row →
+`run_id = cursor.lastrowid` → for each `spec` in the manifest's FK-topological
+order, bulk-`executemany` its run-tagged rows in chunks (e.g. 5 000) → `commit`.
+On any exception: `rollback` and raise `PersistenceError` naming the table;
+`close` in a `finally`. A failed run leaves nothing behind.
+
+**Pure helpers (no DB — the unit-test surface):** `to_sql(value)` (missing →
+`NULL`; `pandas.Timestamp` → `datetime`; numpy scalar → native; else passthrough),
+`insert_sql(spec)` (the `INSERT INTO … VALUES (%s, …)` string, all identifiers
+backticked), and `project_rows(debuglog, spec, run_id)` (yield `(run_id, *cells)`
+per row, exposing a keyed table's PK as a column via `reset_index()` only when
+`index.name` is set; empty tables yield nothing).
+
+**`run.py` wiring**: the `--verbose` block resolves the writer `ConnConfig` from
+`cfg['database']` (skip when absent), collects the required `--label` and (vi-
+captured) notes, calls `persist_run(...)`, and echoes the new `run_id`.
 
 ## Phases
 
@@ -1061,13 +1194,14 @@ stays decoupled from the planner's headline output.
   unchanged and nothing is logged.
 - The CLI's `--verbose` / `-v` flag builds the `DebugLog` and passes
   it to `plan(..., debuglog=...)`. Persisting the populated log to a
-  local MySQL store and investigating it through a PyQt6 app are the
-  final pieces, owned by `planners/infinite/dashboard/`.
+  local MySQL store is the planner-owned write path (**Debug-log
+  persistence to MySQL** below); investigating it through a PyQt6 app is
+  the generic, planner-agnostic dashboard (`swmtplanner/dashboard/`).
 
-The full table schema, keys/links, and population flow live in
-`swmtplanner/debuglog/DESIGN.md`; the persistence + investigation design
-lives in `planners/infinite/dashboard/DESIGN.md`. Delivers an audit trail
-that turns
+The full `DebugLog` table schema, keys/links, and population flow live in
+`swmtplanner/debuglog/DESIGN.md`; the MySQL schema + write path are in
+**Debug-log persistence to MySQL** below; the read-only viewer is
+`swmtplanner/dashboard/DESIGN.md`. Delivers an audit trail that turns
 "the greedy committed X" into "the greedy committed X because its
 lateness was Y vs the next candidate's Z, and its priority rank was
 W" — for diagnosis and weight tuning, not an operator-facing

@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pandas[excel]>=2.3.2",
     "typer>=0.17.3",
-    "pymysql>=1.2.0"
+    "pymysql>=1.2.0",
 ]
 authors = [
     {name = "Lam An Wyner", email = "lwyner@shawmutcorporation.com"},
@@ -22,8 +22,12 @@ keywords = ["shawmut", "support", "supply chain"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3"
+    "Programming Language :: Python :: 3",
 ]
 
 [project.scripts]
 plan = "swmtplanner.planners.cli:app"
+
+[tool]
+[tool.pyside6-project]
+files = []
