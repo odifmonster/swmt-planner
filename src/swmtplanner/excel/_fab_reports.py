@@ -449,7 +449,7 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
 
     first = lambda srs: list(srs)[0]
     mo_df = mo_df[mo_df['Customer'].str.match('0171910.*') & (mo_df['Quality'] == 'A')
-                  & ((mo_df['Grade'] != 'REJ') | pd.isna(mo_df['Grade']))]
+                  & ((mo_df['Grade'] != 'REJ') | (mo_df['Grade'] != 'LOC') | pd.isna(mo_df['Grade']))]
     mo_grp_df = mo_df.groupby(['Lot', 'Nominal\nWidth']).agg(
         Warehouse=pd.NamedAgg('Warehouse', first),
         Item=pd.NamedAgg('Item', first),

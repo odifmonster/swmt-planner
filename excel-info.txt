@@ -12,8 +12,8 @@ FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
 ONE_DRIVE = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply"
 ONE_DRIVE_ORDERS = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply/PA Weekly Order Planning"
-WORKBOOK = "PA plant orders against Lam demand 20260601 lam plant date.xlsx"
-OUTPUT = "output_20260601.xlsx"
+WORKBOOK = "PA plant orders against Lam demand 20260615 lam plant date.xlsx"
+OUTPUT = "output_20260615.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
