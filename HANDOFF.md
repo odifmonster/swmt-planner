@@ -35,11 +35,12 @@ pandas/numpy + pymysql; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **408 tests, all passing** (`python -m unittest discover -s
-> tests -p '*_tests.py'`; the 6 MySQL-gated dashboard tests run against a local
-> `swmtinftest`, else skip). The planner prints `Total moves committed: N` (and
-> per-table `Dumping …` lines during a verbose persist) to stdout — intentional
-> source-side prints, harmless to the suite.
+> **Suite state:** **456 tests, all passing** (`python -m unittest discover -s
+> tests -p '*_tests.py'`; the MySQL-gated dashboard tests — persistence end-to-end
+> plus the whole `sqlload` read layer — run against a local `swmtinftest`, else
+> skip). The planner prints `Total moves committed: N` (and per-table `Dumping …`
+> lines during a verbose persist) to stdout — intentional source-side prints,
+> harmless to the suite.
 
 ## Preferred workflow
 
@@ -123,20 +124,43 @@ resolution, persistence pure helpers, and MySQL-gated end-to-end incl. the
 `run.py` wiring) and `tests/run_tests.py` (the CLI helpers). Design:
 `planners/infinite/dashboard/DESIGN.md`.
 
-### Read side — ⏸ not yet built
+### Read side — data layer ✅ done; GUI ⏸ next
 
-- **`sqlload/`** — the read/pagination data layer (separate from the GUI).
-  The user has specific ideas for how loading should work; **design pending**.
-- **`knit-debug` PyQt6 app** (`dashboard/app/`) — Home selects a run from
-  `runs`; then run-scoped, uniformly **paged** grids (LIMIT/OFFSET + COUNT —
-  FK/PK lookups paged too), FK navigation from the manifest's graph, per-column
-  SQL `WHERE` filters, and a committed-only toggle (via the DB views). The app
-  ships the manifest statically and connects as the reader.
+- **`sqlload/`** — the read/pagination **data layer** (separate from the GUI) is
+  **built and tested**. Pieces:
+  - **`helpers.py`** — `Filter` (kinds `selection`/`exclusion`/`range`/`pattern`)
+    and `FKLookup` dataclasses, each compiling a column's constraint to a SQL
+    **format string** via `to_sql_str()` (lazy validation → `FilterError`).
+  - **`query.py`** — `Query.build(cursor, run_id, table, **constraints)` runs the
+    count + per-column distinct queries and assembles one bounded SELECT (table-
+    qualified cols, run-scoped, `ORDER BY` the spec's `order_columns`, `{limit}`/
+    `{offset}` placeholders). Exposes `nrows`, `unique(col)` (→ `None` past
+    `CHUNK_SIZE` distinct), and `next_chunk`/`prev_chunk` windowing that holds a
+    full chunk but advances by half-chunks (`row_offset` for absolute position).
+  - **`table.py`** — `Table` (built from a `TableSpec` + reader cursor + run_id)
+    owns the `Query` and serves `next_page`/`prev_page`/`reload_page` of `Row`s;
+    `apply_filter_to` / `remove_filter` / `apply_fk_lookup` rebuild the query
+    (resetting to page 1 + clearing selection); `selected_keys` driven by
+    `Row.select`/`deselect`. Page size is the class-level `page_size` (set via
+    `set_page_size`, must fit a half-chunk). `manifest.TableSpec` gained an
+    `order_by` (key-less paging order) + `order_columns` accessor.
+  - Coverage: `DASHBOARD_TEST_SPEC.md` §§6–9; tests in `tests/dashboard_tests.py`
+    (`Filter`/`FKLookup` pure; `Query`/`Table`/`Row` MySQL-gated).
+- **`knit-debug` PyQt6 app** (`dashboard/app/`) — **not yet built.** Home selects
+  a run from `runs`; then run-scoped, uniformly **paged** grids over `Table`/
+  `Row`, FK navigation from the manifest's graph (`apply_fk_lookup`), per-column
+  SQL `WHERE` filters (`apply_filter_to`), and a committed-only toggle (via the
+  DB views). The app ships the manifest statically and connects as the reader.
 
 ## Next concrete action
 
-1. (Optional) **commit** the schedule-layer work's successors and the whole
-   debug-log/dashboard arc above — it's all uncommitted.
-2. **Design `sqlload`** (read/pagination layer) — the user drives this.
-3. Then build `sqlload` + the `knit-debug` PyQt6 app per the phases in
-   `planners/infinite/dashboard/DESIGN.md`, DESIGN-first.
+1. (Optional) **commit** the debug-log/dashboard arc above — much of it is
+   uncommitted (the `sqlload` read layer + its tests, the manifest `order_by`).
+2. **Build the raw dashboard GUI — the `knit-debug` PyQt6 app** (`dashboard/app/`)
+   on top of the finished `sqlload` layer, DESIGN-first per
+   `planners/infinite/dashboard/DESIGN.md` (Read path — the PyQt6 app) and its
+   phasing: app shell + Home (run selection, reader connection, `knit-debug`
+   entry point) → raw paged grids backed by `Table`/`Row` + FK/PK drill →
+   per-column filters + committed-only toggle. Add `PyQt6` (consider an optional
+   extra so headless installs skip it); the GUI is verified by running the app,
+   not unit tests.

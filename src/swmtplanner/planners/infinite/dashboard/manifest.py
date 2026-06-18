@@ -48,15 +48,24 @@ class TableSpec:
     """One MySQL table. `name` is the table — identical in the `DebugLog` (the
     row source, for the 8 detail tables) and the database. `columns` are the
     non-`run_id` columns in DB order; `pk` is the table's own primary-key
-    column(s) after the implicit leading `run_id` (empty for a key-less table)."""
+    column(s) after the implicit leading `run_id` (empty for a key-less table).
+    `order_by` gives a stable paging order for a key-less table (a keyed table
+    paginates by its `pk`); it should be set iff `pk` is empty."""
     name: str
     columns: tuple[Column, ...]
     pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...] = field(default_factory=tuple)
+    order_by: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def column_names(self) -> tuple[str, ...]:
         return tuple(c.name for c in self.columns)
+
+    @property
+    def order_columns(self) -> tuple[str, ...]:
+        """Columns to `ORDER BY` for stable LIMIT/OFFSET paging: the `pk` for a
+        keyed table, else the explicit `order_by`."""
+        return self.pk if self.pk else self.order_by
 
 
 # The implicit run-tag column carried by every table, and the run registry that
@@ -189,6 +198,7 @@ TABLES: tuple[TableSpec, ...] = (
         ),
         pk=(),                                                # key-less
         fks=(ForeignKey('move_id', 'iteration_log', 'move_id'),),
+        order_by=('move_id', 'item', 'week_idx'),
     ),
     TableSpec(
         'unmet_demand',
@@ -198,6 +208,7 @@ TABLES: tuple[TableSpec, ...] = (
             Column('unmet_lbs', 'float'),
         ),
         pk=(),                                                # key-less
+        order_by=('item', 'week_idx'),
     ),
 )
 
