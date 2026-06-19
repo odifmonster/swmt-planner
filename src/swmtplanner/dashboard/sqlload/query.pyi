@@ -11,7 +11,7 @@ CHUNK_SIZE: int
 class Query:
     def __init__(
         self, cursor: Any, sql: str, nrows: int,
-        uniques: dict[str, set | None],
+        distinct_queries: dict[str, tuple[str, str]],
     ) -> None: ...
     @classmethod
     def build(

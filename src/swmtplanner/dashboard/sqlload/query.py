@@ -34,17 +34,22 @@ class Query:
 
     Constructed by `Query.build` with: the reader `cursor`; the full SQL string
     (`{limit}`/`{offset}` placeholders, everything else resolved); the total
-    `nrows`; and `uniques`, a map of column name -> its set of distinct values,
-    or `None` when that count exceeds `CHUNK_SIZE`."""
+    `nrows`; and `distinct_queries`, a map of column name -> its
+    `(count-distinct SQL, distinct-values SQL)` pair, run **lazily** by
+    `unique`."""
 
     def __init__(
         self, cursor: Any, sql: str, nrows: int,
-        uniques: dict[str, set | None],
+        distinct_queries: dict[str, tuple[str, str]],
     ) -> None:
         self._cursor = cursor
         self._sql = sql
         self._nrows = nrows
-        self._uniques = uniques
+        # column -> (count-distinct SQL, distinct-values SQL): run on demand.
+        self._distinct_q = distinct_queries
+        # column -> resolved distinct set (or None if over CHUNK_SIZE): cached
+        # after the first `unique` call.
+        self._uniques: dict[str, set | None] = {}
         # Furthest half-chunk step whose window still reaches the last row: the
         # smallest s with s*_HALF + CHUNK_SIZE >= nrows. 0 when everything fits.
         deficit = nrows - CHUNK_SIZE
@@ -60,10 +65,10 @@ class Query:
     ) -> 'Query':
         """Build a `Query` for the table described by `spec`, scoped to `run_id`
         and constrained by the per-column `constraints` — each a `Filter` (a
-        `WHERE` term) or an `FKLookup` (an `INNER JOIN`). Runs the total-count
-        query and then, per displayed column, a distinct-count query followed
-        (only when that count is within `CHUNK_SIZE`) by a distinct-values query;
-        columns above the cutoff store `None`. Returns the windowing `Query`.
+        `WHERE` term) or an `FKLookup` (an `INNER JOIN`). Runs **only** the
+        total-count query; the per-column distinct queries are *prepared as SQL
+        strings* and run lazily by `unique` (so opening a table is cheap).
+        Returns the windowing `Query`.
 
         The `spec` is supplied by the caller (which holds the planner's manifest),
         so this stays schema-agnostic. Columns are table-qualified (an
@@ -99,15 +104,15 @@ class Query:
         cursor.execute('SELECT COUNT(*) ' + from_where)
         nrows = cursor.fetchone()[0]
 
-        uniques: dict[str, set | None] = {}
+        # Prepare (don't run) the per-column distinct queries; `unique` runs them
+        # on demand and caches the result.
+        distinct_q: dict[str, tuple[str, str]] = {}
         for col in display_cols:
             qcol = f'`{table}`.`{col}`'
-            cursor.execute(f'SELECT COUNT(DISTINCT {qcol}) ' + from_where)
-            if cursor.fetchone()[0] > CHUNK_SIZE:
-                uniques[col] = None
-            else:
-                cursor.execute(f'SELECT DISTINCT {qcol} ' + from_where)
-                uniques[col] = {row[0] for row in cursor.fetchall()}
+            distinct_q[col] = (
+                f'SELECT COUNT(DISTINCT {qcol}) ' + from_where,
+                f'SELECT DISTINCT {qcol} ' + from_where,
+            )
 
         order_cols = spec.order_columns
         if not order_cols:
@@ -120,7 +125,7 @@ class Query:
             f'SELECT {cols_sql} ' + from_where +
             f' ORDER BY {order_sql} LIMIT {{limit}} OFFSET {{offset}}'
         )
-        return cls(cursor, sql, nrows, uniques)
+        return cls(cursor, sql, nrows, distinct_q)
 
     @property
     def nrows(self) -> int:
@@ -147,7 +152,18 @@ class Query:
 
     def unique(self, colname: str) -> list | None:
         """The distinct values in `colname` as a list, or `None` if that count
-        exceeds `CHUNK_SIZE` (too many to enumerate up front)."""
+        exceeds `CHUNK_SIZE`. Computed **lazily** on the first call (a
+        count-distinct query, then a distinct-values query only when within the
+        cutoff) and cached thereafter — so building a `Query` runs no per-column
+        queries. Raises `KeyError` for a non-column."""
+        if colname not in self._uniques:
+            count_sql, values_sql = self._distinct_q[colname]
+            self._cursor.execute(count_sql)
+            if self._cursor.fetchone()[0] > CHUNK_SIZE:
+                self._uniques[colname] = None
+            else:
+                self._cursor.execute(values_sql)
+                self._uniques[colname] = {r[0] for r in self._cursor.fetchall()}
         vals = self._uniques[colname]
         return None if vals is None else list(vals)
 

@@ -104,6 +104,21 @@ class ManifestStructureTests(unittest.TestCase):
         self.assertEqual(spec_for_name('demand').name, 'demand')
         self.assertEqual(spec_for_name('production').pk, ('knit_id',))
         self.assertEqual(spec_for_name('runs'), manifest.RUNS)
+        with self.assertRaises(KeyError):
+            spec_for_name('nope')
+
+    def test_committed_views_registered_but_not_writable(self):
+        self.assertEqual(
+            {v.name for v in manifest.VIEWS},
+            {'committed_sched', 'committed_prod'},
+        )
+        writable = {t.name for t in manifest.ALL_TABLES}
+        for v in manifest.VIEWS:
+            with self.subTest(view=v.name):
+                self.assertIs(spec_for_name(v.name), v)   # resolvable
+                self.assertNotIn(v.name, writable)        # writer never touches it
+                self.assertEqual(v.pk, ())                # key-less
+                self.assertTrue(v.order_by)               # stable paging order
 
 
 # ===================================================================

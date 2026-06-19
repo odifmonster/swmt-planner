@@ -186,16 +186,16 @@ a new `Query`).
   The trailing `LIMIT`/`OFFSET` are filled per chunk via
   `query_str.format(limit=…, offset=…)`.
 
-  At build time, `Query.build` uses the cursor to: (1) execute a query for the
-  **total row count**; then (2) for each column, first query its **count of
-  distinct values**, and — only when that count does **not** exceed `CHUNK_SIZE`
-  — execute a second query to grab the actual **set of distinct values**. For
-  columns whose distinct-value count exceeds `CHUNK_SIZE`, no values query runs
-  and the column maps to `None`. These feed `nrows` and `unique(col)`.
+  At build time, `Query.build` runs **only one** query — the **total row count**
+  (`nrows`). The per-column distinct work is **not** run eagerly (it can be
+  expensive); instead `build` *prepares the SQL strings* for each column's
+  count-distinct and distinct-values queries, and `unique(col)` runs them lazily
+  on demand (see below). So opening a table is cheap.
 - **Constructor (private)** — `Query` accepts the **cursor**, the **full SQL
-  string**, the **row count**, and a **map of column name → distinct-value set
-  (or `None`** when it exceeds `CHUNK_SIZE`). It is **only ever called by
-  `Query.build`**; the class is **not** instantiated directly.
+  string**, the **row count**, and a **map of column name →
+  `(count-distinct SQL, distinct-values SQL)`** (the prepared, not-yet-run
+  queries). It is **only ever called by `Query.build`**; the class is **not**
+  instantiated directly.
 - **`nrows`** — total rows the query returns with no limit applied.
 - **`next_chunk` / `prev_chunk`** — load in and return chunks of data on demand
   as the user navigates to a page outside the currently-held chunk. The instance
@@ -208,7 +208,12 @@ a new `Query`).
   boundary, and handles the case where the display limit does not evenly divide
   `CHUNK_SIZE`.
 - **`unique(<colname>)`** — the list of unique values in that column, or `None`
-  if it exceeds the max chunk size (`CHUNK_SIZE`).
+  if it exceeds the max chunk size (`CHUNK_SIZE`). **Lazy**: on the first call it
+  runs the prepared count-distinct query and, only when within the cutoff, the
+  distinct-values query; the result (set or `None`) is **cached** so repeat
+  calls and the other columns cost nothing until asked for. This is what keeps
+  `Query.build` cheap — the per-column queries fire only when a filter UI needs
+  a column's values.
 - **`row_offset`** — exposes the current chunk's **offset, in rows** (not
   half-chunks), from the first record the unbounded query would return, so a
   `Table` can map a displayed row back to its absolute position.
@@ -279,6 +284,9 @@ ever unbounded.** Because the reader grant lacks write privileges, the app
 physically cannot modify the data. A console entry point (`knit-debug`) launches
 the app with the knitting planner's **manifest**; the entry point and the
 planner-specific views all live in the dashboard.
+
+The GUI's detailed design and its fine-grained phasing live in
+`app/DESIGN.md`; the sketch below is the target shape.
 
 ### Home — select a run
 

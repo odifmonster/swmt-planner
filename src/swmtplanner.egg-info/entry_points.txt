@@ -1,2 +1,3 @@
 [console_scripts]
+knit-debug = swmtplanner.dashboard.app.knit_debug:main
 plan = swmtplanner.planners.cli:app

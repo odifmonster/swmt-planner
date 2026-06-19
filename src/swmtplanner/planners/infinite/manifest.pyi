@@ -9,6 +9,7 @@ from swmtplanner.dashboard.manifest import (
 RUNS_TABLE: str
 RUNS: TableSpec
 TABLES: tuple[TableSpec, ...]
+VIEWS: tuple[TableSpec, ...]
 ALL_TABLES: tuple[TableSpec, ...]
 
 

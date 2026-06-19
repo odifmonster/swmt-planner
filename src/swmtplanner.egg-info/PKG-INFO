@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: swmtplanner
-Version: 1.0.4
+Version: 1.0.5
 Summary: A package containing all the necessary classes and functions to write a Shawmut planning tool
 Author-email: Lam An Wyner <lwyner@shawmutcorporation.com>
 License-Expression: MIT
@@ -12,6 +12,9 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: pandas[excel]>=2.3.2
 Requires-Dist: typer>=0.17.3
+Requires-Dist: pymysql>=1.2.0
+Provides-Extra: dashboard
+Requires-Dist: pyqt6>=6.11.0; extra == "dashboard"
 
 # Shawmut planner tool
 

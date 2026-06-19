@@ -21,7 +21,7 @@ from swmtplanner.dashboard.manifest import (
 
 __all__ = [
     'Column', 'ColumnType', 'ForeignKey', 'TableSpec', 'RUN_ID',
-    'RUNS_TABLE', 'RUNS', 'TABLES', 'ALL_TABLES', 'spec_for_name',
+    'RUNS_TABLE', 'RUNS', 'TABLES', 'VIEWS', 'ALL_TABLES', 'spec_for_name',
 ]
 
 # The run registry that owns the auto-incremented `run_id` (no `DebugLog`
@@ -167,13 +167,49 @@ TABLES: tuple[TableSpec, ...] = (
     ),
 )
 
+# The committed-move DB **views** — read-only slices the dashboard reads (the
+# writer never touches them, so they are NOT in `TABLES`/`ALL_TABLES`). Each
+# exposes a subset of its base table's columns for the rows whose move committed,
+# and carries no FK columns. Key-less; `order_by` mirrors the view's own ORDER BY
+# with the base PK appended for a stable, total paging order.
+VIEWS: tuple[TableSpec, ...] = (
+    TableSpec(
+        'committed_sched',                       # committed slice of sched_cost_detail
+        columns=(
+            Column('activity_id', 'str'),
+            Column('machine', 'str'),
+            Column('start', 'datetime'),
+            Column('end', 'datetime'),
+            Column('desc', 'str'),
+        ),
+        pk=(),
+        order_by=('machine', 'start', 'activity_id'),
+    ),
+    TableSpec(
+        'committed_prod',                        # committed slice of production
+        columns=(
+            Column('knit_id', 'str'),
+            Column('roll_id', 'str'),
+            Column('job_id', 'str'),
+            Column('item', 'str'),
+            Column('start', 'datetime'),
+            Column('end', 'datetime'),
+            Column('lbs', 'float'),
+        ),
+        pk=(),
+        order_by=('item', 'knit_id'),
+    ),
+)
+
 # Lookups. `TABLES` is already the insert order; `ALL_TABLES` prepends the run
-# registry (which the writer fills first).
+# registry (which the writer fills first). `_BY_NAME` also resolves the views, so
+# the dashboard can look them up, but they stay out of the writable table set.
 ALL_TABLES: tuple[TableSpec, ...] = (RUNS,) + TABLES
-_BY_NAME = {t.name: t for t in ALL_TABLES}
+_BY_NAME = {t.name: t for t in ALL_TABLES + VIEWS}
 
 
 def spec_for_name(name: str) -> TableSpec:
-    """The `TableSpec` for the table named `name` (any of the eight detail
-    tables or the `runs` registry). Raises `KeyError` if unknown."""
+    """The `TableSpec` for `name` — any of the eight detail tables, the `runs`
+    registry, or a committed-move view (`committed_sched` / `committed_prod`).
+    Raises `KeyError` if unknown."""
     return _BY_NAME[name]

@@ -37,8 +37,12 @@ the source of truth).
    scheduled activity), which is **not** in `DebugLog.schema`.
 3. **Run registry** — `manifest.RUNS` has `name == 'runs'`,
    `pk == ('run_id',)`; `ALL_TABLES` is `(RUNS, *TABLES)`.
-4. **Lookups** — `spec_for_name` returns the matching spec (any detail table or
-   `runs`) and raises `KeyError` on an unknown name.
+4. **Lookups** — `spec_for_name` returns the matching spec (any detail table,
+   `runs`, or a view) and raises `KeyError` on an unknown name.
+5. **Committed-move views** — `manifest.VIEWS` is exactly
+   `{committed_sched, committed_prod}`; each is **resolvable via `spec_for_name`**,
+   **absent from `ALL_TABLES`** (so the writer never touches it), and
+   **key-less with a non-empty `order_by`** (a stable paging order for a view).
 
 ## 3. Persistence pure helpers (`persistence.py`, no server)
 

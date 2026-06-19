@@ -1,0 +1,3 @@
+from typing import Any
+
+def format_cell(value: Any) -> str: ...

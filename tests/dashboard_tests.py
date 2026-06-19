@@ -378,6 +378,16 @@ class QueryMySQLTests(unittest.TestCase):
                     )}
                     self.assertEqual(set(q.unique(col)), vals)
 
+    def test_unique_is_lazy_and_cached(self):
+        cur = _CountingCursor(self.rconn.cursor())
+        q = Query.build(cur, self.run_id, spec_for_name('cost_summary'))
+        self.assertEqual(cur.executes, 1)            # build ran only COUNT(*)
+        q.unique('kind')                             # first call runs distinct queries
+        after_first = cur.executes
+        self.assertGreater(after_first, 1)
+        q.unique('kind')                             # cached -> no new queries
+        self.assertEqual(cur.executes, after_first)
+
     # ----- 7.4 next_chunk / prev_chunk -----------------------------------
 
     def test_chunks_match_expected(self):
@@ -515,6 +525,18 @@ class TableMySQLTests(unittest.TestCase):
         while t.displayed_range[0] < last_start:
             rows = t.next_page()
         return rows, last_start
+
+    def test_unique_delegates_to_query(self):
+        t = self._table('cost_summary')
+        with self.rconn.cursor() as cur:
+            cur.execute(
+                'SELECT DISTINCT kind FROM cost_summary WHERE run_id=%s',
+                (self.run_id,),
+            )
+            kinds = {r[0] for r in cur.fetchall()}
+        self.assertEqual(set(t.unique('kind')), kinds)
+        # summary_id has > CHUNK (50) distinct values -> None
+        self.assertIsNone(t.unique('summary_id'))
 
     # ----- 8.1 initial state ---------------------------------------------
 

@@ -105,7 +105,7 @@ from each table's contents ordered by its `order_columns` (the same `ORDER BY`
 3. **Filtered** — with a `Filter` applied, `nrows` reflects the **filtered**
    count, matching a direct `COUNT(*)` under the same predicate.
 
-### 3.3 `unique`
+### 3.3 `unique` (lazy + cached)
 
 1. **All columns** — for each displayed column whose distinct count is within
    `CHUNK_SIZE`, `unique(col)` returns exactly that column's set of distinct
@@ -113,6 +113,11 @@ from each table's contents ordered by its `order_columns` (the same `ORDER BY`
 2. **Over the cutoff → `None`** — a column with **more than `CHUNK_SIZE`**
    distinct values (e.g. the PK of a table exceeding `CHUNK_SIZE` rows) yields
    `None` rather than a set.
+3. **Lazy + cached** — `Query.build` runs **no** per-column distinct queries
+   (only the `COUNT(*)`); the first `unique(col)` runs that column's distinct
+   queries, and a repeat `unique(col)` runs none (cached). Verified with a
+   query-counting cursor: zero distinct queries after build, some after the first
+   `unique`, none added by a second call.
 
 ### 3.4 `next_chunk` / `prev_chunk` (chunk windowing)
 
@@ -192,6 +197,13 @@ its `order_columns` (matching `build`'s `ORDER BY`); a page's expected `Row`
    `next_page()` **re-aligns** to a `page_size` boundary (start moves to the last
    aligned page). The two start indices differ — the official check of the
    keep-the-offset-vs-realign distinction.
+
+### 4.7 `unique` delegation
+
+1. **Delegates to the current query** — `Table.unique(col)` returns the same as
+   the underlying `Query.unique(col)`: the distinct-value set for an in-range
+   column (matching a direct `SELECT DISTINCT`), and `None` for a column past the
+   `CHUNK_SIZE` cutoff (the GUI filter UI's source of selection/exclusion values).
 
 ## 5. Read layer (`sqlload`) — selection & filtering (MySQL-gated)
 

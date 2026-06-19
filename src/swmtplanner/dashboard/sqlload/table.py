@@ -127,6 +127,12 @@ class Table:
         """Total rows the current query matches."""
         return self._query.nrows
 
+    def unique(self, colname: str) -> list | None:
+        """The distinct values in `colname` for the current query (lazy + cached
+        by the `Query`), or `None` when there are too many (> `CHUNK_SIZE`) to
+        enumerate — for a filter UI's selection/exclusion options."""
+        return self._query.unique(colname)
+
     @property
     def selected_keys(self) -> set:
         """A copy of the selected primary-key values (mutated via

@@ -994,9 +994,19 @@ name-for-name identical to the `DebugLog`'s.
 
 The DB also defines two **views** — **`committed_sched`** and
 **`committed_prod`** — the committed-move slices of `sched_cost_detail` /
-`production`. They are **read-only** (the writer never touches them); the
-dashboard's planner-specific "committed-only" view reads them. Out of scope for
-the writer + the manifest's writable table set.
+`production` (each `INNER JOIN`ed to the committed `iteration_log` rows). They
+are **read-only** (the writer never touches them) and the dashboard reads them.
+Each exposes a **subset** of its base table's columns (dropping `move_id` and the
+cost columns), so they carry no FK columns:
+
+- `committed_sched` — `activity_id`, `machine`, `start`, `end`, `desc`
+  (view `ORDER BY machine, start`).
+- `committed_prod` — `knit_id`, `roll_id`, `job_id`, `item`, `start`, `end`,
+  `lbs` (view `ORDER BY item, knit_id`).
+
+They are registered in the manifest as a **`VIEWS`** tuple (resolvable via
+`spec_for_name`, each key-less with an `order_by`) but kept out of the writable
+`TABLES`/`ALL_TABLES`.
 
 ### FK graph (from the DDL)
 
