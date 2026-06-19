@@ -39,7 +39,7 @@ pandas/numpy + pymysql; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **459 tests, all passing** (`python -m unittest discover -s
+> **Suite state:** **462 tests, all passing** (`python -m unittest discover -s
 > tests -p '*_tests.py'`; the MySQL-gated tests — `persist_run` end-to-end plus
 > the whole `sqlload` read layer — run against a local `swmtinftest`, else skip).
 > The planner prints `Total moves committed: N` (and per-table `Dumping …` lines
@@ -149,16 +149,29 @@ layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
   - `table.py` — `Table(spec, cursor, run_id)` owns the `Query`, serves
     `next_page`/`prev_page`/`reload_page` of `Row`s; `apply_filter_to` /
     `remove_filter` / `apply_fk_lookup` rebuild (reset to page 1 + clear
-    selection); `selected_keys` via `Row.select`/`deselect`; class-level
-    `page_size` via `set_page_size` (must fit a half-chunk).
-- **`app/` — the PyQt6 GUI (not yet built).** The **generic raw view**: Home
-  selects a run from `runs`; run-scoped paged grids over `Table`/`Row`, FK/PK
-  drill (`apply_fk_lookup`), per-column `WHERE` filters (`apply_filter_to`), a
-  schema view. Plus an elaborate **planner-specific "pretty" view** for
-  non-technical users (plant manager / floor supervisors) built from custom
-  `QtWidget` subclasses and living in the dashboard (incl. the committed-only
-  toggle via the DB views). A `knit-debug` entry point launches it with the
-  knitting planner's manifest, connecting as the reader.
+    selection); `unique(col)` passthrough to the current `Query`;
+    `selected_keys` via `Row.select`/`deselect`; class-level `page_size` via
+    `set_page_size` (must fit a half-chunk).
+- **`app/` — the PyQt6 GUI (phases 1–3 done; FK/PK nav + pretty view pending).**
+  `DashboardWindow` (`window.py`) is the shell: a sidebar (**Run selection** /
+  **Raw view ▸ \<table\>** / **Pretty view**) beside a header + stacked content,
+  zero layout margins so content fills the window. Modules:
+  - `run_select.py` — `RunSelectionPage`: runs from the registry as rounded
+    `RunButton` cards (Run N + created_at + start_date + total_score); clicking
+    one sets `selected_run_id` and highlights it. Raw/Pretty show *"Please select
+    a run…"* until then.
+  - `pages.py` — `RawViewPage` (caches one grid per table for the run, with a
+    "Loading…" placeholder on first load) and the `PrettyViewPage` placeholder.
+  - `grid/` (table rendering) — `PageModel` + `PagedGrid` (paged `QTableView`,
+    `m/d/yy h:mm` datetimes, alternating rows, a `FilterHeader` per column).
+  - `filters/` — `FilterHeader` (per-column funnel/✕ button), `FilterPopup`
+    (rounded off-white card; kind selector → membership / range / pattern
+    bodies; Apply → `apply_filter_to`, ✕ → `remove_filter`).
+  - `theme.py` — the soft off-white/grey, rounded, blue-hover stylesheet;
+    `formatting.py` — shared `format_cell`; `knit_debug.py` — the `knit-debug`
+    launcher (reader connection + the knit manifest).
+  - **Pending:** FK/PK cell-click navigation + a back button (phase 4), then the
+    planner-specific **pretty view** (phase 5).
 
 ### Tests
 
@@ -166,23 +179,37 @@ layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
   structure, persistence pure helpers, `persist_run` end-to-end (MySQL-gated) +
   `run.py` wiring. Spec: `PERSISTENCE_TEST_SPEC.md`.
 - `tests/dashboard_tests.py` (generic dashboard) — config resolution + reader
-  config, `Filter`/`FKLookup` (pure), `Query`/`Table`/`Row` (MySQL-gated, using
-  the knit planner's persisted run as the fixture). Spec: `DASHBOARD_TEST_SPEC.md`.
+  config, `Filter`/`FKLookup` (pure), `Query`/`Table`/`Row` incl. `Table.unique`
+  (MySQL-gated, using the knit planner's persisted run as the fixture). Spec:
+  `DASHBOARD_TEST_SPEC.md`.
 - `tests/mysql_support.py` — shared MySQL connection scaffolding (not collected).
+- The **`app/` GUI is verified by running it** (`knit-debug`), not unit-tested —
+  per convention; the `Table`/`Query`/`Row` stack beneath it is covered.
 
 ## Next concrete action
 
-**Build the dashboard GUI — the PyQt6 `app/`** under
-`swmtplanner/dashboard/app/`, on the finished `sqlload` layer, DESIGN-first per
-`swmtplanner/dashboard/DESIGN.md` (Read path — the PyQt6 app) and its phasing:
+**GUI phase 4 — FK / PK navigation + back button**, DESIGN-first per
+`swmtplanner/dashboard/app/DESIGN.md` (phase 4 sketch). Two parts:
 
-1. **App shell + Home** — connect as the reader (`SWMT_DASHBOARD_CONFIG`), list /
-   select runs; the `knit-debug` entry point launches with the planner's manifest.
-2. **Raw paged grids** over `Table`/`Row` + FK/PK drill + schema view.
-3. **Per-column filters** wired to the grid.
-4. The planner-specific **pretty view** (custom `QtWidget` subclasses, incl. the
-   committed-only toggle).
+1. **Data-model additions to `sqlload` first** — alongside the existing
+   `FKLookup` / `Table.apply_fk_lookup`, add a **`PKLookup`** constraint and
+   **`Table.apply_pk_lookup`**:
+   - `FKLookup` (have) — *from* a referenced table's selected keys, find the rows
+     of the table that reference them (drill via the FK column, an `INNER JOIN`
+     sub-query).
+   - `PKLookup` (new) — *to* a referenced table: given FK cell value(s), show the
+     referenced row(s) by their PK (a `WHERE pk IN (…)` / equivalent). This is the
+     forward direction of a foreign-key click; `apply_pk_lookup(pkcol, values)`
+     mirrors `apply_fk_lookup`. Add it to `helpers.py` (a `to_sql_str`) +
+     `Table`, with coverage in `DASHBOARD_TEST_SPEC.md` §5 and
+     `tests/dashboard_tests.py` (pure `to_sql_str` + MySQL-gated `Table` path).
+   - (Exact semantics — incl. whether a PK cell's "show only this row" reuses a
+     selection `Filter` or `PKLookup` — to be pinned in the design first.)
+2. **Then the GUI** — clicking an FK cell drills to the referenced table via the
+   new lookup; a **navigation history** backs an in-view **back button** (extends
+   the phase-2 per-table caching into a view stack). Plus the committed-only
+   toggle.
 
-Add `PyQt6` (consider an optional extra so headless installs skip it); the GUI is
-verified by running the app, not unit tests. The pretty view's layout will be
-specified in `swmtplanner/dashboard/DESIGN.md` when that phase starts.
+After that, **phase 5 — the planner-specific pretty view** (custom `QtWidget`
+subclasses; layout to be specified in the app DESIGN.md when it starts). The GUI
+is verified by running `knit-debug`, not unit tests.

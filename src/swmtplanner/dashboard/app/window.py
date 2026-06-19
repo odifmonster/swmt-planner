@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ..manifest import referencing_fks
 from .pages import PrettyViewPage, RawViewPage, message_page
 from .run_select import RunSelectionPage
 
@@ -66,7 +67,10 @@ class DashboardWindow(QWidget):
         self._header.setObjectName('headerLabel')
         self._run_page = RunSelectionPage(cursor, runs_spec)
         self._run_page.run_chosen.connect(self._on_run_chosen)
-        self._raw_page = RawViewPage(cursor)
+        self._raw_page = RawViewPage(
+            cursor, self._specs, referencing_fks(table_specs),
+        )
+        self._raw_page.current_table_changed.connect(self._header.setText)
         self._pretty_page = PrettyViewPage()
         self._placeholder = message_page(_NO_RUN)
 

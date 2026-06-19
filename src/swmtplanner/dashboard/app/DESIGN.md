@@ -361,12 +361,182 @@ Verified by running the app. The new `Table.unique` passthrough is unit-tested;
 `Filter` rule construction is already covered (`helpers`). The LIKE-escaping
 helper for pattern entries is pure and can be unit-tested.
 
+## Phase 4 — FK / PK navigation + back button
+
+**Goal:** the raw view becomes navigable along the FK graph, in both directions,
+with a back button to retrace the route. Two complementary moves:
+
+1. **Forward (FK → PK).** In a table with a foreign-key column, the FK cells are
+   rendered as **links** (highlighted, clickable). Clicking one navigates to the
+   **referenced table** and applies a **selection `Filter` with that single
+   value** on the referenced PK column.
+2. **Backward (PK → FK).** In a table with a primary key, you may **select rows**
+   (a checkbox column). With ≥1 row selected a **"Go to…"** button appears; it
+   opens a menu of the **tables that reference this PK**, and choosing one
+   navigates to that table with an **`apply_fk_lookup`** of the selected keys.
+
+A **navigation stack** records the route so a top-left **"‹ Back"** button returns
+to the previous view. No new `sqlload` query primitive is needed — forward nav is
+an ordinary selection `Filter` (`apply_filter_to`) and backward nav is the
+existing `apply_fk_lookup`; the only new *data* artifact is a pure, generic
+**reverse-FK map** derived from the manifest. (The earlier handoff floated a
+`PKLookup`; it's dropped — a PK lookup is just a selection filter on the PK.)
+
+### Data layer — the reverse-FK map (the only new non-GUI code)
+
+The forward direction reads off each spec's own `fks`. The backward direction
+needs the inverse: *given a table, which tables' FK columns point at its PK?* Add
+a generic, planner-agnostic helper to **`dashboard/manifest.py`** (it's pure and
+derived only from the handed specs):
+
+- `referencing_fks(specs)` → a `dict[str, tuple[tuple[str, str], ...]]` mapping a
+  **referenced table name** → the `(source_table, fk_column)` pairs that point at
+  it. Built by scanning every spec's `fks` and bucketing by `fk.ref_table`.
+  (Views carry no FKs, so they never appear as a source; nothing references a
+  view, so they never appear as a key.)
+
+This is pure and unit-testable — covered in `DASHBOARD_TEST_SPEC.md` (a new small
+section) and `tests/dashboard_tests.py`. The `manifest.pyi` stub gains the
+signature. No change to `helpers.py` / `query.py` / `table.py`.
+
+> **Why these reuse cleanly.** A drill's destination constraint is
+> `apply_filter_to(ref_col, 'selection', {value})` — so the destination shows the
+> drill as an ordinary active filter on its PK column, clearable with the header
+> **✕** like any other (clearing reveals the whole table *in the same frame*).
+> A "Go to" applies `apply_fk_lookup(fk_col, keys)`, which `Table` stores in the
+> same `_conds` slot — so it is likewise clearable via the FK column's ✕.
+
+### Navigation model — a view stack (replaces the Phase-2 name cache)
+
+Phase 2 cached one `PagedGrid` per **table name**; Phase 2's design noted this was
+"groundwork… which will extend the keying beyond the table name to the navigation
+context." Phase 4 makes that turn: the raw view is driven by a **stack of
+frames**, each a live `(spec, PagedGrid)` bound to its own constrained `Table`.
+The top frame is the visible one.
+
+- **Sidebar selection of a table** = a fresh **root**: it resets the stack to a
+  single, unconstrained frame for that table. (Trade-off: re-selecting a table
+  from the sidebar no longer restores filters from a previous visit — the
+  back button, not the sidebar, is now how you retrace. Recommended for
+  predictability; the alternative — sidebar selections also push onto a single
+  browser-like history — is noted under *Open decisions*.)
+- **Forward drill** (FK click) and **backward "Go to"** each **push** a new frame
+  (build `Table(dest_spec, …)`, apply the nav constraint, mark that column
+  filtered on the new grid's header, set the header label).
+- **"‹ Back"** **pops** the top frame and shows the one beneath, restoring it
+  exactly (the frame holds the live grid+table, so its page, filters, and row
+  selection are intact). Hidden/disabled when the stack has a single frame.
+- **Run change** clears the whole stack (frames are run-scoped, as the cache was).
+
+Frames are held (not rebuilt) on the stack, so a deep route stays cheap to
+retrace; only a *new* push builds a `Table`.
+
+### Mechanism 1 — FK cells as links (forward drill)
+
+**Rendering.** The grid marks the columns that are FKs (from `spec.fks`). The
+`PageModel` renders FK cells as links — **accent-blue, underlined** text
+(`ForegroundRole` + `FontRole`) — and the view shows a pointing-hand cursor over
+them. **NULL** FK cells are *not* styled or clickable (a null FK references
+nothing).
+
+**Click.** `QTableView.clicked(index)` → if the cell's column is an FK and its
+**raw** value (the `Row`'s value, not the formatted text) is non-null, the grid
+emits `fk_activated(fk_column, value)`. The navigation controller resolves the
+target from the spec's `ForeignKey` (`ref_table`, `ref_column`), builds a frame
+for `ref_table`, calls `apply_filter_to(ref_column, 'selection', {value})`, marks
+`ref_column` filtered, and pushes.
+
+### Mechanism 2 — row selection + "Go to…" (backward lookup)
+
+**Selection UI — a leading checkbox column.** A keyed table's grid gains a
+**checkbox column at view-position 0**; the data columns shift right by one.
+Checking a box calls `Row.select()` / `Row.deselect()` (the existing
+`Table.selected_keys` machinery); the checkbox state of a rendered row reads back
+from `Row.selected`, so selection **persists across paging** (plain paging doesn't
+rebuild the query) and is **cleared on any filter/lookup rebuild** (existing
+`Table` behavior). Key-less tables and the views get **no** checkbox column.
+
+> *Why a checkbox column rather than "click the PK cell to select":*
+> `production.knit_id` is **both** the PK **and** an FK, so a click on that cell
+> would be ambiguous between "select this row" and "drill to
+> `sched_cost_detail`". A separate checkbox column keeps selection and FK-drill on
+> distinct affordances. Its cost is a **view-column ↔ data-column offset of 1**
+> that the grid, the `FilterHeader` (section 0 has no filter button), and the
+> click handler must account for.
+
+**"Go to…" button + menu.** The navigation controller shows a **"Go to…"** button
+whenever the current frame's table has a non-empty `selected_keys`. Clicking it
+opens a `QMenu` built from the reverse-FK map for the current table: one entry per
+`(source_table, fk_column)` that references this PK (labelled by source table
+name; the column is appended only if a source references this table via more than
+one column — none do today, but the rule is unambiguous). Choosing an entry builds
+a frame for `source_table`, calls `apply_fk_lookup(fk_column, selected_keys)`,
+marks `fk_column` filtered, and pushes.
+
+### Chrome — where Back and "Go to…" live; header updates
+
+Both navigation controls and the frame stack live in the **`RawViewPage`**, which
+becomes the small navigation controller (it already owns the per-table stacked
+widget). Its top bar gains, left-to-right: **"‹ Back"** (far left, the requested
+top-left position; shown when depth > 1) … a stretch … **"Go to…"** (shown when
+the current frame has a selection). The per-frame paging buttons stay in each
+`PagedGrid`'s own top-right, as today.
+
+The shell's header label (owned by `DashboardWindow`) must track the current
+frame's table across drills and backs: `RawViewPage` emits
+`current_table_changed(name)` and the shell updates the header. (`window.py`'s
+`_show_raw` still sets the initial header + run before the first frame builds.)
+
+### Component changes (summary)
+
+- **`dashboard/manifest.py`** (+ `.pyi`) — add `referencing_fks(specs)`.
+- **`grid/model.py`** — optional leading checkbox column (checkable flags +
+  `CheckStateRole` get/set wired to `Row.select`/`deselect`); FK-column link
+  styling (`Foreground`/`Font` roles); a raw-value accessor for a cell; signal a
+  selection change so the page can toggle "Go to…".
+- **`grid/grid.py`** — know its FK columns and PK-ness; install the checkbox
+  column for keyed tables (offset bookkeeping in the `FilterHeader`/click paths);
+  emit `fk_activated(col, value)`; expose `set_filtered` use for nav-applied
+  constraints; surface selection-changed.
+- **`pages.py` — `RawViewPage`** becomes the nav controller: holds the frame
+  stack + reverse-FK map, the **Back**/**Go to…** chrome, builds frames
+  (`apply_filter_to` / `apply_fk_lookup`), and emits `current_table_changed`.
+- **`window.py`** — pass the reverse-FK map (or the specs to build it) to
+  `RawViewPage`; connect `current_table_changed` to the header.
+- **`filters/header.py`** — account for the checkbox column at section 0 (no
+  filter button there).
+
+### Open decisions (for review)
+
+1. **Sidebar vs. history.** Recommended: a sidebar table pick is a fresh root
+   (clears the drill stack); Back only retraces drills/"Go to"s. Alternative: a
+   single browser-style history where sidebar picks also push (Back walks across
+   sidebar visits too). The first keeps the sidebar highlight honest and the Back
+   semantics simple; I lean toward it.
+2. **Selection affordance.** Recommended: a dedicated checkbox column (resolves
+   the `knit_id` PK==FK collision cleanly). Alternative: native full-row
+   selection synced to `selected_keys` (no extra column, but collides with
+   FK-cell clicks). I lean toward the checkbox column.
+3. **Back button placement.** In the `RawViewPage` top bar (far left) vs. in the
+   shell header row. The former keeps navigation chrome encapsulated with the
+   stack it controls; "top-left of the content" reads as top-left to the user.
+
+### Out of scope for Phase 4
+
+The **committed-only toggle** (deferred — it was bundled here in an earlier
+handoff but is independent of FK nav); the pretty view (Phase 5); editing the page
+size; multi-column selection filters.
+
+### Testing
+
+Per convention the Qt layer is **run-verified** (`knit-debug`): drill an FK cell,
+check rows and use "Go to…", retrace with Back, clear a nav filter via the header
+✕. The one new pure unit is **`referencing_fks`** (manifest helper) — covered in
+`DASHBOARD_TEST_SPEC.md` + `tests/dashboard_tests.py`. `apply_filter_to` /
+`apply_fk_lookup` / `Filter` / `FKLookup` are already covered.
+
 ## Later phases (sketch — refines `../DESIGN.md`)
 
-4. **FK / PK navigation + back button** — clicking an FK cell opens the
-   referenced table via `apply_fk_lookup` (a PK cell, a one-row filter); a
-   navigation history backs an in-view **back button** (extends the Phase-2
-   per-table caching into a view stack). Plus the committed-only toggle.
 5. **The planner-specific pretty view** — the elaborate, non-technical view built
    from custom `QtWidget` subclasses; its layout will be specified here when that
    phase starts.

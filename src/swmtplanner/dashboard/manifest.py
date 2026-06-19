@@ -12,7 +12,7 @@ See `swmtplanner/dashboard/DESIGN.md`.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Iterable, Literal
 
 # Column type, for the app's per-column filter modes: int/float -> numeric
 # comparisons, datetime -> date comparisons, str -> text (LIKE).
@@ -65,3 +65,20 @@ class TableSpec:
         """Columns to `ORDER BY` for stable LIMIT/OFFSET paging: the `pk` for a
         keyed table, else the explicit `order_by`."""
         return self.pk if self.pk else self.order_by
+
+
+def referencing_fks(
+    specs: Iterable[TableSpec],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """The inverse of each spec's `fks`: map a **referenced table name** to the
+    `(source_table, fk_column)` pairs that point at it. For backward FK
+    navigation — given a table's PK, which tables' FK columns reference it.
+
+    Pure and derived only from the given specs: views carry no `fks` (so they
+    never appear as a source) and nothing references a view (so they never
+    appear as a key). A table absent from the result is referenced by nothing."""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for spec in specs:
+        for fk in spec.fks:
+            out.setdefault(fk.ref_table, []).append((spec.name, fk.column))
+    return {table: tuple(pairs) for table, pairs in out.items()}

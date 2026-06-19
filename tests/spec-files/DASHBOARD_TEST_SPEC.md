@@ -1,11 +1,12 @@
 # Specification of coverage of dashboard tests
 
 Covers the generic dashboard (`tests/dashboard_tests.py`): **connection-config
-resolution** (`config.py`, incl. the reader's `SWMT_DASHBOARD_CONFIG`) and the
+resolution** (`config.py`, incl. the reader's `SWMT_DASHBOARD_CONFIG`), the
 **`sqlload` read layer** — `Filter` / `FKLookup` (pure) and `Query` / `Table` /
-`Row` (MySQL-gated). The MySQL-gated tests use the knitting planner's persisted
-run as a fixture. The planner's manifest + write path are covered by
-`PERSISTENCE_TEST_SPEC.md`; the PyQt6 app is verified by running it.
+`Row` (MySQL-gated) — and the generic **reverse-FK map** (`manifest.py`, pure).
+The MySQL-gated tests use the knitting planner's persisted run as a fixture. The
+planner's manifest + write path are covered by `PERSISTENCE_TEST_SPEC.md`; the
+PyQt6 app is verified by running it.
 
 ## 1. Connection-config resolution (`config.py`)
 
@@ -254,3 +255,24 @@ PK `move_id`) and the raise cases a key-less one (`priority_detail`).
 5. **Clearing one constraint leaves the others** — with a `Filter` on another
    column still applied, `remove_filter` on the FK column leaves that filter in
    effect; `next_page()` returns the rows matching the remaining filter.
+
+## 6. Reverse-FK map (`manifest.py`, no server)
+
+`referencing_fks(specs)` inverts each spec's `fks` into a map from a **referenced
+table name** to the `(source_table, fk_column)` pairs that point at it — the
+backward-navigation lookup (given a PK, which tables reference it). Pure, derived
+only from the given specs.
+
+1. **Inverts a synthetic schema** — for a small hand-built spec list (incl. one
+   table that references a target via **two** columns), the result maps each
+   referenced table to exactly its `(source, fk_column)` pairs, with both pairs
+   present (order preserved) for the two-column source.
+2. **Knit manifest mappings** — over the knit planner's `TABLES + VIEWS`:
+   `demand → iteration_log.order_id`; `cost_summary → inv_cost_detail.summary_id`;
+   `sched_cost_detail → production.knit_id`; and `iteration_log` maps to **all
+   five** of its referencing `(table, move_id)` sources.
+3. **Unreferenced tables absent** — tables nothing points at (`production`,
+   `inv_cost_detail`, the key-less `priority_detail` / `unmet_demand`, and `runs`)
+   are **not** keys in the map.
+4. **Views never appear** — the committed-move views carry no `fks` (never a
+   source) and nothing references them (never a key).

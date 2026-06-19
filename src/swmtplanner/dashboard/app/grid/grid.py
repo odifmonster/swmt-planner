@@ -2,12 +2,13 @@
 
 """`PagedGrid` — the embeddable raw grid: a `QTableView` (with a `FilterHeader`)
 over the current page of a `Table`, plus top-right forward/back paging. Issues no
-SQL of its own — it drives a `Table` from `sqlload` and opens a `FilterPopup` per
-column. See `../DESIGN.md`."""
+SQL of its own — it drives a `Table` from `sqlload`, opens a `FilterPopup` per
+column, and reports FK-cell clicks / row selection for navigation. See
+`../DESIGN.md` (Phases 2–4)."""
 
 from typing import TYPE_CHECKING, Any
 
-from PyQt6.QtCore import QPoint
+from PyQt6.QtCore import QPoint, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QTableView, QToolButton, QVBoxLayout, QWidget,
 )
@@ -23,17 +24,25 @@ __all__ = ['PagedGrid', 'ROWS_PER_PAGE']
 
 # Fixed page size; the grid sizes its view to show this many rows.
 ROWS_PER_PAGE = 20
+_CHECKBOX_W = 30
 
 
 class PagedGrid(QWidget):
     """An embeddable grid over one `Table`: a column-name header row (with filter
-    glyphs), the current page of rows, and top-right back/forward buttons. Bind a
-    table with `show_table`; the buttons call `prev_page` / `next_page`."""
+    glyphs), an optional leading checkbox column (keyed tables), FK cells as
+    links, and top-right back/forward buttons. Bind a table with `show_table`.
+    Emits `fk_activated(col, value)` on an FK-cell click and `selection_changed`
+    when the checked rows change (incl. a filter rebuild clearing them)."""
+
+    fk_activated = pyqtSignal(str, object)         # (fk column, raw cell value)
+    selection_changed = pyqtSignal()
 
     def __init__(self, parent: 'QWidget | None' = None) -> None:
         super().__init__(parent)
         self._table: 'Table | None' = None
         self._cols: list = []            # display Column specs (name + type)
+        self._fk_names: set[str] = set()
+        self._cb_offset = 0              # 1 when a checkbox column is present
         self._popup: 'FilterPopup | None' = None
 
         self._back = QToolButton()
@@ -51,12 +60,14 @@ class PagedGrid(QWidget):
         top.addWidget(self._fwd)
 
         self._model = PageModel([])
+        self._model.selection_changed.connect(self.selection_changed)
         self._view = QTableView()
         self._view.setModel(self._model)
         self._header = FilterHeader(self._view)
         self._view.setHorizontalHeader(self._header)
         self._header.filter_requested.connect(self._on_filter_requested)
         self._header.filter_cleared.connect(self._on_filter_cleared)
+        self._view.clicked.connect(self._on_cell_clicked)
         self._view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._view.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._view.setAlternatingRowColors(True)
@@ -69,23 +80,60 @@ class PagedGrid(QWidget):
         layout.addWidget(self._view)
 
     def show_table(self, table: 'Table') -> None:
-        """Bind `table`, reset to page 1, and render it."""
+        """Bind `table`, reset to page 1, and render it. A keyed table gets a
+        leading checkbox column; FK columns render as links."""
         self._table = table
         table.set_page_size(ROWS_PER_PAGE)
         self._cols = [c for c in table.schema.columns if c.name != RUN_ID]
+        self._fk_names = {fk.column for fk in table.schema.fks}
+        self._cb_offset = 1 if table.schema.pk else 0
+        self._header.set_skip_leading(self._cb_offset)
         columns = [c.name for c in self._cols]
-        self._model.reset(columns, table.next_page())
+        self._model.reset(columns, table.next_page(),
+                          has_checkbox=bool(self._cb_offset),
+                          fk_cols=self._fk_names)
         # Start wide enough to show each full column name (+ filter button); the
         # header's sectionSizeFromContents reserves the button width.
         self._view.resizeColumnsToContents()
+        if self._cb_offset:
+            self._header.resizeSection(0, _CHECKBOX_W)
         self._update_buttons()
+
+    @property
+    def selected_keys(self) -> set:
+        """The selected primary keys of the bound table (empty if none/keyless)."""
+        return self._table.selected_keys if self._table is not None else set()
+
+    def mark_filtered(self, col_name: str, on: bool = True) -> None:
+        """Set/clear the filter glyph on the column named `col_name` — used by the
+        navigation controller for a nav-applied selection / FK-lookup constraint."""
+        for i, col in enumerate(self._cols):
+            if col.name == col_name:
+                self._header.set_filtered(i + self._cb_offset, on)
+                return
+
+    # ----- FK navigation -----
+
+    def _on_cell_clicked(self, index: Any) -> None:
+        if self._table is None:
+            return
+        dcol = index.column() - self._cb_offset
+        if dcol < 0 or dcol >= len(self._cols):       # checkbox / out of range
+            return
+        name = self._cols[dcol].name
+        if name not in self._fk_names:
+            return
+        value = self._model.row_at(index.row()).get(name)
+        if value is None:                              # a null FK references nothing
+            return
+        self.fk_activated.emit(name, value)
 
     # ----- filters -----
 
     def _on_filter_requested(self, col: int) -> None:
         if self._table is None:
             return
-        column = self._cols[col]
+        column = self._cols[col - self._cb_offset]
         self._popup = FilterPopup(
             column.name, column.type,
             unique_getter=lambda name=column.name: self._table.unique(name),
@@ -103,14 +151,16 @@ class PagedGrid(QWidget):
         self._model.set_rows(self._table.next_page())
         self._update_buttons()
         self._header.set_filtered(col, True)
+        self.selection_changed.emit()         # the rebuild cleared any selection
 
     def _on_filter_cleared(self, col: int) -> None:
         if self._table is None:
             return
-        self._table.remove_filter(self._cols[col].name)
+        self._table.remove_filter(self._cols[col - self._cb_offset].name)
         self._model.set_rows(self._table.next_page())
         self._update_buttons()
         self._header.set_filtered(col, False)
+        self.selection_changed.emit()
 
     # ----- paging -----
 

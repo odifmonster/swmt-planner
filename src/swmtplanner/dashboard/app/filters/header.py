@@ -32,6 +32,7 @@ class FilterHeader(QHeaderView):
     def __init__(self, parent: 'QWidget | None' = None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
         self._filtered: set[int] = set()
+        self._skip = 0
         self.setSectionsClickable(True)
 
     def set_filtered(self, col: int, on: bool) -> None:
@@ -41,14 +42,23 @@ class FilterHeader(QHeaderView):
             self._filtered.discard(col)
         self.updateSection(col)
 
+    def set_skip_leading(self, n: int) -> None:
+        """Leading sections (e.g. a checkbox column) that carry no filter button:
+        they reserve no button width and ignore button clicks."""
+        self._skip = n
+
     def sectionSizeFromContents(self, logicalIndex: int):
-        # Reserve room for the filter button so the column name still fits.
+        # Reserve room for the filter button so the column name still fits
+        # (except the skipped leading sections, which have no button).
         size = super().sectionSizeFromContents(logicalIndex)
-        size.setWidth(size.width() + self._BTN_W + 6)
+        if logicalIndex >= self._skip:
+            size.setWidth(size.width() + self._BTN_W + 6)
         return size
 
     def paintSection(self, painter, rect: QRect, logicalIndex: int) -> None:
         super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex < self._skip:
+            return
         filtered = logicalIndex in self._filtered
         side = min(self._BTN_W, rect.height() - 6)
         btn = QRect(rect.right() - self._BTN_W,
@@ -67,7 +77,7 @@ class FilterHeader(QHeaderView):
     def mousePressEvent(self, event) -> None:
         pos = event.position().toPoint()
         col = self.logicalIndexAt(pos)
-        if col >= 0:
+        if col >= self._skip:
             right = self.sectionViewportPosition(col) + self.sectionSize(col)
             if pos.x() >= right - self._BTN_W:
                 if col in self._filtered:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Iterable, Literal
 
 ColumnType = Literal['int', 'float', 'str', 'datetime']
 
@@ -31,3 +31,8 @@ class TableSpec:
     def column_names(self) -> tuple[str, ...]: ...
     @property
     def order_columns(self) -> tuple[str, ...]: ...
+
+
+def referencing_fks(
+    specs: Iterable[TableSpec],
+) -> dict[str, tuple[tuple[str, str], ...]]: ...

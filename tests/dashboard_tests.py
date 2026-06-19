@@ -22,6 +22,9 @@ from swmtplanner.planners.infinite.sqldump.persistence import persist_run
 from swmtplanner.dashboard.config import (
     ConnConfig, DatabaseConfigError, resolve_conn_config, read_reader_config,
 )
+from swmtplanner.dashboard.manifest import (
+    Column, ForeignKey, TableSpec, referencing_fks,
+)
 from swmtplanner.dashboard.sqlload.helpers import Filter, FKLookup, FilterError
 from swmtplanner.dashboard.sqlload import query as sqlquery
 from swmtplanner.dashboard.sqlload.query import Query
@@ -233,6 +236,56 @@ class FKLookupTests(unittest.TestCase):
             'AND `iteration_log`.`order_id` = `fk_order_id`.`order_id`',
         )
 
+
+# ===================================================================
+# 6. Reverse-FK map (manifest.referencing_fks, no server)
+# ===================================================================
+
+class ReferencingFKsTests(unittest.TestCase):
+
+    def test_inverts_synthetic_schema(self):
+        specs = [
+            TableSpec('a', (Column('x', 'int'),), pk=('x',)),
+            TableSpec('b', (Column('y', 'int'),), pk=('y',),
+                      fks=(ForeignKey('y', 'a', 'x'),)),
+            # 'c' references 'a' via two columns -> two pairs, order preserved.
+            TableSpec('c', (Column('p', 'int'), Column('q', 'int')), pk=('p',),
+                      fks=(ForeignKey('p', 'a', 'x'), ForeignKey('q', 'a', 'x'))),
+        ]
+        self.assertEqual(
+            referencing_fks(specs),
+            {'a': (('b', 'y'), ('c', 'p'), ('c', 'q'))},
+        )
+
+    def test_knit_manifest_mappings(self):
+        refs = referencing_fks(manifest.TABLES + manifest.VIEWS)
+        self.assertEqual(refs['demand'], (('iteration_log', 'order_id'),))
+        self.assertEqual(
+            refs['cost_summary'], (('inv_cost_detail', 'summary_id'),))
+        self.assertEqual(
+            refs['sched_cost_detail'], (('production', 'knit_id'),))
+        # iteration_log.move_id is referenced by all five detail tables.
+        self.assertEqual(
+            {src for src, col in refs['iteration_log']},
+            {'cost_summary', 'inv_cost_detail', 'sched_cost_detail',
+             'production', 'priority_detail'},
+        )
+        self.assertTrue(all(col == 'move_id'
+                            for _, col in refs['iteration_log']))
+
+    def test_unreferenced_tables_absent(self):
+        refs = referencing_fks(manifest.TABLES + manifest.VIEWS)
+        for table in ('production', 'inv_cost_detail', 'priority_detail',
+                      'unmet_demand', 'runs'):
+            self.assertNotIn(table, refs)
+
+    def test_views_never_appear(self):
+        refs = referencing_fks(manifest.TABLES + manifest.VIEWS)
+        for view in (v.name for v in manifest.VIEWS):
+            self.assertNotIn(view, refs)                 # never a referenced key
+        for pairs in refs.values():                      # never a source
+            self.assertFalse(any(src in {v.name for v in manifest.VIEWS}
+                                 for src, _ in pairs))
 
 
 # ===================================================================
