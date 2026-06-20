@@ -4,9 +4,15 @@ Covers the generic dashboard (`tests/dashboard_tests.py`): **connection-config
 resolution** (`config.py`, incl. the reader's `SWMT_DASHBOARD_CONFIG`), the
 **`sqlload` read layer** — `Filter` / `FKLookup` (pure) and `Query` / `Table` /
 `Row` (MySQL-gated) — and the generic **reverse-FK map** (`manifest.py`, pure).
-The MySQL-gated tests use the knitting planner's persisted run as a fixture. The
-planner's manifest + write path are covered by `PERSISTENCE_TEST_SPEC.md`; the
-PyQt6 app is verified by running it.
+The MySQL-gated tests persist a **synthetic, controlled `DebugLog`**
+(`_dashboard_fixture_log`) as the fixture — built directly via `add_row` rather
+than by running the planner, so the row counts the paging/chunk/boundary tests
+rely on stay stable regardless of planner tuning. It populates `demand`,
+`iteration_states`, `iteration_log` (mixed committed/rejected, each with a
+non-null `order_id`), a large `cost_summary` (200 rows, spanning several chunks),
+and a few key-less `priority_detail` rows; other tables stay empty. The planner's
+manifest + write path are covered by `PERSISTENCE_TEST_SPEC.md`; the PyQt6 app is
+verified by running it.
 
 ## 1. Connection-config resolution (`config.py`)
 
@@ -81,13 +87,12 @@ only rejected when `to_sql_str()` is first called.
 ## 3. Read layer (`sqlload`) — `Query` (MySQL-gated)
 
 Gated on the same local test MySQL as the persistence suite (skips when
-unavailable). `setUp` persists a populated run (a real `DebugLog` via
-`persist_run`) and connects a cursor scoped to that `run_id`; **`query.CHUNK_SIZE`
-(and `query._HALF`) are reduced** so the larger tables (e.g. `cost_summary`,
-`inv_cost_detail`) span several chunks, exercising chunking, the half-chunk
-window, and lazy loading without millions of rows. Expected rows are derived
-from each table's contents ordered by its `order_columns` (the same `ORDER BY`
-`build` emits).
+unavailable). `setUpClass` persists the synthetic `_dashboard_fixture_log` via
+`persist_run` and connects a cursor scoped to that `run_id`; **`query.CHUNK_SIZE`
+(and `query._HALF`) are reduced** so the large `cost_summary` (200 rows) spans
+several chunks, exercising chunking, the half-chunk window, and lazy loading
+without millions of rows. Expected rows are derived from each table's contents
+ordered by its `order_columns` (the same `ORDER BY` `build` emits).
 
 ### 3.1 `Query.build` — column validation
 
@@ -269,10 +274,13 @@ only from the given specs.
    present (order preserved) for the two-column source.
 2. **Knit manifest mappings** — over the knit planner's `TABLES + VIEWS`:
    `demand → iteration_log.order_id`; `cost_summary → inv_cost_detail.summary_id`;
-   `sched_cost_detail → production.knit_id`; and `iteration_log` maps to **all
-   five** of its referencing `(table, move_id)` sources.
+   `sched_cost_detail` is referenced by **`production.knit_id` and both committed
+   views** (`committed_sched.activity_id`, `committed_prod.knit_id`); and
+   `iteration_log` maps to **all five** of its referencing `(table, move_id)`
+   sources.
 3. **Unreferenced tables absent** — tables nothing points at (`production`,
    `inv_cost_detail`, the key-less `priority_detail` / `unmet_demand`, and `runs`)
    are **not** keys in the map.
-4. **Views never appear** — the committed-move views carry no `fks` (never a
-   source) and nothing references them (never a key).
+4. **Views are sources, not keys** — each committed-move view is a **source**
+   (its identity column is an FK back to `sched_cost_detail`), so the views appear
+   among the map's sources; nothing references a view, so none is ever a key.

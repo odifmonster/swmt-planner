@@ -41,8 +41,8 @@ class ConstructionTests(unittest.TestCase):
         )
         self.assertEqual(set(dl._tables), {'il', 'notes'})
         il = dl._tables['il']
-        # '@pk_col_name' present and None; columns in declared order.
-        self.assertIsNone(il['@pk_col_name'])
+        # '@pk_cols' present and empty; columns in declared order.
+        self.assertEqual(il['@pk_cols'], ())
         self.assertEqual(_cols(il), ['move_id', 'role', 'rank'])
         # Each column carries its given default and an unset key_type.
         self.assertEqual(il['move_id'], {'default': None, 'key_type': None})
@@ -50,7 +50,7 @@ class ConstructionTests(unittest.TestCase):
         self.assertEqual(il['rank'], {'default': None, 'key_type': None})
         self.assertEqual(dl._tables['notes']['text'],
                          {'default': None, 'key_type': None})
-        self.assertIsNone(dl._tables['notes']['@pk_col_name'])
+        self.assertEqual(dl._tables['notes']['@pk_cols'], ())
 
     def test_no_counters_and_no_row_data(self):
         dl = DebugLog(il=[('move_id', None)], notes=[('text', None)])
@@ -99,7 +99,7 @@ class SetPkInvalidInputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.dl.set_pk('cs', 'summary_id', ctr_name='k')
         # cs got no primary key from the failed call.
-        self.assertIsNone(self.dl._tables['cs']['@pk_col_name'])
+        self.assertEqual(self.dl._tables['cs']['@pk_cols'], ())
 
     def test_column_already_foreign_key(self):
         self.dl.set_pk('il', 'move_id', ctr_name='move_id')
@@ -109,14 +109,14 @@ class SetPkInvalidInputTests(unittest.TestCase):
         # Unchanged: cs.move_id is still a foreign key; cs has no pk.
         self.assertEqual(self.dl._tables['cs']['move_id']['key_type'],
                          'foreign')
-        self.assertIsNone(self.dl._tables['cs']['@pk_col_name'])
+        self.assertEqual(self.dl._tables['cs']['@pk_cols'], ())
 
     def test_second_primary_key_on_table(self):
         self.dl.set_pk('il', 'move_id', ctr_name='move_id')
         with self.assertRaises(ValueError):
             self.dl.set_pk('il', 'iteration_idx')
         # Unchanged: pk is still move_id; iteration_idx unkeyed.
-        self.assertEqual(self.dl._tables['il']['@pk_col_name'], 'move_id')
+        self.assertEqual(self.dl._tables['il']['@pk_cols'], ('move_id',))
         self.assertIsNone(self.dl._tables['il']['iteration_idx']['key_type'])
 
     def test_redeclare_with_different_counter(self):
@@ -230,7 +230,7 @@ class ValidSchemaUpdateTests(unittest.TestCase):
     def test_set_pk_with_counter(self):
         self.dl.set_pk('il', 'move_id', ctr_name='move_id')
         il = self.dl._tables['il']
-        self.assertEqual(il['@pk_col_name'], 'move_id')
+        self.assertEqual(il['@pk_cols'], ('move_id',))
         self.assertEqual(il['move_id']['key_type'], 'primary')
         self.assertEqual(il['move_id']['ctr_name'], 'move_id')
         self.assertIn('move_id', self.dl._counters.ctr_names)
@@ -238,7 +238,7 @@ class ValidSchemaUpdateTests(unittest.TestCase):
     def test_set_pk_without_counter(self):
         self.dl.set_pk('cs', 'summary_id')
         cs = self.dl._tables['cs']
-        self.assertEqual(cs['@pk_col_name'], 'summary_id')
+        self.assertEqual(cs['@pk_cols'], ('summary_id',))
         self.assertEqual(cs['summary_id']['key_type'], 'primary')
         self.assertNotIn('ctr_name', cs['summary_id'])
         self.assertEqual(self.dl._counters.ctr_names, ())
@@ -297,21 +297,22 @@ class AddRowTests(unittest.TestCase):
         self.assertEqual(self.dl.add_row('il', iteration_idx=1), 2)
         self.assertEqual(self.dl.add_row('il', iteration_idx=2), 3)
         self.assertEqual(self.dl.get_last_pk_val('il'), 3)
-        self.assertEqual(set(self.dl._data['il']['rows']), {1, 2, 3})
-        self.assertEqual(self.dl._data['il']['last_pk_val'], 3)
+        # Rows are keyed internally by the pk tuple, even for a single-col key.
+        self.assertEqual(set(self.dl._data['il']['rows']), {(1,), (2,), (3,)})
+        self.assertEqual(self.dl._data['il']['last_pk_key'], (3,))
 
     def test_row_layout_and_defaults(self):
         mid = self.dl.add_row('il', iteration_idx=5)    # role unset -> default
         data = self.dl._data['il']
         # col_map: non-pk columns in declared order, pk excluded.
         self.assertEqual(data['col_map'], {'iteration_idx': 0, 'role': 1})
-        self.assertEqual(data['rows'][mid], [5, 'rejected'])
+        self.assertEqual(data['rows'][(mid,)], [5, 'rejected'])
 
     def test_non_auto_pk_supplied(self):
         self.assertEqual(self.dl.add_row('kv', id='x', val=9), 'x')
         self.assertEqual(self.dl.add_row('kv', id='y'), 'y')   # val -> default 0
-        self.assertEqual(self.dl._data['kv']['rows']['x'], [9])
-        self.assertEqual(self.dl._data['kv']['rows']['y'], [0])
+        self.assertEqual(self.dl._data['kv']['rows'][('x',)], [9])
+        self.assertEqual(self.dl._data['kv']['rows'][('y',)], [0])
         self.assertEqual(self.dl.get_last_pk_val('kv'), 'y')
 
     def test_auto_pk_must_not_be_supplied(self):
@@ -328,7 +329,7 @@ class AddRowTests(unittest.TestCase):
         self.assertEqual(data['rows'], [{'text': 'hi'}])
         self.assertIn('columns', data)
         self.assertNotIn('col_map', data)               # no pk machinery
-        self.assertNotIn('last_pk_val', data)
+        self.assertNotIn('last_pk_key', data)
 
 
 # ===================================================================
@@ -345,23 +346,23 @@ class UpdateRowTests(unittest.TestCase):
 
     def test_patches_named_columns_only(self):
         self.dl.update_row('il', self.mid, role='committed')
-        row = self.dl._data['il']['rows'][self.mid]
+        row = self.dl._data['il']['rows'][(self.mid,)]
         # iteration_idx (col 0) untouched, role (col 1) patched.
         self.assertEqual(row, [0, 'committed'])
 
     def test_fk_not_named_keeps_value(self):
         # move_id was linked to 1 at add time; patching only cost leaves it.
         self.dl.update_row('cs', 's1', cost=9.0)
-        self.assertEqual(self.dl._data['cs']['rows']['s1'], [1, 9.0])
+        self.assertEqual(self.dl._data['cs']['rows'][('s1',)], [1, 9.0])
 
     def test_fk_passed_none_relinks(self):
         # explicit None re-links to the current counter value (now 2).
         self.dl.update_row('cs', 's1', move_id=None)
-        self.assertEqual(self.dl._data['cs']['rows']['s1'][0], 2)
+        self.assertEqual(self.dl._data['cs']['rows'][('s1',)][0], 2)
 
     def test_fk_passed_value_is_used(self):
         self.dl.update_row('cs', 's1', move_id=7)
-        self.assertEqual(self.dl._data['cs']['rows']['s1'][0], 7)
+        self.assertEqual(self.dl._data['cs']['rows'][('s1',)][0], 7)
 
     def test_no_primary_key_raises(self):
         dl = DebugLog(notes=[('text', None)])
@@ -393,7 +394,7 @@ class ForeignKeyCounterTests(unittest.TestCase):
         dl.add_row('il', iteration_idx=0)               # mints move_id 1
         self.assertEqual(dl._counters('move_id'), 1)
         dl.add_row('cs', summary_id='s1')               # fk reads current
-        self.assertEqual(dl._data['cs']['rows']['s1'][0], 1)   # linked to 1
+        self.assertEqual(dl._data['cs']['rows'][('s1',)][0], 1)   # linked to 1
         self.assertEqual(dl._counters('move_id'), 1)    # NOT advanced
         # The counter only advances on the next il add_row.
         self.assertEqual(dl.add_row('il', iteration_idx=1), 2)
@@ -425,8 +426,8 @@ class MultipleForeignKeyTests(unittest.TestCase):
         self.dl.add_row('il', iteration_idx=0)          # move_id 1
         self.dl.add_row('cs', summary_id='a')
         self.dl.add_row('cs2', sid2='b')
-        self.assertEqual(self.dl._data['cs']['rows']['a'][0], 1)
-        self.assertEqual(self.dl._data['cs2']['rows']['b'][0], 1)
+        self.assertEqual(self.dl._data['cs']['rows'][('a',)][0], 1)
+        self.assertEqual(self.dl._data['cs2']['rows'][('b',)][0], 1)
 
 
 # ===================================================================
@@ -444,14 +445,14 @@ class SchemaTests(unittest.TestCase):
             schema['il'],
             TableSchema(
                 columns=('move_id', 'iteration_idx', 'role'),
-                pk='move_id', fks=(),
+                pk=('move_id',), fks=(),
             ),
         )
         self.assertEqual(
             schema['cs'],
             TableSchema(
                 columns=('summary_id', 'move_id', 'cost'),
-                pk='summary_id',
+                pk=('summary_id',),
                 fks=(ForeignKey('move_id', 'il', 'move_id'),),
             ),
         )
@@ -474,7 +475,7 @@ class SchemaTests(unittest.TestCase):
             leaf.schema['leaf'],
             TableSchema(
                 columns=('icost_id', 'summary_id', 'move_id'),
-                pk='icost_id',
+                pk=('icost_id',),
                 fks=(
                     ForeignKey('summary_id', 'cs', 'summary_id'),
                     ForeignKey('move_id', 'il', 'move_id'),
@@ -482,7 +483,7 @@ class SchemaTests(unittest.TestCase):
             ),
         )
 
-    def test_keyless_table_reports_none_pk(self):
+    def test_keyless_table_reports_empty_pk(self):
         dl = DebugLog(
             il=[('move_id', None)],
             notes=[('move_id', None), ('text', None)],     # key-less, but an FK
@@ -493,7 +494,7 @@ class SchemaTests(unittest.TestCase):
             dl.schema['notes'],
             TableSchema(
                 columns=('move_id', 'text'),
-                pk=None,
+                pk=(),
                 fks=(ForeignKey('move_id', 'il', 'move_id'),),
             ),
         )
@@ -504,6 +505,112 @@ class SchemaTests(unittest.TestCase):
         dl.add_row('il', iteration_idx=0)
         dl.add_row('cs', summary_id='1_x', cost=1.0)
         self.assertEqual(dl.schema, before)
+
+
+# ===================================================================
+# 10. Composite primary keys
+# ===================================================================
+
+def _composite_log():
+    """A log with a composite-PK table `cfg` ((kind, label) -> value), a
+    single-PK table `il`, and a key-less table for contrast."""
+    dl = DebugLog(
+        cfg=[('kind', None), ('label', None), ('value', None)],
+        il=[('move_id', None), ('iteration_idx', None)],
+    )
+    dl.set_pk('cfg', 'kind', 'label')
+    dl.set_pk('il', 'move_id', ctr_name='move_id')
+    return dl
+
+
+class CompositePkTests(unittest.TestCase):
+
+    def test_set_pk_stores_tuple_and_marks_each_column(self):
+        dl = _composite_log()
+        cfg = dl._tables['cfg']
+        self.assertEqual(cfg['@pk_cols'], ('kind', 'label'))
+        self.assertEqual(cfg['kind']['key_type'], 'primary')
+        self.assertEqual(cfg['label']['key_type'], 'primary')
+        # No counter is created for a composite key.
+        self.assertEqual(dl._counters.ctr_names, ('move_id',))
+
+    def test_set_pk_no_columns_raises(self):
+        dl = DebugLog(t=[('a', None)])
+        with self.assertRaises(ValueError):
+            dl.set_pk('t')
+
+    def test_composite_with_counter_raises(self):
+        dl = DebugLog(t=[('a', None), ('b', None)])
+        with self.assertRaises(ValueError):
+            dl.set_pk('t', 'a', 'b', ctr_name='x')
+        # Nothing was keyed and no counter leaked.
+        self.assertEqual(dl._tables['t']['@pk_cols'], ())
+        self.assertEqual(dl._counters.ctr_names, ())
+
+    def test_add_row_returns_and_keys_by_tuple(self):
+        dl = _composite_log()
+        key = dl.add_row('cfg', kind='cost', label='lateness', value=1.5)
+        self.assertEqual(key, ('cost', 'lateness'))
+        self.assertEqual(set(dl._data['cfg']['rows']), {('cost', 'lateness')})
+        self.assertEqual(dl._data['cfg']['rows'][('cost', 'lateness')], [1.5])
+        self.assertEqual(dl.get_last_pk_val('cfg'), ('cost', 'lateness'))
+
+    def test_add_row_every_pk_column_required(self):
+        dl = _composite_log()
+        with self.assertRaises(ValueError):
+            dl.add_row('cfg', kind='cost', value=1.0)        # label missing
+
+    def test_update_row_by_tuple(self):
+        dl = _composite_log()
+        dl.add_row('cfg', kind='cost', label='lateness', value=1.5)
+        dl.update_row('cfg', ('cost', 'lateness'), value=2.0)
+        self.assertEqual(dl._data['cfg']['rows'][('cost', 'lateness')], [2.0])
+
+    def test_update_row_cannot_touch_any_pk_column(self):
+        dl = _composite_log()
+        dl.add_row('cfg', kind='cost', label='lateness', value=1.5)
+        for pkcol in ('kind', 'label'):
+            with self.assertRaises(ValueError):
+                dl.update_row('cfg', ('cost', 'lateness'), **{pkcol: 'x'})
+
+    def test_update_row_unknown_tuple_raises(self):
+        dl = _composite_log()
+        with self.assertRaises(KeyError):
+            dl.update_row('cfg', ('cost', 'nope'), value=1.0)
+
+    def test_schema_reports_tuple_pk(self):
+        dl = _composite_log()
+        self.assertEqual(dl.schema['cfg'].pk, ('kind', 'label'))
+
+    def test_get_df_is_flat_with_pk_columns(self):
+        dl = _composite_log()
+        dl.add_row('cfg', kind='cost', label='lateness', value=1.5)
+        dl.add_row('cfg', kind='state', label='window_adv', value=24.0)
+        df = dl.get_df('cfg')
+        # Flat: a default index (no name), the PK columns are ordinary leading
+        # columns in declared order.
+        self.assertIsNone(df.index.name)
+        self.assertEqual(list(df.columns), ['kind', 'label', 'value'])
+        self.assertEqual(
+            sorted(df.itertuples(index=False, name=None)),
+            [('cost', 'lateness', 1.5), ('state', 'window_adv', 24.0)],
+        )
+
+    def test_get_df_empty_composite(self):
+        dl = _composite_log()
+        df = dl.get_df('cfg')
+        self.assertEqual(list(df.columns), ['kind', 'label', 'value'])
+        self.assertEqual(len(df), 0)
+
+    def test_set_fk_onto_composite_pk_raises(self):
+        dl = DebugLog(
+            cfg=[('kind', None), ('label', None)],
+            ref=[('x', None), ('kind', None)],
+        )
+        dl.set_pk('cfg', 'kind', 'label')
+        dl.set_pk('ref', 'x')
+        with self.assertRaises(ValueError):
+            dl.set_fk('ref', 'kind', 'cfg', 'kind')      # FK onto a composite PK
 
 
 if __name__ == '__main__':

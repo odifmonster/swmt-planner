@@ -2,9 +2,10 @@
 
 """Coverage of the generic dashboard — `config` (connection resolution incl. the
 reader's `SWMT_DASHBOARD_CONFIG`) and the `sqlload` read layer (`Filter` /
-`FKLookup` pure; `Query` / `Table` / `Row` MySQL-gated). The knitting planner's
-persisted run is the fixture for the gated tests. See
-`tests/spec-files/DASHBOARD_TEST_SPEC.md`."""
+`FKLookup` pure; `Query` / `Table` / `Row` MySQL-gated). The gated tests persist
+a **synthetic, controlled `DebugLog`** (`_dashboard_fixture_log`) as the fixture —
+decoupled from the planner so row counts stay stable regardless of planner tuning.
+See `tests/spec-files/DASHBOARD_TEST_SPEC.md`."""
 
 import datetime
 import json
@@ -12,8 +13,6 @@ import os
 import tempfile
 import unittest
 
-from swmtplanner.planners.infinite import Costing
-from swmtplanner.planners.infinite.loop import plan
 from swmtplanner.planners.infinite.run import _build_debug_log
 from swmtplanner.planners.infinite import manifest
 from swmtplanner.planners.infinite.manifest import spec_for_name
@@ -31,7 +30,6 @@ from swmtplanner.dashboard.sqlload.query import Query
 from swmtplanner.dashboard.sqlload import table as sqltable
 from swmtplanner.dashboard.sqlload.table import Table
 
-from inf_plan_tests import _make_state, _weights
 from mysql_support import _HOST, _PORT, _DB, _WRITER, _READER, _ADMIN, _connect
 
 
@@ -245,11 +243,12 @@ class ReferencingFKsTests(unittest.TestCase):
 
     def test_inverts_synthetic_schema(self):
         specs = [
-            TableSpec('a', (Column('x', 'int'),), pk=('x',)),
-            TableSpec('b', (Column('y', 'int'),), pk=('y',),
+            TableSpec('a', 'A', '', (Column('x', 'int'),), pk=('x',)),
+            TableSpec('b', 'B', '', (Column('y', 'int'),), pk=('y',),
                       fks=(ForeignKey('y', 'a', 'x'),)),
             # 'c' references 'a' via two columns -> two pairs, order preserved.
-            TableSpec('c', (Column('p', 'int'), Column('q', 'int')), pk=('p',),
+            TableSpec('c', 'C', '', (Column('p', 'int'), Column('q', 'int')),
+                      pk=('p',),
                       fks=(ForeignKey('p', 'a', 'x'), ForeignKey('q', 'a', 'x'))),
         ]
         self.assertEqual(
@@ -262,8 +261,12 @@ class ReferencingFKsTests(unittest.TestCase):
         self.assertEqual(refs['demand'], (('iteration_log', 'order_id'),))
         self.assertEqual(
             refs['cost_summary'], (('inv_cost_detail', 'summary_id'),))
+        # sched_cost_detail is referenced by production and both committed views.
         self.assertEqual(
-            refs['sched_cost_detail'], (('production', 'knit_id'),))
+            set(refs['sched_cost_detail']),
+            {('production', 'knit_id'), ('committed_sched', 'activity_id'),
+             ('committed_prod', 'knit_id')},
+        )
         # iteration_log.move_id is referenced by all five detail tables.
         self.assertEqual(
             {src for src, col in refs['iteration_log']},
@@ -279,13 +282,14 @@ class ReferencingFKsTests(unittest.TestCase):
                       'unmet_demand', 'runs'):
             self.assertNotIn(table, refs)
 
-    def test_views_never_appear(self):
+    def test_views_are_sources_not_referenced(self):
         refs = referencing_fks(manifest.TABLES + manifest.VIEWS)
-        for view in (v.name for v in manifest.VIEWS):
-            self.assertNotIn(view, refs)                 # never a referenced key
-        for pairs in refs.values():                      # never a source
-            self.assertFalse(any(src in {v.name for v in manifest.VIEWS}
-                                 for src, _ in pairs))
+        views = {v.name for v in manifest.VIEWS}
+        for view in views:
+            self.assertNotIn(view, refs)                 # nothing references a view
+        # but each view IS a source, drilling back to sched_cost_detail.
+        sources = {src for pairs in refs.values() for src, _ in pairs}
+        self.assertTrue(views <= sources)
 
 
 # ===================================================================
@@ -310,6 +314,67 @@ class _CountingCursor:
         return self._cur.fetchall()
 
 
+def _dashboard_fixture_log():
+    """A `DebugLog` populated with synthetic, controlled rows for the read-layer
+    MySQL tests — **decoupled from the planner** so the fixture's row counts are
+    stable regardless of planner tuning (e.g. the eligible-order precedence).
+
+    Populates only the tables these tests read, with the relationships their
+    assertions depend on:
+      - `demand` — 4 orders (PKs sort lexically `P0@…`..`P3@…`);
+      - `iteration_states` — one row per iteration index used (0..3);
+      - `iteration_log` — 20 rows (`move_id` 1..20), one committed move per
+        iteration (the rest rejected), each carrying a non-null `order_id`
+        referencing `demand` (committed moves target distinct orders);
+      - `cost_summary` — 200 rows spanning several chunks; `move_id` references
+        the log rows, few distinct `kind`/`label`, unique `summary_id`;
+      - `priority_detail` — a few key-less rows.
+    Other tables stay empty (no test reads them, and no FK requires them)."""
+    dl = _build_debug_log()
+    when = datetime.datetime(2026, 5, 18)
+    n_log = 20
+
+    orders = [f'P{i}@AU0001' for i in range(4)]
+    for i, oid in enumerate(orders):
+        dl.add_row('demand', order_id=oid, item='AU0001',
+                   due_date=when + datetime.timedelta(weeks=i),
+                   demand=100.0, covered_on_hand=0.0, remaining=100.0)
+
+    for idx in range(4):
+        dl.add_row('iteration_states', iteration_idx=idx,
+                   window_end=when + datetime.timedelta(days=idx),
+                   reference_week=1)
+
+    for k in range(n_log):
+        move_no = k + 1
+        idx = k // 5                                 # 0..3
+        committed = move_no % 5 == 1                 # one per iteration
+        dl.add_row(
+            'iteration_log',
+            iteration_idx=idx,
+            order_id=orders[idx],                    # non-null; committed -> distinct
+            order_remaining_lbs=100.0,
+            machine='M1',
+            decision_point='schedule_tail',
+            role='committed' if committed else 'rejected',
+            rank=0 if committed else move_no % 5,
+            total_cost=float(move_no),
+        )
+
+    labels = [f'c{i:02d}' for i in range(14)]        # 14 distinct (<= CHUNK)
+    kinds = ['inventory', 'schedule', 'other']
+    for i in range(200):                             # > CHUNK; spans chunks
+        dl.add_row('cost_summary', summary_id=f's{i:03d}',
+                   move_id=(i % n_log) + 1, label=labels[i % len(labels)],
+                   kind=kinds[i % len(kinds)], raw=float(i), cost=float(i) * 0.5)
+
+    for i in range(3):                               # key-less, <= 20 rows
+        dl.add_row('priority_detail', move_id=(i % n_log) + 1, item='AU0001',
+                   week_idx=i, remaining_lbs=50.0, late_day=float(i),
+                   weight=1.0, cost=float(i))
+    return dl
+
+
 class QueryMySQLTests(unittest.TestCase):
     """`Query` against a populated run in the local test MySQL. Skips when the
     server / driver is unavailable. `CHUNK_SIZE` is shrunk so the fixture spans
@@ -323,8 +388,7 @@ class QueryMySQLTests(unittest.TestCase):
             _connect(_ADMIN).close()
         except Exception as exc:
             raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
-        cls.dl = _build_debug_log()
-        plan(_make_state(), Costing(_weights()), debuglog=cls.dl)
+        cls.dl = _dashboard_fixture_log()
         conn = _connect(_ADMIN)                     # clean slate
         try:
             with conn.cursor() as cur:
@@ -516,8 +580,7 @@ class TableMySQLTests(unittest.TestCase):
             _connect(_ADMIN).close()
         except Exception as exc:
             raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
-        cls.dl = _build_debug_log()
-        plan(_make_state(), Costing(_weights()), debuglog=cls.dl)
+        cls.dl = _dashboard_fixture_log()
         conn = _connect(_ADMIN)
         try:
             with conn.cursor() as cur:
@@ -728,8 +791,7 @@ class SelectFilterMySQLTests(unittest.TestCase):
             _connect(_ADMIN).close()
         except Exception as exc:
             raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
-        cls.dl = _build_debug_log()
-        plan(_make_state(), Costing(_weights()), debuglog=cls.dl)
+        cls.dl = _dashboard_fixture_log()
         conn = _connect(_ADMIN)
         try:
             with conn.cursor() as cur:

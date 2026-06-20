@@ -354,6 +354,13 @@ off the demand object rather than rebuilt: a `RegularOrder` carries the
 corresponding `SafetyAwareOrder.id` (`P{week_idx}@{item_id}`), a `SafetyOrder`
 the view's `Safety.id` (`S@{item_id}`).
 
+**At most one order per item**, chosen by precedence: **(1) urgent regular** —
+the earliest unmet order with `week_idx <= state.reference_week_idx`; else
+**(2) safety** — a `SafetyOrder` when the safety pool is below target; else
+**(3) future regular** — the earliest unmet order (necessarily past the
+reference week). So an item only gets a safety order once its urgent orders are
+met *and* it is below safety target; otherwise it gets a regular order.
+
 1. **Fully satisfied item** — no unmet weekly demand and safety pool
    at-or-above target. Output: `[]`.
 
@@ -365,9 +372,10 @@ the view's `Safety.id` (`S@{item_id}`).
    safety pool below the target. Output: one `SafetyOrder` with lbs =
    `safety_target - safety_pool`.
 
-4. **Both unmet demand and safety shortfall** — week 0 partially unmet
-   AND safety below target. Output: one `RegularOrder` (week 0) AND
-   one `SafetyOrder`.
+4. **Urgent regular suppresses safety** — an urgent unmet order (week 0)
+   AND safety below target. The urgent regular wins: output is the single
+   `RegularOrder` (week 0); the safety order is **suppressed** (one order
+   per item).
 
 5. **Earliest-unmet selection** — multiple weeks have unmet demand
    (e.g., week 0 partially unmet, weeks 1–3 fully unmet). Output's
@@ -375,11 +383,26 @@ the view's `Safety.id` (`S@{item_id}`).
    `remaining_lbs`. Only one regular order per item, regardless of how
    many weeks are unmet.
 
-6. **Multiple items, mixed states** — state contains several
-   `RlsItem`s, each in a different scenario from 1–5. Output includes
-   the appropriate orders for each `RlsItem`, with no cross-talk.
+6. **Future regular when safety met** — unmet demand only *past* the
+   reference week (default 1) with the safety pool at target (e.g. a
+   `safety=0` item). Output: one `RegularOrder` for the earliest unmet
+   (future) week — the future-regular bucket.
+
+7. **Safety precedes future regular** — no urgent order (unmet only past
+   the reference week) **and** safety below target. Output: the single
+   `SafetyOrder`; the future regular is suppressed.
+
+8. **Reference week promotes a regular over safety** — the same state as
+   scenario 7 but with `reference_week_idx` raised to include that week:
+   the order is now *urgent*, so it suppresses the safety order. Output:
+   the single (now urgent) `RegularOrder`. (Single config — exercises the
+   `reference_week_idx` boundary directly.)
+
+9. **Multiple items, mixed states** — state contains several
+   `RlsItem`s, each in a different scenario from 1–7. Output includes
+   the appropriate single order for each `RlsItem`, with no cross-talk.
    (Configuration (b) is the natural single test here — the
-   constructor-only version is what scenarios 1–5 already cover.)
+   constructor-only version is what the earlier scenarios already cover.)
 
 #### 1.3.3 `enumerate_candidates`
 

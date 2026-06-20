@@ -73,46 +73,60 @@ rows, so new tables (phases 2–4) are added by configuration, not new types.
   ordered list of `(column_name, default_value)` 2-tuples. The defaults let a
   row be appended before every value is known (the rest filled in later via
   `update_row`). e.g. `DebugLog(iteration_log=[('move_id', None), ...], ...)`.
-- **`set_pk(table, column, ctr_name=None)`** — declare `column` as `table`'s
-  primary key. `ctr_name` is **optional**: supply it to make the key
-  **auto-incremented** (a fresh counter of that name is created and minted per
-  row — future tables may instead have caller-supplied, non-auto primary keys,
-  for which `ctr_name` is omitted and **no** counter is created). A table may
-  have **only one** primary key — defining a second raises.
+- **`set_pk(table, *columns, ctr_name=None)`** — declare `columns` (one or more)
+  as `table`'s primary key. A **single** column is the common case; **two or
+  more** form a **composite** key (e.g. `set_pk('run_configs', 'kind',
+  'label')`). The PK column **names are stored as a tuple of strings** (`()` for
+  a key-less table), and a row is addressed by the **tuple of its PK column
+  values**. `ctr_name` is **optional** and valid **only for a single-column
+  key**: supply it to make the key **auto-incremented** (a fresh counter of that
+  name is created and minted per row); a composite key is always
+  caller-supplied (passing `ctr_name` with more than one column raises). A table
+  may have **only one** primary key — defining a second raises.
 - **`set_fk(table, column, foreign_table, foreign_column)`** — declare `column`
-  as a foreign key pointing at `foreign_table.foreign_column` (the foreign
-  table's primary key). The method internally handles the link: if the
-  referenced key is counter-backed, this column rides the **same counter** so
-  `add_row` can fill it with the current id; if the referenced key is non-auto,
-  the value must be supplied at `add_row` time.
+  as a foreign key pointing at `foreign_table.foreign_column`, which must be the
+  foreign table's **single-column** primary key (a single FK column cannot carry
+  a composite key's tuple — referencing a composite PK raises). The method
+  internally handles the link: if the referenced key is counter-backed, this
+  column rides the **same counter** so `add_row` can fill it with the current
+  id; if the referenced key is non-auto, the value must be supplied at `add_row`
+  time.
 - **`add_row(table, **kwargs)`** — append a row and **return its primary-key
-  value** (or `None` if the table has no PK). Each declared column not supplied
-  in `kwargs` is filled in this order of precedence: an **auto-incremented PK**
-  column by **advancing** its counter (minting a fresh id); an **FK** column
-  backed by a counter by that counter's **current** value (linking to the
-  most-recently-minted PK); any other column by its **declared default**.
-  Supplied kwargs override; unknown columns raise. A table whose primary key is
-  **non-auto** (no counter) requires the PK value to be **supplied** — its PK
-  column never falls back to a default (so rows stay addressable by
-  `update_row`); the construction-time default exists but is unused for such
-  PK columns.
+  value** — a scalar for a single-column PK, the **tuple of PK values** for a
+  composite PK, or `None` if the table has no PK. Each declared column not
+  supplied in `kwargs` is filled in this order of precedence: an
+  **auto-incremented PK** column by **advancing** its counter (minting a fresh
+  id); an **FK** column backed by a counter by that counter's **current** value
+  (linking to the most-recently-minted PK); any other column by its **declared
+  default**. Supplied kwargs override; unknown columns raise. A **non-auto** PK
+  column (every column of a composite key, or a single key with no counter)
+  must be **supplied** — it never falls back to a default (so rows stay
+  addressable by `update_row`).
 - **`get_last_pk_val(table)`** — return the primary-key value of the most
-  recently added row of `table` (for a counter-backed PK this equals the
-  counter's current value; `None` if no row has been added yet). Requires the
+  recently added row of `table`: a scalar for a single-column PK (for a
+  counter-backed PK this equals the counter's current value), the **tuple** of
+  values for a composite PK; `None` if no row has been added yet. Requires the
   table to have a PK — **raises** otherwise. This keeps debug-side tracking
   inside the `DebugLog` rather than threading ids through caller signatures:
   e.g. `score_after_move` composes `cost_summary`'s `summary_id` from the
   current `iteration_log` `move_id` via `get_last_pk_val('iteration_log')`,
-  so its only debug parameter stays the single `debuglog` object.
+  so its only debug parameter stays the single `debuglog` object. (FK auto-link
+  only ever reads a single-column referent, so it always gets a scalar.)
 - **`update_row(table, pk_val, **kwargs)`** — patch the columns named in
-  `kwargs` on the existing row whose primary key equals `pk_val`. **Only valid
-  on a table that has a primary key** — raises otherwise (there is no other way
-  to address a specific row); also raises if no row matches `pk_val` or a kwarg
-  names an unknown column. This is how fields unknown at `add_row` time
-  (e.g. a candidate's post-sort `rank` / `role`) are filled in.
+  `kwargs` on the existing row whose primary key equals `pk_val` (a scalar for a
+  single-column PK, the **tuple** for a composite PK). **Only valid on a table
+  that has a primary key** — raises otherwise (there is no other way to address
+  a specific row); also raises if no row matches `pk_val`, or a kwarg names an
+  unknown column or **any** PK column (the key cannot be updated). This is how
+  fields unknown at `add_row` time (e.g. a candidate's post-sort `rank` /
+  `role`) are filled in.
 - **`get_df(table, **kwargs)`** — return `pandas.DataFrame(rows,
   columns=<declared columns>, **kwargs)`; the extra kwargs are forwarded to the
-  `DataFrame` constructor (e.g. `index=`, `dtype=`). Built flat — no MultiIndex.
+  `DataFrame` constructor (e.g. `index=`, `dtype=`). Built flat — **no
+  MultiIndex**. A single-column-PK table uses that PK as the (named) index; a
+  **composite**-PK table keeps its PK columns as ordinary **leading columns**
+  with a default integer index (since a tuple index would be a MultiIndex); a
+  key-less table uses a default integer index.
 - **`tables`** (property) — the names of the registered tables, in declaration
   order, as a `tuple[str, ...]`. Lets a caller enumerate the log without knowing
   its schema up front — e.g. the persistence writer walks `for name in
@@ -127,13 +141,13 @@ rows, so new tables (phases 2–4) are added by configuration, not new types.
   ```
   TableSchema
     columns: tuple[str, ...]      # declared column order (same as get_df's columns)
-    pk: str | None                # the primary-key column, or None for a key-less table
+    pk: tuple[str, ...]           # the primary-key columns (empty for a key-less table)
     fks: tuple[ForeignKey, ...]   # one per foreign-key column, in declared order
 
   ForeignKey
     column: str                   # the foreign-key column in this table
     ref_table: str                # the referenced table
-    ref_column: str               # the referenced table's primary-key column
+    ref_column: str               # the referenced table's (single-column) primary key
   ```
 
   `ref_table` / `ref_column` are resolved from the stored link: a foreign key
@@ -224,9 +238,12 @@ Config:
 
 `cost_summary` carries a primary key (rather than going key-less) so its rows
 are individually addressable — the dashboard's FK links and any later
-`update_row` need it. The composite is caller-built for now; we may later teach
-`DebugLog` to derive a PK by combining several columns, which would let the
-caller drop the explicit `summary_id`.
+`update_row` need it. It keeps a single, caller-built `summary_id` string even
+though `DebugLog` now supports **composite** primary keys (`set_pk` with several
+columns): `inv_cost_detail.summary_id` is a **foreign key onto it**, and an FK
+must reference a single-column PK — so `cost_summary` deliberately stays
+single-keyed. Composite keys are for tables nothing references by key (e.g.
+`run_configs` on `(kind, label)`).
 
 #### Population flow
 

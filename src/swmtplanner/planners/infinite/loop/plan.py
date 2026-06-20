@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -77,6 +77,9 @@ def plan(
     tuples remain `None`.)"""
     horizon = _compute_horizon(state)
 
+    if debuglog is not None:
+        _emit_run_configs(debuglog, state, costing)
+
     move_count = 0
 
     while True:
@@ -108,8 +111,15 @@ def plan(
                 key=lambda pair: pair[0],
             )
         else:
-            # Debug path: score and rank the full candidate list, writing each
-            # to `iteration_log` (and, via score_after_move, `cost_summary`).
+            # Debug path: record this iteration's window/reference-week state
+            # (parent of the iteration_log rows), then score and rank the full
+            # candidate list, writing each to `iteration_log` (and, via
+            # score_after_move, `cost_summary`).
+            debuglog.add_row(
+                'iteration_states', iteration_idx=move_count,
+                window_end=state.window_end,
+                reference_week=state.reference_week_idx,
+            )
             best_move = _log_iteration(
                 debuglog, state, costing, ctx, candidates, move_count,
             )
@@ -171,6 +181,44 @@ def _log_iteration(
             role='committed' if rank == 0 else 'rejected',
         )
     return scored[0][2]
+
+
+# State tuning knobs recorded in `run_configs` (kind='state'): the timedelta
+# ones are stored in hours, the rest as their scalar value.
+_STATE_CFG_HOURS = (
+    'window_advance_amount', 'carrying_avoidance_margin',
+    'planning_horizon_buffer',
+)
+_STATE_CFG_SCALAR = (
+    'candidate_threshold', 'reference_week_idx', 'reference_advance_amount',
+    'reference_threshold',
+)
+
+
+def _emit_run_configs(
+    debuglog: 'DebugLog', state: State, costing: Costing,
+) -> None:
+    """Write this run's configuration to `run_configs` once, before the loop:
+    one `kind='cost'` row per `CostWeights` field, and one `kind='state'` row per
+    tuneable `State` knob (timedelta knobs recorded in **hours**). The
+    `(kind, label)` pair is the table's composite primary key."""
+    weights = costing.weights
+    for f in fields(weights):
+        debuglog.add_row(
+            'run_configs', kind='cost', label=f.name,
+            value=float(getattr(weights, f.name)),
+        )
+    for label in _STATE_CFG_SCALAR:
+        debuglog.add_row(
+            'run_configs', kind='state', label=label,
+            value=float(getattr(state, label)),
+        )
+    for label in _STATE_CFG_HOURS:
+        td = getattr(state, label)
+        debuglog.add_row(
+            'run_configs', kind='state', label=label,
+            value=td.total_seconds() / 3600.0,
+        )
 
 
 def _emit_production(debuglog: 'DebugLog', move: 'Move') -> None:

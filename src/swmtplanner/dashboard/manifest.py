@@ -47,10 +47,14 @@ class TableSpec:
     """One table. `name` is the table — identical in the planner's debug log (the
     row source) and the database. `columns` are the non-`run_id` columns in DB
     order; `pk` is the table's own primary-key column(s) after the implicit
-    leading `run_id` (empty for a key-less table). `order_by` gives a stable
-    paging order for a key-less table (a keyed table paginates by its `pk`); it
-    should be set iff `pk` is empty."""
+    leading `run_id` (empty for a key-less table). `order_by`, when set, is the
+    stable paging/display order and **overrides** the `pk` — for a key-less table,
+    or a keyed table shown in a non-key order (e.g. a keyed view ordered by its
+    base table's sort). A keyed table without `order_by` paginates by its `pk`;
+    every table must end up with one or the other (see `order_columns`)."""
     name: str
+    disp_name: str
+    desc: str
     columns: tuple[Column, ...]
     pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...] = field(default_factory=tuple)
@@ -62,9 +66,10 @@ class TableSpec:
 
     @property
     def order_columns(self) -> tuple[str, ...]:
-        """Columns to `ORDER BY` for stable LIMIT/OFFSET paging: the `pk` for a
-        keyed table, else the explicit `order_by`."""
-        return self.pk if self.pk else self.order_by
+        """Columns to `ORDER BY` for stable LIMIT/OFFSET paging: the explicit
+        `order_by` if set, else the `pk`. (`order_by` wins so a keyed table can
+        be displayed in a non-key order.)"""
+        return self.order_by if self.order_by else self.pk
 
 
 def referencing_fks(

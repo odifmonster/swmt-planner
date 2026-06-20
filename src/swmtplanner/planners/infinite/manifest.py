@@ -30,6 +30,8 @@ RUNS_TABLE = 'runs'
 
 RUNS = TableSpec(
     name=RUNS_TABLE,
+    disp_name='Runs',
+    desc='Registry of planner runs and their metadata.',
     columns=(
         Column('run_id', 'int'),
         Column('created_at', 'datetime'),
@@ -42,12 +44,15 @@ RUNS = TableSpec(
     pk=('run_id',),
 )
 
-# The eight DebugLog tables, in FK-topological insert order (parents first):
-# runs -> demand -> iteration_log -> cost_summary -> inv_cost_detail
-#      -> sched_cost_detail -> production ; priority_detail, unmet_demand after.
+# The ten DebugLog tables, in FK-topological insert order (parents first):
+# runs -> demand -> run_configs -> iteration_states -> iteration_log
+#      -> cost_summary -> inv_cost_detail -> sched_cost_detail -> production ;
+# priority_detail, unmet_demand after.
 TABLES: tuple[TableSpec, ...] = (
     TableSpec(
         'demand',
+        disp_name='Demand',
+        desc='Per-order demand and on-hand coverage going into the run.',
         columns=(
             Column('order_id', 'str'),
             Column('item', 'str'),
@@ -59,7 +64,34 @@ TABLES: tuple[TableSpec, ...] = (
         pk=('order_id',),
     ),
     TableSpec(
+        'run_configs',
+        disp_name='Run Configuration',
+        desc='The cost weights and State tuning knobs this run was planned '
+             'with (one row per setting; timedeltas in hours).',
+        columns=(
+            Column('kind', 'str'),                            # 'cost' | 'state'
+            Column('label', 'str'),                           # the setting's name
+            Column('value', 'float', nullable=True),
+        ),
+        pk=('kind', 'label'),                                 # composite
+    ),
+    TableSpec(
+        'iteration_states',
+        disp_name='Iteration States',
+        desc='The decision window end and reference week at the start of each '
+             'planning iteration.',
+        columns=(
+            Column('iteration_idx', 'int'),
+            Column('window_end', 'datetime', nullable=True),
+            Column('reference_week', 'int', nullable=True),
+        ),
+        pk=('iteration_idx',),
+    ),
+    TableSpec(
         'iteration_log',
+        disp_name='Iteration Log',
+        desc='Every candidate move scored each iteration, with its rank and '
+             'committed/rejected role.',
         columns=(
             Column('iteration_idx', 'int'),
             Column('move_id', 'int'),
@@ -72,10 +104,15 @@ TABLES: tuple[TableSpec, ...] = (
             Column('total_cost', 'float'),
         ),
         pk=('move_id',),
-        fks=(ForeignKey('order_id', 'demand', 'order_id'),),
+        fks=(
+            ForeignKey('order_id', 'demand', 'order_id'),
+            ForeignKey('iteration_idx', 'iteration_states', 'iteration_idx'),
+        ),
     ),
     TableSpec(
         'cost_summary',
+        disp_name='Cost Summary',
+        desc='Per-move cost components, one row per labeled cost term.',
         columns=(
             Column('summary_id', 'str'),
             Column('move_id', 'int'),
@@ -89,6 +126,9 @@ TABLES: tuple[TableSpec, ...] = (
     ),
     TableSpec(
         'inv_cost_detail',
+        disp_name='Inventory Cost Detail',
+        desc="Carrying/excess inventory cost breakdown feeding each move's cost "
+             'summary.',
         columns=(
             Column('icost_id', 'int'),
             Column('summary_id', 'str'),
@@ -108,6 +148,8 @@ TABLES: tuple[TableSpec, ...] = (
     ),
     TableSpec(
         'sched_cost_detail',
+        disp_name='Schedule Cost Detail',
+        desc='Per-activity schedule cost breakdown for each candidate move.',
         columns=(
             Column('activity_id', 'str'),
             Column('move_id', 'int'),
@@ -123,6 +165,8 @@ TABLES: tuple[TableSpec, ...] = (
     ),
     TableSpec(
         'production',
+        disp_name='Production',
+        desc='Per-knit production records produced by each candidate move.',
         columns=(
             Column('knit_id', 'str'),
             Column('move_id', 'int'),
@@ -142,6 +186,8 @@ TABLES: tuple[TableSpec, ...] = (
     ),
     TableSpec(
         'priority_detail',
+        disp_name='Priority Detail',
+        desc='Per-item, per-week priority-cost contributions for each move.',
         columns=(
             Column('move_id', 'int'),
             Column('item', 'str'),
@@ -157,6 +203,8 @@ TABLES: tuple[TableSpec, ...] = (
     ),
     TableSpec(
         'unmet_demand',
+        disp_name='Unmet Demand',
+        desc='Item/week pounds left unmet by the final plan.',
         columns=(
             Column('item', 'str'),
             Column('week_idx', 'int'),
@@ -169,12 +217,17 @@ TABLES: tuple[TableSpec, ...] = (
 
 # The committed-move DB **views** — read-only slices the dashboard reads (the
 # writer never touches them, so they are NOT in `TABLES`/`ALL_TABLES`). Each
-# exposes a subset of its base table's columns for the rows whose move committed,
-# and carries no FK columns. Key-less; `order_by` mirrors the view's own ORDER BY
-# with the base PK appended for a stable, total paging order.
+# exposes a subset of its base table's columns for the rows whose move committed.
+# Each is **keyed** by the identity column it carries over from its base table —
+# also an **FK back to `sched_cost_detail`**, so a committed-view row drills to its
+# full scheduled-activity detail. `order_by` overrides the PK to keep the view's
+# own ORDER BY (the base PK appended for a stable, total paging order).
 VIEWS: tuple[TableSpec, ...] = (
     TableSpec(
         'committed_sched',                       # committed slice of sched_cost_detail
+        disp_name='Committed Schedule',
+        desc='The committed machine schedule — activities that made the final '
+             'plan.',
         columns=(
             Column('activity_id', 'str'),
             Column('machine', 'str'),
@@ -182,11 +235,14 @@ VIEWS: tuple[TableSpec, ...] = (
             Column('end', 'datetime'),
             Column('desc', 'str'),
         ),
-        pk=(),
+        pk=('activity_id',),
+        fks=(ForeignKey('activity_id', 'sched_cost_detail', 'activity_id'),),
         order_by=('machine', 'start', 'activity_id'),
     ),
     TableSpec(
         'committed_prod',                        # committed slice of production
+        disp_name='Committed Production',
+        desc="The committed knit production — the final plan's output.",
         columns=(
             Column('knit_id', 'str'),
             Column('roll_id', 'str'),
@@ -196,7 +252,8 @@ VIEWS: tuple[TableSpec, ...] = (
             Column('end', 'datetime'),
             Column('lbs', 'float'),
         ),
-        pk=(),
+        pk=('knit_id',),
+        fks=(ForeignKey('knit_id', 'sched_cost_detail', 'activity_id'),),
         order_by=('item', 'knit_id'),
     ),
 )

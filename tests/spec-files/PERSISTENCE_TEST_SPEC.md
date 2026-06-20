@@ -41,8 +41,11 @@ the source of truth).
    `runs`, or a view) and raises `KeyError` on an unknown name.
 5. **Committed-move views** — `manifest.VIEWS` is exactly
    `{committed_sched, committed_prod}`; each is **resolvable via `spec_for_name`**,
-   **absent from `ALL_TABLES`** (so the writer never touches it), and
-   **key-less with a non-empty `order_by`** (a stable paging order for a view).
+   **absent from `ALL_TABLES`** (so the writer never touches it), and **keyed by
+   the identity column it carries over** (a single-column `pk`) which is also an
+   **FK to `sched_cost_detail.activity_id`** (drill to the full activity row),
+   while a non-empty `order_by` **overrides** that pk so the view keeps its own
+   display order (`order_columns != pk`).
 
 ## 3. Persistence pure helpers (`persistence.py`, no server)
 

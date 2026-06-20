@@ -61,9 +61,11 @@ Per table the manifest records a `TableSpec`:
   (empty for a key-less table).
 - **`fks`** — `(column → ref_table.ref_column)`, the full DB FK graph, for the
   app's drill-down navigation.
-- **`order_by`** — a stable paging order for a **key-less** table (set iff `pk`
-  is empty). A keyed table paginates by its `pk`; the `order_columns` accessor
-  returns whichever applies.
+- **`order_by`** — an explicit stable paging/display order. When set it
+  **overrides** the `pk` (for a key-less table, or a keyed table shown in a
+  non-key order — e.g. a keyed view ordered by its base table's sort); a keyed
+  table without it paginates by its `pk`. The `order_columns` accessor returns
+  `order_by` if set, else `pk`.
 
 The dataclasses carry only *structure* — no concrete tables. The planner builds
 the instance (its table set, FK graph, and FK-topological insert order) and the
@@ -180,8 +182,8 @@ a new `Query`).
   Columns are **table-qualified** because an `FKLookup`'s join sub-query exposes
   `run_id`/`ref_col`, which can otherwise collide with the main table's columns.
   The `ORDER BY` is required: `LIMIT`/`OFFSET` paging is only well-defined under
-  a stable order, so the table's `order_columns` (its PK, or the manifest's
-  `order_by` for a key-less table) drives it.
+  a stable order, so the table's `order_columns` (its `order_by` if set, else its
+  PK) drives it.
 
   The trailing `LIMIT`/`OFFSET` are filled per chunk via
   `query_str.format(limit=…, offset=…)`.

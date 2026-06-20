@@ -28,14 +28,17 @@ writable `TABLES`/`ALL_TABLES` so the writer never touches them:
 
 - `committed_sched` — columns `activity_id`, `machine`, `start`, `end`, `desc`
   (a **subset** of `sched_cost_detail` — `move_id`/`weight`/`cost` are dropped by
-  the view), **key-less** (`pk=()`), `order_by=('machine', 'start', 'activity_id')`
-  (mirrors the view's `ORDER BY machine, start` with the unique `activity_id`
-  appended for a stable total order).
+  the view), keyed by `activity_id` (which is also an **FK to
+  `sched_cost_detail.activity_id`**), with `order_by=('machine', 'start',
+  'activity_id')` **overriding** the pk so it keeps the view's `ORDER BY machine,
+  start` (unique `activity_id` appended for a stable total order).
 - `committed_prod` — `knit_id`, `roll_id`, `job_id`, `item`, `start`, `end`,
-  `lbs`; key-less; `order_by=('item', 'knit_id')`.
+  `lbs`; keyed by `knit_id` (also an FK to `sched_cost_detail.activity_id`);
+  `order_by=('item', 'knit_id')`.
 
-Phase 1 uses only `committed_sched`. Neither view carries FK columns (the
-`move_id` join column is dropped), so no drill-down from them for now.
+Phase 1 uses only `committed_sched`. (The Phase-4 update keyed both views and gave
+their identity column an FK back to `sched_cost_detail`, so a committed-view row
+drills to its full scheduled-activity detail; Phase 1 itself shows no links.)
 
 ### Components
 
@@ -523,9 +526,7 @@ frame's table across drills and backs: `RawViewPage` emits
 
 ### Out of scope for Phase 4
 
-The **committed-only toggle** (deferred — it was bundled here in an earlier
-handoff but is independent of FK nav); the pretty view (Phase 5); editing the page
-size; multi-column selection filters.
+The pretty view (Phase 5); editing the page size; multi-column selection filters.
 
 ### Testing
 

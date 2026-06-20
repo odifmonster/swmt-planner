@@ -48,6 +48,16 @@ def _build_debug_log() -> DebugLog:
     detail and output tables (phase 2) are set up here but not yet populated.
     This just sets up the empty, schema-fixed log."""
     dl = DebugLog(
+        run_configs=[
+            ('kind', None),
+            ('label', None),
+            ('value', None),
+        ],
+        iteration_states=[
+            ('iteration_idx', None),
+            ('window_end', None),
+            ('reference_week', None),
+        ],
         iteration_log=[
             ('iteration_idx', None),
             ('move_id', None),
@@ -122,8 +132,10 @@ def _build_debug_log() -> DebugLog:
         ],
     )
     # Primary keys (set before the foreign keys that reference them).
+    dl.set_pk('run_configs', 'kind', 'label')              # composite, non-auto
+    dl.set_pk('iteration_states', 'iteration_idx')          # non-auto
     dl.set_pk('iteration_log', 'move_id', ctr_name='move_id')
-    dl.set_pk('cost_summary', 'summary_id')                 # non-auto composite
+    dl.set_pk('cost_summary', 'summary_id')                 # non-auto, caller-built
     dl.set_pk('inv_cost_detail', 'icost_id', ctr_name='icost_id')
     dl.set_pk('sched_cost_detail', 'activity_id')           # the Activity's id
     dl.set_pk('production', 'knit_id')                      # the Knit's id
@@ -131,6 +143,8 @@ def _build_debug_log() -> DebugLog:
 
     # Foreign keys.
     dl.set_fk('iteration_log', 'order_id', 'demand', 'order_id')
+    dl.set_fk('iteration_log', 'iteration_idx',
+              'iteration_states', 'iteration_idx')
     dl.set_fk('cost_summary', 'move_id', 'iteration_log', 'move_id')
     dl.set_fk('inv_cost_detail', 'summary_id', 'cost_summary', 'summary_id')
     dl.set_fk('inv_cost_detail', 'move_id', 'iteration_log', 'move_id')
@@ -171,6 +185,10 @@ _Weights = Annotated[str | None, typer.Option(
     '--weights', '-w',
     help='Override cost weights. Path or inline JSON.',
 )]
+_StateCfg = Annotated[str | None, typer.Option(
+    '--state-cfg', '-g',
+    help='Override state configuration variables. Path or inline JSON.'
+)]
 _DBConnect = Annotated[str | None, typer.Option(
     '--db-conn', '-b',
     help='Override database connection information. Path or inline JSON.'
@@ -201,6 +219,7 @@ def run(
     machines: _Machines = None,
     demand: _Demand = None,
     weights: _Weights = None,
+    scfg: _StateCfg = None,
     dbconn: _DBConnect = None,
     label: _Label = None,
     output_dir: _OutDir = None,
@@ -291,9 +310,25 @@ def run(
     )
 
     # ---- Plan ----
+    def _read_json_file(fpath: str | None) -> dict:
+        if fpath is None:
+            return {}
+        with open(fpath) as infile:
+            ret = json.load(infile)
+        return ret
+    statecfg = _resolve(
+        cli_value=scfg, config_value=cfg.get('state'),
+        config_dir=config_dir,
+        file_loader=_read_json_file,
+        inline_loader=lambda x, _: {} if x is None else x,
+        label='state',
+    )
     state = State(
-        machines=machine_dict, rls_items=rls_items,
-        start_date=sd, window_end=sd,
+        machines=machine_dict,
+        rls_items=rls_items,
+        start_date=sd,
+        window_end=sd,
+        **statecfg
     )
     costing = Costing(cost_weights)
 

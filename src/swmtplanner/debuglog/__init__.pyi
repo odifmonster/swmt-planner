@@ -16,7 +16,7 @@ class ForeignKey:
 @dataclass(frozen=True)
 class TableSchema:
     columns: tuple[str, ...]
-    pk: str | None
+    pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...]
 
 
@@ -27,7 +27,7 @@ class DebugLog:
     @property
     def schema(self) -> dict[str, TableSchema]: ...
     def set_pk(
-        self, table: str, column: str, ctr_name: str | None = ...,
+        self, table: str, *columns: str, ctr_name: str | None = ...,
     ) -> None: ...
     def set_fk(
         self, table: str, column: str,

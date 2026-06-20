@@ -1261,17 +1261,18 @@ class CandidateEnumerationTests(unittest.TestCase):
         state_b = _make_state(machines={}, rls_items={'AU0001': rls_b})
         self._assert_orders_match(eligible_orders(state_b), expected)
 
-    def test_eligible_orders_both_unmet_and_shortfall(self):
+    def test_eligible_orders_urgent_regular_suppresses_safety(self):
+        # At most one order per item: an item with BOTH an urgent unmet order
+        # (week_idx <= reference_week) AND a safety shortfall yields only the
+        # urgent RegularOrder — the urgent regular takes precedence over safety.
         expected = [
             RegularOrder(item=_ITEM_A, week_idx=0,
                          due_date=_START, lbs=100.0,
                          order_id=f'P0@{_ITEM_A.id}'),
-            SafetyOrder(item=_ITEM_A, lbs=500.0,
-                        order_id=f'S@{_ITEM_A.id}'),
         ]
 
         # (a) weekly=[100, 0, 0, 0], no on_hand → week 0 fully unmet and
-        # safety at 0 (target 500).
+        # safety at 0 (target 500); the safety order is suppressed.
         rls_a = RlsItem(
             item=_ITEM_A, start_date=_START, on_hand_lbs=0.0,
             lead_time=timedelta(0),
@@ -1280,9 +1281,9 @@ class CandidateEnumerationTests(unittest.TestCase):
         state_a = _make_state(machines={}, rls_items={'AU0001': rls_a})
         self._assert_orders_match(eligible_orders(state_a), expected)
 
-        # (b) weekly=[100]*4, no jobs → every week unmet but only the
-        # earliest one surfaces as a RegularOrder, and safety still
-        # short by 500.
+        # (b) weekly=[100]*4, no jobs → every week unmet; only the earliest
+        # (week 0, urgent under the default reference_week) surfaces, and the
+        # safety order stays suppressed.
         rls_b = RlsItem(
             item=_ITEM_A, start_date=_START, on_hand_lbs=0.0,
             lead_time=timedelta(0),
@@ -1290,6 +1291,53 @@ class CandidateEnumerationTests(unittest.TestCase):
         )
         state_b = _make_state(machines={}, rls_items={'AU0001': rls_b})
         self._assert_orders_match(eligible_orders(state_b), expected)
+
+    def test_eligible_orders_future_regular_when_safety_met(self):
+        # Unmet demand only PAST the reference week (default 1), safety at
+        # target (_T1 has safety=0): the item still gets a RegularOrder for the
+        # earliest unmet week — the "future regular" bucket.
+        rls = RlsItem(
+            item=_T1, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[0.0, 0.0, 100.0, 0.0],
+        )
+        state = _make_state(machines={}, rls_items={_T1.id: rls})
+        self._assert_orders_match(eligible_orders(state), [
+            RegularOrder(item=_T1, week_idx=2,
+                         due_date=_START + timedelta(weeks=2), lbs=100.0,
+                         order_id=f'P2@{_T1.id}'),
+        ])
+
+    def test_eligible_orders_safety_precedes_future_regular(self):
+        # No urgent order (unmet only past the reference week) AND safety below
+        # target → the SafetyOrder wins; the future regular is suppressed.
+        rls = RlsItem(
+            item=_ITEM_A, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[0.0, 0.0, 100.0, 0.0],
+        )
+        state = _make_state(machines={}, rls_items={'AU0001': rls})
+        self._assert_orders_match(eligible_orders(state), [
+            SafetyOrder(item=_ITEM_A, lbs=500.0, order_id=f'S@{_ITEM_A.id}'),
+        ])
+
+    def test_eligible_orders_reference_week_promotes_regular_over_safety(self):
+        # Same item/state as the safety-precedence case, but raising the
+        # reference week to include week 2 makes that regular *urgent*, so it
+        # now suppresses the safety order.
+        rls = RlsItem(
+            item=_ITEM_A, start_date=_START, on_hand_lbs=0.0,
+            lead_time=timedelta(0),
+            weekly_lbs_needed=[0.0, 0.0, 100.0, 0.0],
+        )
+        state = _make_state(
+            machines={}, rls_items={'AU0001': rls}, reference_week_idx=2,
+        )
+        self._assert_orders_match(eligible_orders(state), [
+            RegularOrder(item=_ITEM_A, week_idx=2,
+                         due_date=_START + timedelta(weeks=2), lbs=100.0,
+                         order_id=f'P2@{_ITEM_A.id}'),
+        ])
 
     def test_eligible_orders_earliest_unmet_selection(self):
         item = Greige(

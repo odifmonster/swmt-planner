@@ -25,7 +25,8 @@ _FONT = Qt.ItemDataRole.FontRole
 _CHECKED = Qt.CheckState.Checked
 _UNCHECKED = Qt.CheckState.Unchecked
 
-_FK_LINK = '#1565c0'        # FK cells render as blue underlined links
+_FK_LINK = '#1565c0'        # FK cells: bold blue, like a link
+_FK_HOVER = '#ff791f'       # the orange accent, on hover
 
 
 class PageModel(QAbstractTableModel):
@@ -46,6 +47,7 @@ class PageModel(QAbstractTableModel):
         self._rows: 'list[Row]' = list(rows or [])
         self._has_cb = has_checkbox
         self._fk_cols = set(fk_cols or ())
+        self._hover = (-1, -1)              # the (row, col) under the mouse
 
     @property
     def _offset(self) -> int:
@@ -65,6 +67,18 @@ class PageModel(QAbstractTableModel):
         """The `Row` backing display row `row_idx` (for FK navigation)."""
         return self._rows[row_idx]
 
+    def set_hover(self, row: int, col: int) -> None:
+        """Record the cell under the mouse (`(-1, -1)` for none) and repaint the
+        previously- and newly-hovered cells, so an FK link recolors on hover."""
+        if (row, col) == self._hover:
+            return
+        old, self._hover = self._hover, (row, col)
+        ncols = self.columnCount()
+        for r, c in (old, self._hover):
+            if 0 <= r < len(self._rows) and 0 <= c < ncols:
+                idx = self.index(r, c)
+                self.dataChanged.emit(idx, idx, [_FOREGROUND])
+
     def data(self, index: QModelIndex, role: int = _DISPLAY) -> Any:
         if not index.isValid():
             return None
@@ -78,10 +92,11 @@ class PageModel(QAbstractTableModel):
             return format_cell(row.data[dcol])
         if self._columns[dcol] in self._fk_cols and row.data[dcol] is not None:
             if role == _FOREGROUND:
-                return QColor(_FK_LINK)
+                hovered = (index.row(), index.column()) == self._hover
+                return QColor(_FK_HOVER if hovered else _FK_LINK)
             if role == _FONT:
                 font = QFont()
-                font.setUnderline(True)
+                font.setBold(True)
                 return font
         return None
 
@@ -116,6 +131,7 @@ class PageModel(QAbstractTableModel):
     def set_rows(self, rows: 'list[Row]') -> None:
         self.beginResetModel()
         self._rows = list(rows)
+        self._hover = (-1, -1)
         self.endResetModel()
 
     def reset(
@@ -127,4 +143,5 @@ class PageModel(QAbstractTableModel):
         self._rows = list(rows)
         self._has_cb = has_checkbox
         self._fk_cols = set(fk_cols or ())
+        self._hover = (-1, -1)
         self.endResetModel()

@@ -23,6 +23,8 @@ class ForeignKey:
 @dataclass(frozen=True)
 class TableSpec:
     name: str
+    disp_name: str
+    desc: str
     columns: tuple[Column, ...]
     pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...] = ...

@@ -98,15 +98,21 @@ class ScoringContext:
 # ----- Order eligibility --------------------------------------------------
 
 def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
-    """For each `RlsItem`, return up to two eligible orders:
+    """For each `RlsItem`, return **at most one** eligible order, chosen by
+    precedence:
 
-    - One `RegularOrder` for the earliest week with unmet demand, read
-      from the safety-aware view. At most one per item per call.
-    - One `SafetyOrder` if `safety_view.safety_pool < safety_target`.
-      At most one per item per call.
+    1. **Urgent regular** — the earliest safety-aware order with unmet demand
+       whose `week.week_idx <= state.reference_week_idx`. A `RegularOrder`.
+    2. **Safety** — only when there is no urgent order *and*
+       `safety_view.safety_pool < safety_target`. A `SafetyOrder` topping the
+       pool to target.
+    3. **Future regular** — otherwise, the earliest order with unmet demand
+       (necessarily past the reference week). A `RegularOrder`.
 
-    Items whose demand is fully met *and* whose safety pool is at-or-
-    above target contribute nothing.
+    So an item gets a safety order only once its urgent orders are met and it is
+    below safety target; otherwise it gets a regular order. Items whose demand
+    is fully met *and* whose safety pool is at-or-above target contribute
+    nothing.
 
     Lives in `coordination/` (rather than `loop/candidates.py`) because
     the eligible-order set is plant-wide — both candidate enumeration
@@ -116,8 +122,9 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
     for rls in state.rls_items.values():
         # Regular: earliest safety-aware order with unmet demand. The
         # safety_view.orders tuple is week_idx-ordered by construction.
+        added_flag = False
         for order in rls.safety_view.orders:
-            if order.remaining_lbs > 0:
+            if order.remaining_lbs > 0 and order.week.week_idx <= state.reference_week_idx:
                 out.append(RegularOrder(
                     item=rls.item,
                     week_idx=order.week.week_idx,
@@ -125,16 +132,30 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
                     lbs=order.remaining_lbs,
                     order_id=order.id,
                 ))
+                added_flag = True
                 break
         # Safety: top-up if pool is below target.
         safety_gap = (
             rls.safety_view.safety_target - rls.safety_view.safety_pool
         )
-        if safety_gap > 0:
+        if safety_gap > 0 and not added_flag:
             out.append(SafetyOrder(
                 item=rls.item, lbs=safety_gap,
                 order_id=rls.safety_view.safety.id,
             ))
+            added_flag = True
+        
+        if not added_flag:
+            for order in rls.safety_view.orders:
+                if order.remaining_lbs > 0:
+                    out.append(RegularOrder(
+                        item=rls.item,
+                        week_idx=order.week.week_idx,
+                        due_date=order.week.due_date,
+                        lbs=order.remaining_lbs,
+                        order_id=order.id
+                    ))
+                    break
     return out
 
 

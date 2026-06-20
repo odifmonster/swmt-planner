@@ -8,6 +8,7 @@ helpers + a MySQL-gated end-to-end). See
 import datetime
 import os
 import unittest
+from dataclasses import fields
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,10 @@ from swmtplanner.planners.infinite import Costing
 from swmtplanner.planners.infinite.loop import plan
 from swmtplanner.planners.infinite.run import _build_debug_log
 from swmtplanner.planners.infinite import manifest
-from swmtplanner.planners.infinite.manifest import ForeignKey, spec_for_name
+from swmtplanner.planners.infinite.manifest import (
+    Column, ForeignKey, TableSpec, spec_for_name,
+)
+from swmtplanner.debuglog import DebugLog
 from swmtplanner.planners.infinite.sqldump import persistence
 from swmtplanner.planners.infinite.sqldump.persistence import (
     PersistenceError, persist_run,
@@ -59,8 +63,8 @@ class ManifestConsistencyTests(unittest.TestCase):
     def test_primary_keys_match(self):
         for spec in manifest.TABLES:
             with self.subTest(table=spec.name):
-                pk = self.schema[spec.name].pk
-                self.assertEqual(spec.pk, (pk,) if pk is not None else ())
+                # Both are tuples now (empty for a key-less table).
+                self.assertEqual(spec.pk, self.schema[spec.name].pk)
 
     def test_manifest_fks_superset_of_debuglog(self):
         # Names match, so the DebugLog FKs map identically into the manifest's.
@@ -95,6 +99,28 @@ class ManifestStructureTests(unittest.TestCase):
             ForeignKey('knit_id', 'sched_cost_detail', 'activity_id'), prod.fks,
         )
 
+    def test_run_configs_composite_key_no_fks(self):
+        cfg = spec_for_name('run_configs')
+        self.assertEqual(cfg.pk, ('kind', 'label'))           # composite
+        self.assertEqual(cfg.fks, ())
+        self.assertEqual(cfg.column_names, ('kind', 'label', 'value'))
+
+    def test_iteration_states_keyed_and_referenced_by_log(self):
+        states = spec_for_name('iteration_states')
+        self.assertEqual(states.pk, ('iteration_idx',))
+        self.assertEqual(states.fks, ())
+        # iteration_log.iteration_idx is an FK onto it.
+        log = spec_for_name('iteration_log')
+        self.assertIn(
+            ForeignKey('iteration_idx', 'iteration_states', 'iteration_idx'),
+            log.fks,
+        )
+        # ...and iteration_states is inserted before iteration_log.
+        names = [t.name for t in manifest.TABLES]
+        self.assertLess(
+            names.index('iteration_states'), names.index('iteration_log'),
+        )
+
     def test_run_registry(self):
         self.assertEqual(manifest.RUNS.name, 'runs')
         self.assertEqual(manifest.RUNS.pk, ('run_id',))
@@ -117,8 +143,14 @@ class ManifestStructureTests(unittest.TestCase):
             with self.subTest(view=v.name):
                 self.assertIs(spec_for_name(v.name), v)   # resolvable
                 self.assertNotIn(v.name, writable)        # writer never touches it
-                self.assertEqual(v.pk, ())                # key-less
-                self.assertTrue(v.order_by)               # stable paging order
+                self.assertTrue(v.order_by)               # keeps the view's order
+                # Keyed by the identity column it carries over, which is also an
+                # FK back to sched_cost_detail (drill to the full activity row).
+                self.assertEqual(len(v.pk), 1)
+                self.assertEqual(v.fks, (ForeignKey(
+                    v.pk[0], 'sched_cost_detail', 'activity_id'),))
+                # order_by overrides the pk for display order (machine/start, …).
+                self.assertNotEqual(v.order_columns, v.pk)
 
 
 # ===================================================================
@@ -181,6 +213,69 @@ class PersistenceHelperTests(unittest.TestCase):
         spec = spec_for_name('unmet_demand')                  # empty in this fixture
         self.assertEqual(list(persistence.project_rows(self.dl, spec, 1)), [])
 
+    def test_project_rows_composite_pk_exposes_all_columns(self):
+        # A composite-PK table keeps its PK columns as ordinary columns in
+        # get_df, so project_rows yields run_id + every column (PK included).
+        dl = DebugLog(cfg=[('kind', None), ('label', None), ('value', None)])
+        dl.set_pk('cfg', 'kind', 'label')
+        dl.add_row('cfg', kind='cost', label='lateness', value=1.5)
+        dl.add_row('cfg', kind='state', label='window_adv', value=24.0)
+        spec = TableSpec(
+            'cfg', 'Cfg', '',
+            (Column('kind', 'str'), Column('label', 'str'),
+             Column('value', 'float', nullable=True)),
+            pk=('kind', 'label'),
+        )
+        rows = sorted(persistence.project_rows(dl, spec, run_id=7))
+        self.assertEqual(rows, [
+            (7, 'cost', 'lateness', 1.5),
+            (7, 'state', 'window_adv', 24.0),
+        ])
+
+
+
+# ===================================================================
+# 3b. Debug-log population of run_configs / iteration_states (no server)
+# ===================================================================
+
+class DebugLogPopulationTests(unittest.TestCase):
+    """`plan(..., debuglog=dl)` fills the new config / per-iteration tables.
+    Pure — drives a small in-memory run, no MySQL."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dl = _populated_log()
+
+    def test_run_configs_cost_rows_match_weights(self):
+        df = self.dl.get_df('run_configs')
+        cost = df[df.kind == 'cost']
+        weights = _weights()
+        expected = {f.name: float(getattr(weights, f.name))
+                    for f in fields(weights)}
+        self.assertEqual(dict(zip(cost.label, cost.value)), expected)
+
+    def test_run_configs_state_rows_with_units(self):
+        df = self.dl.get_df('run_configs')
+        got = dict(zip(df[df.kind == 'state'].label,
+                       df[df.kind == 'state'].value))
+        # timedelta knobs recorded in hours; scalar knobs as-is (State defaults).
+        self.assertEqual(got['window_advance_amount'], 24.0)
+        self.assertEqual(got['carrying_avoidance_margin'], 24.0)
+        self.assertEqual(got['planning_horizon_buffer'], 672.0)     # 4 weeks
+        self.assertEqual(got['candidate_threshold'], 1.0)
+        self.assertEqual(got['reference_week_idx'], 1.0)
+        self.assertEqual(got['reference_advance_amount'], 1.0)
+        self.assertEqual(got['reference_threshold'], 5.0)
+
+    def test_iteration_states_cover_iteration_log(self):
+        states = self.dl.get_df('iteration_states')
+        log = self.dl.get_df('iteration_log')
+        self.assertTrue(len(states) > 0)
+        # One state row per distinct iteration_idx in the log (FK satisfiable).
+        self.assertEqual(set(states.index), set(log['iteration_idx']))
+        # window_end / reference_week are populated.
+        self.assertTrue(states['window_end'].notna().all())
+        self.assertTrue(states['reference_week'].notna().all())
 
 
 # ===================================================================

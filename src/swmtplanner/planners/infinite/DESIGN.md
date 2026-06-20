@@ -997,16 +997,19 @@ The DB also defines two **views** — **`committed_sched`** and
 `production` (each `INNER JOIN`ed to the committed `iteration_log` rows). They
 are **read-only** (the writer never touches them) and the dashboard reads them.
 Each exposes a **subset** of its base table's columns (dropping `move_id` and the
-cost columns), so they carry no FK columns:
+cost columns), and is **keyed by the identity column it carries over** — which is
+also an **FK to `sched_cost_detail.activity_id`**, so a committed-view row drills
+to its full scheduled-activity detail:
 
-- `committed_sched` — `activity_id`, `machine`, `start`, `end`, `desc`
-  (view `ORDER BY machine, start`).
-- `committed_prod` — `knit_id`, `roll_id`, `job_id`, `item`, `start`, `end`,
-  `lbs` (view `ORDER BY item, knit_id`).
+- `committed_sched` — `activity_id` (pk, FK → `sched_cost_detail.activity_id`),
+  `machine`, `start`, `end`, `desc` (view `ORDER BY machine, start`).
+- `committed_prod` — `knit_id` (pk, FK → `sched_cost_detail.activity_id`),
+  `roll_id`, `job_id`, `item`, `start`, `end`, `lbs` (view `ORDER BY item,
+  knit_id`).
 
 They are registered in the manifest as a **`VIEWS`** tuple (resolvable via
-`spec_for_name`, each key-less with an `order_by`) but kept out of the writable
-`TABLES`/`ALL_TABLES`.
+`spec_for_name`; each keyed, with an `order_by` that **overrides** the pk to keep
+the view's display order) but kept out of the writable `TABLES`/`ALL_TABLES`.
 
 ### FK graph (from the DDL)
 

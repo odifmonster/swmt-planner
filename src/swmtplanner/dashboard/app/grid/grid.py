@@ -8,7 +8,7 @@ column, and reports FK-cell clicks / row selection for navigation. See
 
 from typing import TYPE_CHECKING, Any
 
-from PyQt6.QtCore import QPoint, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QTableView, QToolButton, QVBoxLayout, QWidget,
 )
@@ -73,6 +73,11 @@ class PagedGrid(QWidget):
         self._view.setAlternatingRowColors(True)
         self._view.verticalHeader().setVisible(False)
         self._header.setStretchLastSection(True)
+        # Hover tracking, so FK links recolor + show a hand cursor under the mouse.
+        self._view.setMouseTracking(True)
+        self._view.entered.connect(self._on_hover)
+        self._view.viewportEntered.connect(self._clear_hover)
+        self._view.viewport().installEventFilter(self)
         self._size_view()
 
         layout = QVBoxLayout(self)
@@ -114,19 +119,41 @@ class PagedGrid(QWidget):
 
     # ----- FK navigation -----
 
-    def _on_cell_clicked(self, index: Any) -> None:
-        if self._table is None:
-            return
+    def _fk_target(self, index: Any) -> 'tuple[str, Any] | None':
+        """The `(fk_column, raw value)` for `index` if it is a clickable FK cell
+        (an FK column with a non-null value), else `None`. Shared by the click and
+        hover handlers."""
+        if self._table is None or not index.isValid():
+            return None
         dcol = index.column() - self._cb_offset
-        if dcol < 0 or dcol >= len(self._cols):       # checkbox / out of range
-            return
+        if dcol < 0 or dcol >= len(self._cols):        # checkbox / out of range
+            return None
         name = self._cols[dcol].name
         if name not in self._fk_names:
-            return
+            return None
         value = self._model.row_at(index.row()).get(name)
-        if value is None:                              # a null FK references nothing
-            return
-        self.fk_activated.emit(name, value)
+        return None if value is None else (name, value)
+
+    def _on_cell_clicked(self, index: Any) -> None:
+        target = self._fk_target(index)
+        if target is not None:
+            self.fk_activated.emit(*target)
+
+    def _on_hover(self, index: Any) -> None:
+        is_fk = self._fk_target(index) is not None
+        self._view.viewport().setCursor(
+            Qt.CursorShape.PointingHandCursor if is_fk
+            else Qt.CursorShape.ArrowCursor)
+        self._model.set_hover(index.row(), index.column())
+
+    def _clear_hover(self) -> None:
+        self._view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self._model.set_hover(-1, -1)
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if obj is self._view.viewport() and event.type() == QEvent.Type.Leave:
+            self._clear_hover()
+        return super().eventFilter(obj, event)
 
     # ----- filters -----
 
