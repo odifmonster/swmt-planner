@@ -3,6 +3,28 @@
 Running notes for picking work back up across sessions: development workflow,
 project/development norms, and current progress.
 
+## Current Status
+
+Working from a clean slate on branch `combined-planners`; prior code was
+hard-reset, so ignore the git history. The only code that exists is the generic
+`support/` utilities: `hasid` (`HasID[T]` protocol), `counters` (`Counters`,
+`mk_counter`), and `observable` (`Observer` / `Observable`). Python 3.12+
+(uses native generic syntax).
+
+Done so far:
+
+- **PLAN.md** — whole-project plan: five phases, plus Phase 1 deliverables and
+  the development order within Phase 1.
+- **DESIGN.md** (top level) — the four modules (`support`, `core`, `planners`,
+  `app`) and what each owns.
+- **support/workcal/DESIGN.md** — design complete: the `holiday` submodule
+  (`Holiday`/`FixedDate`/`FlexDate` frozen dataclasses + `load_holidays`) and the
+  `WorkCal` class, including per-method details. No code written yet.
+
+Next up: implement `support/workcal/` (the first step of Phase 1's internals),
+following design → code → coverage → test. The `workcal` design is reviewed and
+ready to implement.
+
 ## Development Workflow
 
 A **plan** is written only for sufficiently-large pieces of work (e.g. major
