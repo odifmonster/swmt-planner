@@ -7,8 +7,7 @@ name = "swmtplanner"
 version = "2.0.0"
 requires-python = ">=3.12"
 dependencies = [
-    "pandas[excel]>=2.3.2",
-    "typer>=0.17.3"
+    "pandas[excel]>=2.3.2"
 ]
 authors = [
     {name = "Lam An Wyner", email = "lwyner@shawmutcorporation.com"},
@@ -23,6 +22,3 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3"
 ]
-
-[project.scripts]
-plan = "swmtplanner.planners.cli:app"
