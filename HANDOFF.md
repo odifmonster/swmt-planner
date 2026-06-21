@@ -19,11 +19,21 @@ Done so far:
   `app`) and what each owns.
 - **support/workcal/DESIGN.md** — design complete: the `holiday` submodule
   (`Holiday`/`FixedDate`/`FlexDate` frozen dataclasses + `load_holidays`) and the
-  `WorkCal` class, including per-method details. No code written yet.
+  `WorkCal` class, including per-method details.
+- **support/workcal/holiday/** — implemented (`holiday.py` + `__init__` re-export
+  + `__init__.pyi` stub). Reviewed.
+- **support/workcal/workcal.py** — `WorkCal` fully implemented and reviewed: the
+  constructor + read-only properties, `is_workday` (with lazy holiday-ordinal
+  caching), `offset_work_days`, `offset_work_hours`, `get_work_hours_between`, and
+  `avail_hours_before_weekend`. The hour-based methods apply `cal_shift` by
+  transforming into "aligned" coordinates (`aligned = real - cal_shift`), running
+  the calendar there, then transforming back. Stub in `workcal/__init__.pyi`.
 
-Next up: implement `support/workcal/` (the first step of Phase 1's internals),
-following design → code → coverage → test. The `workcal` design is reviewed and
-ready to implement.
+`support/workcal/` is code-complete (the first step of Phase 1's internals).
+Note: `workcal/__init__` re-exports the `workcal`/`holiday` names but `support/
+__init__.py` does not yet surface `workcal`.
+
+Next up: the `workcal` COVERAGE.md test spec, then the `unittest` tests.
 
 ## Development Workflow
 
