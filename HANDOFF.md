@@ -17,6 +17,19 @@ Done so far:
   the development order within Phase 1.
 - **DESIGN.md** (top level) — the four modules (`support`, `core`, `planners`,
   `app`) and what each owns.
+- **core/DESIGN.md** — `core`'s five submodules and what each owns: `product`
+  (static style definitions), `materials` (physical quantities, in inventory and
+  on the schedule), `demand` (order fulfillment status), `schedule` (machines +
+  job-placement logic), `debuglog` (self-contained decision-log architecture as
+  linked tables). Each defines abstract concepts + concrete planner-specific
+  subclasses and gets its own `DESIGN.md`; only `product`'s is written so far.
+- **core/product/DESIGN.md** — design complete for both submodules: `greige`
+  (`Greige` style implementing `HasID[str]` + the `BeamConfig` frozen dataclass)
+  and `fabric` (`Fabric` implementing `HasID[str]`, the `Color` frozen dataclass,
+  and the shade-rating int constants `EXTRA_LIGHT`/`LIGHT`/`MEDIUM`/`BLACK`/
+  `SD_BLACK`, values intentionally undefined for now). `yds_per_lb` is computed
+  in the `Fabric` constructor as `36 * 16 / (oz_sq_yd * width) * yld_pct`.
+  `Color.get_needed_strip` will take a `JetState` (deferred — not yet defined).
 - **support/workcal/DESIGN.md** — design complete: the `holiday` submodule
   (`Holiday`/`FixedDate`/`FlexDate` frozen dataclasses + `load_holidays`) and the
   `WorkCal` class, including per-method details.
@@ -29,11 +42,21 @@ Done so far:
   transforming into "aligned" coordinates (`aligned = real - cal_shift`), running
   the calendar there, then transforming back. Stub in `workcal/__init__.pyi`.
 
-`support/workcal/` is code-complete (the first step of Phase 1's internals).
-Note: `workcal/__init__` re-exports the `workcal`/`holiday` names but `support/
-__init__.py` does not yet surface `workcal`.
+- **support/workcal/tests/** — `COVERAGE.md` (Section 1 `holiday`, Section 2
+  `WorkCal`) plus `holiday_tests.py` and `workcal_tests.py`. Full suite passes
+  (40 tests: 10 holiday + 30 WorkCal). Test method docstrings cite their
+  COVERAGE numbers.
 
-Next up: the `workcal` COVERAGE.md test spec, then the `unittest` tests.
+`support/workcal/` is **complete** through design → code → coverage → test (the
+first step of Phase 1's internals). `support/__init__` now surfaces `workcal`
+(plus flattened `WorkCal`/`holiday`).
+
+Run the suite with:
+`PYTHONPATH=src python3 -m unittest src/swmtplanner/support/workcal/tests/holiday_tests.py src/swmtplanner/support/workcal/tests/workcal_tests.py`
+
+Next up: implement `core/product/` (the `greige` and `fabric` submodules) from
+the reviewed design, following code → coverage → test. Remaining `core`
+submodules (`materials`, `demand`, `schedule`, `debuglog`) are not yet designed.
 
 ## Development Workflow
 
@@ -89,3 +112,22 @@ Each `DESIGN.md` follows this structure:
    own `DESIGN.md`, that section's body just points to that document.
 
 Additional sections are added per-document where necessary.
+
+### Code & stub layout
+
+The package uses a `src/` layout (`src/swmtplanner/...`) and ships type stubs.
+Conventions:
+
+- **Per-module stubs.** Each implementation `.py` file has a sibling `.pyi` stub
+  of the same name (e.g. `counters.py` → `counters.pyi`) that carries the type
+  signatures and docstrings. Implementation `.py` files are kept lean — no
+  docstrings; the docstrings live in the stub.
+- **Package `__init__` files re-export.** A package's `__init__.py` imports and
+  re-exports the names from its submodules (and may flatten / re-expose
+  sub-package names), with an explicit `__all__`.
+- **`__init__.pyi` mirrors `__init__.py`.** Each `__init__.pyi` is an import
+  aggregator that mirrors its `__init__.py` exactly — same imports and same
+  `__all__` — pulling the names through from the per-module `.pyi` stubs. When the
+  `__init__.py` exports change, update the matching `__init__.pyi` to match.
+- **Tests** live in a `tests/` subpackage of the module they cover and need no
+  stubs.

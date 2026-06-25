@@ -1,3 +1,5 @@
 # libraries needed in the dev environment
 
 pandas[excel]>=2.3.2
+pymupdf4llm>=1.27.0.0
+jupyterlab>=4.6.0

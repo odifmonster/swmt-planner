@@ -1,4 +1,4 @@
-from . import support
+from . import support, core
 
 
-__all__ = ['support']
+__all__ = ['support', 'core']
