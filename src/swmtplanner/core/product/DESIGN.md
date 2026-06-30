@@ -62,11 +62,11 @@ No dedicated `DESIGN.md`; documented here.
 
 - Constants — shade ratings (integer constants, ordered lightest → darkest):
   ```python
-  EXTRA_LIGHT: int
-  LIGHT: int
-  MEDIUM: int
-  BLACK: int
-  SD_BLACK: int
+  EXTRA_LIGHT = 0
+  LIGHT = 1
+  MEDIUM = 2
+  BLACK = 3
+  SD_BLACK = 4
   ```
 - Functions:
   ```python
@@ -164,9 +164,9 @@ Defines finished fabric styles and the colors they are dyed to.
 ### Shade rating constants
 
 Integer constants naming the shade-rating levels, ordered from lightest to
-darkest: `EXTRA_LIGHT`, `LIGHT`, `MEDIUM`, `BLACK`, `SD_BLACK`. A `Color`'s
-`shade_rating` is one of these. Their specific integer values are intentionally
-left undefined for now (they may change in the future).
+darkest and assigned `0`–`4` in that order: `EXTRA_LIGHT = 0`, `LIGHT = 1`,
+`MEDIUM = 2`, `BLACK = 3`, `SD_BLACK = 4`. A `Color`'s `shade_rating` is one of
+these.
 
 ### `Color`
 
