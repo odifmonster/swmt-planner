@@ -46,7 +46,7 @@ schedule. For example, a `GreigeRoll` is raw material available in inventory to
 be dyed, or assigned as part of a dye lot on a schedule — whereas a `Greige`
 style (in `product`) is simply a description of the style such a roll might be.
 
-See `src/swmtplanner/core/materials/DESIGN.md`. *(Not yet written.)*
+See `src/swmtplanner/core/materials/DESIGN.md`.
 
 ### `demand`
 Tracks the fulfillment status of orders: how much is left of hard requirements,

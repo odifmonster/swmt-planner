@@ -27,9 +27,12 @@ Done so far:
   (`Greige` style implementing `HasID[str]` + the `BeamConfig` frozen dataclass)
   and `fabric` (`Fabric` implementing `HasID[str]`, the `Color` frozen dataclass,
   and the shade-rating int constants `EXTRA_LIGHT`/`LIGHT`/`MEDIUM`/`BLACK`/
-  `SD_BLACK`, values intentionally undefined for now). `yds_per_lb` is computed
-  in the `Fabric` constructor as `36 * 16 / (oz_sq_yd * width) * yld_pct`.
-  `Color.get_needed_strip` will take a `JetState` (deferred — not yet defined).
+  `SD_BLACK` = 0–4). `yds_per_lb` is computed in the `Fabric` constructor as
+  `36 * 16 / (oz_sq_yd * width) * yld_pct`. `Color.get_needed_strip` will take a
+  `JetState` (deferred — not yet defined). Each submodule also owns cross-system
+  name translations (in `translation.py`): `greige` has variant→master and
+  alt-greige→`Greige`; `fabric` has ply1→`Fabric`. Lookups return `None` on a
+  missing key (convention local to these translation functions).
 - **support/workcal/DESIGN.md** — design complete: the `holiday` submodule
   (`Holiday`/`FixedDate`/`FlexDate` frozen dataclasses + `load_holidays`) and the
   `WorkCal` class, including per-method details.
@@ -47,16 +50,27 @@ Done so far:
   (40 tests: 10 holiday + 30 WorkCal). Test method docstrings cite their
   COVERAGE numbers.
 
-`support/workcal/` is **complete** through design → code → coverage → test (the
-first step of Phase 1's internals). `support/__init__` now surfaces `workcal`
-(plus flattened `WorkCal`/`holiday`).
+- **core/product/greige/** & **core/product/fabric/** — implemented: classes in
+  `greige.py`/`fabric.py`, translation functions in each `translation.py`, with
+  sibling `.pyi` stubs and `__init__` re-export pairs. Each `.py` has its own
+  `.pyi` per the Code & stub layout convention.
+- **core/product/tests/** — `COVERAGE.md` (Section 1 `greige`, Section 2
+  `fabric`) plus `greige_tests.py` and `fabric_tests.py` (17 tests). Docstrings
+  cite their COVERAGE numbers.
 
-Run the suite with:
-`PYTHONPATH=src python3 -m unittest src/swmtplanner/support/workcal/tests/holiday_tests.py src/swmtplanner/support/workcal/tests/workcal_tests.py`
+`support/workcal/` and `core/product/` are both **complete** through
+design → code → coverage → test. Full suite passes (57 tests: 40 workcal + 17
+product). `support/__init__` surfaces `workcal` (plus flattened `WorkCal`/
+`holiday`); `core/product/__init__` surfaces `greige` (plus flattened `Greige`).
+`swmtplanner/__init__` still exposes only `support` (not `core`) — left for the
+user to curate.
 
-Next up: implement `core/product/` (the `greige` and `fabric` submodules) from
-the reviewed design, following code → coverage → test. Remaining `core`
-submodules (`materials`, `demand`, `schedule`, `debuglog`) are not yet designed.
+Run the full suite with:
+`PYTHONPATH=src python3 -m unittest src/swmtplanner/support/workcal/tests/holiday_tests.py src/swmtplanner/support/workcal/tests/workcal_tests.py src/swmtplanner/core/product/tests/greige_tests.py src/swmtplanner/core/product/tests/fabric_tests.py`
+
+Next up: design the next `core` submodule. Per the materials/inventory focus of
+Phase 1's internals, `materials` is the natural next piece (`materials`,
+`demand`, `schedule`, `debuglog` are all still undesigned).
 
 ## Development Workflow
 
