@@ -1,4 +1,5 @@
 from . import product
+from . import materials
 
 
-__all__ = ['product']
+__all__ = ['product', 'materials']

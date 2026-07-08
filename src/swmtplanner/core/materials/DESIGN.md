@@ -39,21 +39,21 @@ No dedicated `DESIGN.md`; documented here.
 - Classes:
   ```python
   class RawMat(HasID[str | int]):
-      def __init__(self, id: str | int, sku: str, avail_date: date,
+      def __init__(self, id: str | int, sku: str, avail_date: datetime,
                    qty: float, unit: str): ...
       @property
       def id(self) -> str | int: ...
       @property
       def sku(self) -> str: ...
       @property
-      def avail_date(self) -> date: ...
+      def avail_date(self) -> datetime: ...
       @property
       def qty(self) -> float: ...
       @property
       def unit(self) -> str: ...
 
   class GreigeRoll(RawMat):
-      def __init__(self, id: str, sku: str, avail_date: date, qty: float,
+      def __init__(self, id: str, sku: str, avail_date: datetime, qty: float,
                    plant: str, variant: str, yarn_merge: int,
                    greige: Greige | None): ...
       # unit is always 'lbs'
@@ -67,6 +67,8 @@ No dedicated `DESIGN.md`; documented here.
       def yarn_merge(self) -> int: ...
       @property
       def greige(self) -> Greige | None: ...
+      @property
+      def single_target(self) -> float: ...  # per-port target weight for the style
       @property
       def size(self) -> int: ...          # SMALL / STANDARD / LARGE, from avg_port_wt
       @property
@@ -83,7 +85,7 @@ No dedicated `DESIGN.md`; documented here.
       @property
       def plant(self) -> str | None: ...    # None when the lot is empty
       @property
-      def avail_date(self) -> date | None: ...   # max avail_date; None when empty
+      def avail_date(self) -> datetime | None: ...   # max avail_date; None when empty
       @property
       def total_lbs(self) -> float: ...     # 0 when empty
       @property
@@ -126,6 +128,9 @@ it adds these read-only properties:
 - `yarn_merge` — the yarn merge.
 - `greige` — the `Greige` style this roll is, or `None` for styles we don't knit
   / don't have the data for.
+- `single_target` — the per-port target weight for the roll's style (see the
+  size classification below): `greige.tgt_wt` (or `DEFAULT_ROLL_WT` if `greige`
+  is `None`) for single-port styles, or half that for double-port styles.
 - `size` — the roll size, one of `SMALL` (0), `STANDARD` (1), `LARGE` (2).
   Computed from `avg_port_wt` (see below).
 - `n_ports` — the number of ports the roll spans: `max(1, round(qty /

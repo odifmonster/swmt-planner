@@ -13,7 +13,8 @@ grouped according to the values of certain attributes. Using `select_where(...)`
 callers extract the `RawMat` objects that meet all the provided conditions — each
 condition being either equality with a specific value or membership in a range of
 values. The conditions are of type `Condition`, a union of the `Exactly`,
-`Greater`, `Less`, and `InRange` dataclasses (see Conditions below).
+`NotExactly`, `Greater`, `Less`, and `InRange` dataclasses (see Conditions
+below).
 
 The `group` sub-submodule holds the group types that back an `Inventory`.
 
@@ -24,12 +25,17 @@ The `group` sub-submodule holds the group types that back an `Inventory`.
 - Constants: none.
 - Type aliases:
   ```python
-  Condition = Exactly | Greater | Less | InRange
+  Condition = Exactly | NotExactly | Greater | Less | InRange
   ```
 - Classes:
   ```python
   @dataclass(frozen=True)
   class Exactly:
+      val: Any
+      def to_func(self) -> Callable[[Any], bool]: ...
+
+  @dataclass(frozen=True)
+  class NotExactly:
       val: Any
       def to_func(self) -> Callable[[Any], bool]: ...
 
@@ -101,7 +107,8 @@ class ValGroup[T: RawMat](Group[T]): ...      # maps attribute values -> sets of
 class SortedGroup[T: RawMat](Group[T]): ...   # keeps a list sorted by attr
 
 class GreigeGroup(ValGroup[GreigeRoll]):      # keyed on the roll's sku (greige style)
-    def transform_rolls(self) -> None: ...
+    @property
+    def skus(self) -> set[str]: ...
     def prepare_dye_pool(self) -> None: ...
     def dye_lots(self, style: str) -> list[set[GreigeRoll]]: ...
     def has_cached_lots(self, style: str) -> bool: ...
@@ -113,16 +120,25 @@ lives alongside its parent `ValGroup` in this sub-submodule.
 ## `Inventory[T]`
 
 Holds a set of `RawMat` objects grouped according to the values of certain
-attributes. `T` is bound to `RawMat`.
+attributes. `T` is bound to `RawMat`. Internally it maintains a map of ids to
+`RawMat` objects (for fast lookup and to recover each attribute's value when
+removing) plus one group per grouped/sorted attribute.
 
-- **Initialization** — takes a list of `grouped` attributes and a list of
-  `sorted` attributes. *(How these drive the internal grouping/sorting is TBD.)*
-- `add(mat)` — add a `RawMat` to the inventory.
-- `remove(id)` — remove and return the `RawMat` with the given `id`.
+- **Initialization** — takes a list of `grouped` attributes (each backed by a
+  `ValGroup`) and a list of `sorted` attributes (each backed by a `SortedGroup`).
+- `add(mat)` — add a `RawMat` to the inventory (and to every group). Raises
+  `ValueError` if a material with the same `id` is already present.
+- `remove(id)` — remove and return the `RawMat` with the given `id`. Raises
+  `KeyError` if no material with that `id` is in the inventory. It looks up the
+  stored material, then removes it from each group by passing that group's
+  attribute value alongside the `id`.
 - `select_where(attr1=val_or_cond1, attr2=val_or_cond2, ...)` — return the list
   of `RawMat` objects meeting all the provided conditions. Each keyword value is
   either a `Condition` or a plain value; a plain value is treated as
-  `Exactly(value)`, inferred and constructed internally. (See Conditions below.)
+  `Exactly(value)`, inferred and constructed internally. The results are the
+  intersection of each attribute's matching set. With no conditions it returns
+  all materials; a keyword naming an attribute with no group raises. (See
+  Conditions below.)
 
 ## `GreigeInv`
 
@@ -134,9 +150,23 @@ greige rolls and surfaces the dye-lot operations at the inventory level.
   The `sku` is a special case, handled by a `GreigeGroup` rather than a plain
   `ValGroup`.
 - **Sorted attributes**: `qty`, `avail_date`.
-- `transform_rolls()`, `prepare_dye_pool()`, `dye_lots(style)`,
-  `has_cached_lots(style)` — delegate to the `sku`-keyed `GreigeGroup`, so all the
-  dye-lot operations are reachable from the inventory level.
+- `transform_rolls()` — perform the `split` / `combine` operations that bring
+  off-size rolls to a standard size, getting as many rolls as possible to
+  `STANDARD`. This lives on `GreigeInv` (not `GreigeGroup`) so it can actually
+  `remove` the off-size rolls, transform them, and `add` the results back —
+  keeping `_by_id` and every group consistent. It may be inefficient: it only
+  runs once (rolls expected to arrive at a future date are assumed already
+  standard). For each `sku`:
+  1. Test every pairing of the sku's off-size (non-`STANDARD`) rolls; whenever
+     `combine`-ing a pair yields a standard-size roll, remove the two originals
+     and add the combined roll.
+  2. On the rolls still off-size, test every pairing again, this time allowing up
+     to `MAX_TRIM_LBS` (30) lbs to be removed (split off) from one roll before
+     combining, to land the result at a standard size. The removed portion
+     (<= `MAX_TRIM_LBS`) is discarded as waste.
+- `prepare_dye_pool()`, `dye_lots(style)`, `has_cached_lots(style)` — delegate to
+  the `sku`-keyed `GreigeGroup`, so those dye-lot operations are reachable from
+  the inventory level.
 - `create_roll(sku, avail_date, qty, plant, greige)` — construct and return a
   `GreigeRoll` for a roll that is needed but not currently in inventory (created
   the moment it is needed and discarded if unnecessary). The caller supplies every
@@ -151,7 +181,7 @@ greige rolls and surfaces the dye-lot operations at the inventory level.
 
 ## Conditions
 
-`Condition` is not a real class but a type alias for the union of four
+`Condition` is not a real class but a type alias for the union of five
 dataclasses, each describing a constraint on an attribute value. The types of
 `val`, `lo`, and `hi` are left as `Any`, since they depend on the attribute being
 matched. Each dataclass provides `to_func()`, which returns a function that
@@ -160,6 +190,7 @@ returns `True` iff the passed value meets the condition the dataclass describes.
 - `Exactly(val)` — the value equals `val`. `Exactly` can be passed directly to
   `select_where`, and is also what `select_where` infers/constructs internally
   when it receives a plain `attr=val` keyword pair.
+- `NotExactly(val)` — the value does not equal `val`.
 - `Greater(lo, incl=False)` — the value is greater than `lo`, or `>= lo` when
   `incl` is `True`.
 - `Less(hi, incl=False)` — the value is less than `hi`, or `<= hi` when `incl` is
@@ -187,7 +218,10 @@ differently.
   value that object has for `attr`. It takes both arguments because it is only
   ever called from `Inventory.remove` — the `Inventory` maintains its own
   id → `RawMat` map for efficient removal, so it already knows the object's `attr`
-  value and the group can locate the entry via `val` without scanning.
+  value and the group can locate the entry via `val` without scanning. It raises
+  `KeyError` if no such material is found at `val`: since `Inventory` only calls
+  this for ids it holds, a miss means an external caller mutated the object and
+  broke the grouping, and that must not pass silently.
 - `get_group(cond)` — return the set of `RawMat` objects matching the given
   `Condition`. The plain-value → `Exactly` inference happens upstream in
   `Inventory`, so a group always receives a `Condition`.
@@ -206,8 +240,9 @@ cost of `Exactly` selections.
 ### `GreigeGroup`
 
 A planner-specific `ValGroup[GreigeRoll]` keyed on the roll's `sku` (the greige
-style). It brings off-size rolls to a standard size and assembles the rolls of
-each style into dye lots.
+style). It assembles the rolls of each style into dye lots. (Bringing off-size
+rolls to standard is done by `GreigeInv.transform_rolls` before grouping, since
+that must mutate the whole inventory.)
 
 A **dye lot** loads several rolls across the ports of a dye jet. There is a hard
 global limit: no jet port may be loaded with less than `MIN_PORT_LBS` (300) or
@@ -218,19 +253,12 @@ evenly — all within `PORT_EVEN_TOL` (10) lbs of one another. A set of
 `PORT_EVEN_TOL` of one another (so that, once divided across their ports, every
 port carries a legal and roughly equal weight).
 
-- `transform_rolls()` — perform the `split` / `combine` operations that bring
-  off-size rolls to a standard size, getting as many rolls as possible to
-  `STANDARD`. This may be inefficient: it only runs once (rolls expected to arrive
-  at a future date are assumed to already be standard size). For each `sku`:
-  1. Test every pairing of the sku's off-size (non-`STANDARD`) rolls; whenever
-     `combine`-ing a pair yields a standard-size roll, combine them.
-  2. On the rolls still off-size, test every pairing again, this time allowing up
-     to `MAX_TRIM_LBS` (30) lbs to be removed (split off) from one roll before
-     combining, to land the result at a standard size. The removed portion
-     (<= `MAX_TRIM_LBS`) is discarded as waste.
-- `prepare_dye_pool()` — group each style's (post-`transform_rolls`) rolls into
-  valid dye lots and cache the lots per greige style. Does not itself split or
-  combine.
+- `skus` — the set of `sku` values currently in the group (read-only), so callers
+  (e.g. `GreigeInv.transform_rolls`) can iterate over the styles to combine/split
+  rolls within each one.
+- `prepare_dye_pool()` — group each style's rolls (after
+  `GreigeInv.transform_rolls` has run) into valid dye lots and cache the lots per
+  greige style. Does not itself split or combine.
 - `dye_lots(style)` — return the cached list of the largest disjoint sets of
   compatible greige rolls for `style`.
 - `has_cached_lots(style)` — whether valid cached lots exist for `style`. Callers
