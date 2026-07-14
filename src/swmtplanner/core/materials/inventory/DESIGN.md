@@ -233,9 +233,14 @@ This makes `Exactly` selections efficient (direct keyed lookup).
 
 ### `SortedGroup[T]`
 
-Maintains a list of `RawMat` objects sorted according to the selected attribute.
-This makes the range conditions (`Greater`, `Less`, `InRange`) efficient, at the
-cost of `Exactly` selections.
+Maintains a list of `(key, object)` pairs sorted by the attribute value, where
+the key is **snapshotted at `add` time** rather than re-read from the live
+object. This makes the range conditions (`Greater`, `Less`, `InRange`) efficient
+(at the cost of `Exactly` selections) and, because the stored key no longer
+tracks the live attribute, lets `remove` detect an externally-mutated key: the
+current value passed by `Inventory` no longer matches the snapshot, so the object
+is not found at that value and `remove` raises `KeyError` (the same
+broken-grouping guard `ValGroup` provides).
 
 ### `GreigeGroup`
 
@@ -244,14 +249,15 @@ style). It assembles the rolls of each style into dye lots. (Bringing off-size
 rolls to standard is done by `GreigeInv.transform_rolls` before grouping, since
 that must mutate the whole inventory.)
 
-A **dye lot** loads several rolls across the ports of a dye jet. There is a hard
-global limit: no jet port may be loaded with less than `MIN_PORT_LBS` (300) or
-more than `MAX_PORT_LBS` (400) lbs of fabric. The ports must also be loaded
-evenly — all within `PORT_EVEN_TOL` (10) lbs of one another. A set of
-**compatible** rolls is therefore one where every roll's `avg_port_wt` is between
-`MIN_PORT_LBS` and `MAX_PORT_LBS`, and all their `avg_port_wt` values are within
-`PORT_EVEN_TOL` of one another (so that, once divided across their ports, every
-port carries a legal and roughly equal weight).
+A **dye lot** loads several rolls across the ports of a dye jet at one plant.
+There is a hard global limit: no jet port may be loaded with less than
+`MIN_PORT_LBS` (300) or more than `MAX_PORT_LBS` (400) lbs of fabric. The ports
+must also be loaded evenly — all within `PORT_EVEN_TOL` (10) lbs of one another.
+A set of **compatible** rolls is therefore one that shares a `plant` (a lot
+cannot mix plants, matching `DyeLot`'s invariant), where every roll's
+`avg_port_wt` is between `MIN_PORT_LBS` and `MAX_PORT_LBS`, and all their
+`avg_port_wt` values are within `PORT_EVEN_TOL` of one another (so that, once
+divided across their ports, every port carries a legal and roughly equal weight).
 
 - `skus` — the set of `sku` values currently in the group (read-only), so callers
   (e.g. `GreigeInv.transform_rolls`) can iterate over the styles to combine/split
@@ -269,18 +275,20 @@ Adding or removing a `GreigeRoll` (via the inherited `add` / `remove`) invalidat
 the cached dye lots for the affected style.
 
 **Grouping algorithm (`prepare_dye_pool`).** Within a style, a valid dye lot is a
-set of rolls whose `avg_port_wt` values all lie in `[MIN_PORT_LBS, MAX_PORT_LBS]`
-and within a `PORT_EVEN_TOL`-lb window of one another (`max - min <=
-PORT_EVEN_TOL`). Since both constraints depend only on `avg_port_wt`, optimal lots
-are contiguous runs once the rolls are sorted by `avg_port_wt`. Two options:
+set of rolls that share a `plant` and whose `avg_port_wt` values all lie in
+`[MIN_PORT_LBS, MAX_PORT_LBS]` and within a `PORT_EVEN_TOL`-lb window of one
+another (`max - min <= PORT_EVEN_TOL`). Given a fixed plant, the remaining
+constraints depend only on `avg_port_wt`, so optimal lots are contiguous runs
+once the rolls are sorted by `avg_port_wt`. Two options:
 
 - *Greedy sweep (proposed default).* First discard any roll whose `avg_port_wt`
   is outside `[MIN_PORT_LBS, MAX_PORT_LBS]` — it cannot be legally loaded into any
-  lot. Sort the rest by `avg_port_wt` (`O(n log n)`), then sweep left to right,
-  adding each roll to the current lot while it stays within `PORT_EVEN_TOL` lbs of
-  that lot's smallest roll, otherwise closing the lot and opening a new one at
-  that roll (`O(n)` after the sort). This minimizes the number of lots for the fixed 10-lb window and so
-  yields the largest lots — matching "largest disjoint sets."
+  lot. Partition the rest by `plant`, and within each plant sort by `avg_port_wt`
+  (`O(n log n)`) and sweep left to right, adding each roll to the current lot
+  while it stays within `PORT_EVEN_TOL` lbs of that lot's smallest roll, otherwise
+  closing the lot and opening a new one at that roll (`O(n)` after the sort). This
+  minimizes the number of lots per plant for the fixed 10-lb window and so yields
+  the largest lots — matching "largest disjoint sets."
 - *1-D DP (if constraints/objectives grow).* If lots later gain a jet
   port-capacity cap, or we want to optimize a specific objective (maximize full
   lots, balance lot sizes, etc.), run a DP over the sorted rolls:

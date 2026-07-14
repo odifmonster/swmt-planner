@@ -34,20 +34,23 @@ class GreigeGroup(ValGroup[GreigeRoll]):
                 self._lots[sku] = self._compute_lots(rolls)
 
     def _compute_lots(self, rolls) -> list[set[GreigeRoll]]:
-        eligible = sorted(
-            (r for r in rolls if MIN_PORT_LBS <= r.avg_port_wt <= MAX_PORT_LBS),
-            key=lambda r: r.avg_port_wt,
-        )
+        by_plant = {}
+        for roll in rolls:
+            if MIN_PORT_LBS <= roll.avg_port_wt <= MAX_PORT_LBS:
+                by_plant.setdefault(roll.plant, []).append(roll)
         lots = []
-        current = []
-        for roll in eligible:
-            if current and roll.avg_port_wt - current[0].avg_port_wt > PORT_EVEN_TOL:
+        for plant_rolls in by_plant.values():
+            plant_rolls.sort(key=lambda r: r.avg_port_wt)
+            current = []
+            for roll in plant_rolls:
+                if (current
+                        and roll.avg_port_wt - current[0].avg_port_wt > PORT_EVEN_TOL):
+                    lots.append(set(current))
+                    current = [roll]
+                else:
+                    current.append(roll)
+            if current:
                 lots.append(set(current))
-                current = [roll]
-            else:
-                current.append(roll)
-        if current:
-            lots.append(set(current))
         return lots
 
     def dye_lots(self, style: str) -> list[set[GreigeRoll]]:

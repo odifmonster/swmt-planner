@@ -80,19 +80,30 @@ Done so far:
 - **core/product/tests/** — `COVERAGE.md` (Section 1 `greige`, Section 2
   `fabric`) plus `greige_tests.py` and `fabric_tests.py` (17 tests). Docstrings
   cite their COVERAGE numbers.
-- **core/materials/** — fully **implemented** (no tests yet). `rawmat/`
-  (`rawmat.py` `RawMat`, `greigeroll.py` `GreigeRoll` + size constants,
-  `dyelot.py` `DyeLot`) and `inventory/` (`condition.py`, `inventory.py`
-  `Inventory`, `greigeinv.py` `GreigeInv`, and the `group/` sub-submodule:
-  `group.py` `Group`/`ValGroup`/`SortedGroup`, `greigegroup.py` `GreigeGroup` +
-  port constants). Each `.py` has a sibling `.pyi`. `ValGroup`/`SortedGroup`
-  `remove` and `Inventory.remove` raise on a missing id (broken-grouping guard);
-  `Inventory.add` raises on a duplicate id. Verified via smoke tests, not yet a
-  `unittest` suite.
+- **core/materials/** — implemented. `rawmat/` (`rawmat.py` `RawMat`,
+  `greigeroll.py` `GreigeRoll` + size/classification constants + public
+  `single_target`, `dyelot.py` `DyeLot`) and `inventory/` (`condition.py`,
+  `inventory.py` `Inventory`, `greigeinv.py` `GreigeInv`, and the `group/`
+  sub-submodule: `group.py` `Group`/`ValGroup`/`SortedGroup`, `greigegroup.py`
+  `GreigeGroup` + port constants). Each `.py` has a sibling `.pyi`.
+  `ValGroup`/`SortedGroup` `remove` and `Inventory.remove` raise on a missing id
+  (broken-grouping guard); `Inventory.add` raises on a duplicate id.
+  - Two behaviors were changed while writing tests: (a) `SortedGroup` now
+    **snapshots each element's key at `add` time** (stores `(key, mat)` pairs) so
+    a mutated sort-key is caught by the `remove` guard, matching `ValGroup`;
+    (b) `GreigeGroup.prepare_dye_pool` now **partitions dye lots by `plant`**
+    (bucket by plant, then greedy-sweep `avg_port_wt` within each), consistent
+    with `DyeLot`'s and `transform_rolls`' plant invariant.
+- **core/materials/tests/** — `COVERAGE.md` (Section 1 `RawMat`, Section 2
+  `GreigeRoll`, Section 3 `DyeLot`) + `rawmat_tests.py`, `greigeroll_tests.py`,
+  `dyelot_tests.py`.
+- **core/materials/inventory/tests/** — `COVERAGE.md` (Section 1 `Condition`s,
+  Section 2 `ValGroup`/`SortedGroup`, Section 3 `Inventory`, Section 4
+  `GreigeGroup`/`GreigeInv`) + `condition_tests.py`, `group_tests.py`,
+  `inventory_tests.py`, `greigegroup_tests.py`, `greigeinv_tests.py`.
 
-`support/workcal/` and `core/product/` are **complete** through
-design → code → coverage → test; `core/materials/` is design + code complete,
-tests pending. Full test suite passes (57 tests: 40 workcal + 17 product).
+`support/workcal/`, `core/product/`, and `core/materials/` are all **complete**
+through design → code → coverage → test. Full test suite passes (119 tests).
 `support/__init__` surfaces `workcal` (plus flattened `WorkCal`/`holiday`);
 `core/product/__init__` surfaces `greige` (plus flattened `Greige`); `core/__init__`
 surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
@@ -101,11 +112,11 @@ surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
 user to curate.
 
 Run the full suite with:
-`PYTHONPATH=src python3 -m unittest src/swmtplanner/support/workcal/tests/holiday_tests.py src/swmtplanner/support/workcal/tests/workcal_tests.py src/swmtplanner/core/product/tests/greige_tests.py src/swmtplanner/core/product/tests/fabric_tests.py`
+`PYTHONPATH=src python3 -m unittest $(find src -name '*_tests.py' | sort)`
 
-Next up: write the `core/materials/` test coverage (COVERAGE.md) and `unittest`
-suite to close out the design → code → coverage → test cycle for it. `demand`,
-`schedule`, and `debuglog` are still undesigned.
+Next up: design the next `core` submodule. `demand`, `schedule`, and `debuglog`
+are still undesigned; `demand` (order fulfillment) or `schedule` (machines +
+job placement) is the natural next piece toward the Phase 1 dyeing planner.
 
 ## Development Workflow
 
