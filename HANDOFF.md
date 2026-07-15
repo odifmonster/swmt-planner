@@ -82,7 +82,11 @@ Done so far:
   cite their COVERAGE numbers.
 - **core/materials/** — implemented. `rawmat/` (`rawmat.py` `RawMat`,
   `greigeroll.py` `GreigeRoll` + size/classification constants + public
-  `single_target`, `dyelot.py` `DyeLot`) and `inventory/` (`condition.py`,
+  `single_target`, `dyelot.py` `DyeLot` — a fabric-assignment: shared `greige`
+  (= roll `sku`) + `plant`, a settable `fabric` (raises unless
+  `fabric.greige == greige`; `add` enforces the same when a fabric is pre-set),
+  and `total_yds` = `total_lbs * fabric.yds_per_lb` or `None`) and `inventory/`
+  (`condition.py`,
   `inventory.py` `Inventory`, `greigeinv.py` `GreigeInv`, and the `group/`
   sub-submodule: `group.py` `Group`/`ValGroup`/`SortedGroup`, `greigegroup.py`
   `GreigeGroup` + port constants). Each `.py` has a sibling `.pyi`.
@@ -103,7 +107,7 @@ Done so far:
   `inventory_tests.py`, `greigegroup_tests.py`, `greigeinv_tests.py`.
 
 `support/workcal/`, `core/product/`, and `core/materials/` are all **complete**
-through design → code → coverage → test. Full test suite passes (119 tests).
+through design → code → coverage → test. Full test suite passes (124 tests).
 `support/__init__` surfaces `workcal` (plus flattened `WorkCal`/`holiday`);
 `core/product/__init__` surfaces `greige` (plus flattened `Greige`); `core/__init__`
 surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +

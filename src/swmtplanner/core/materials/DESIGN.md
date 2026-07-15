@@ -6,7 +6,8 @@ two submodules:
 - `rawmat` — the `RawMat` base class (a unit of physical raw materials) and its
   concrete implementations, starting with `GreigeRoll`. Both `RawMat` and its
   concrete subclasses are surfaced at the top level of `materials`. It also holds
-  `DyeLot`, which groups `GreigeRoll`s and tracks their aggregate qualities.
+  `DyeLot`, which groups `GreigeRoll`s assigned to produce a fabric and tracks
+  their aggregate qualities.
 - `inventory` — the `Inventory[T]` base class plus a `group` sub-submodule
   holding the abstract `Group[T]` and its `ValGroup[T]` / `SortedGroup[T]`
   implementations. Has its own `DESIGN.md`.
@@ -79,15 +80,21 @@ No dedicated `DESIGN.md`; documented here.
       def combine(self, roll: GreigeRoll) -> GreigeRoll: ...
 
   class DyeLot:
-      def __init__(self, rolls: list[GreigeRoll]): ...   # all rolls share sku and plant
+      def __init__(self, rolls: list[GreigeRoll]): ...   # all rolls share greige and plant
       @property
-      def sku(self) -> str | None: ...      # None when the lot is empty
+      def greige(self) -> str | None: ...   # shared greige style; None when empty
       @property
       def plant(self) -> str | None: ...    # None when the lot is empty
+      @property
+      def fabric(self) -> Fabric | None: ...
+      @fabric.setter
+      def fabric(self, fabric: Fabric | None) -> None: ...   # raises if it doesn't use greige
       @property
       def avail_date(self) -> datetime | None: ...   # max avail_date; None when empty
       @property
       def total_lbs(self) -> float: ...     # 0 when empty
+      @property
+      def total_yds(self) -> float | None: ...   # None without fabric; else total_lbs * yds_per_lb
       @property
       def n_ports(self) -> int: ...         # 0 when empty
       @property
@@ -174,26 +181,42 @@ build reasonably even dye lots:
 
 ### `DyeLot`
 
-A group of `GreigeRoll`s (all sharing a `sku` and a `plant`) that tracks the
-group's aggregate qualities. Constructed from a (possibly empty) list of rolls;
-the constructor validates that they all share a `sku` and a `plant`, raising
-otherwise. Read-only properties (with their empty-lot values):
+A lot of greige rolls assigned to produce a specific finished fabric. The rolls
+all share a greige style and a plant; the lot tracks their aggregate qualities
+and the `Fabric` they are assigned to produce. Constructed from a (possibly
+empty) list of rolls; the constructor validates that they all share a greige and
+a plant, raising otherwise.
 
-- `sku` — the shared `sku` of the component rolls; `None` if the lot is empty.
+Read-only properties (with their empty-lot values):
+
+- `greige` — the shared greige style of the component rolls (their `sku`); `None`
+  if the lot is empty.
 - `plant` — the shared `plant` of the component rolls; `None` if the lot is empty.
 - `avail_date` — the maximum `avail_date` among the component rolls; `None` if the
   lot is empty.
 - `total_lbs` — the total pounds across the rolls (sum of their `qty`); `0` if
   empty.
+- `total_yds` — the expected yield in yards: `None` when `fabric` is `None`,
+  otherwise `total_lbs * fabric.yds_per_lb`.
 - `n_ports` — the total number of ports the lot spans (sum of the rolls'
   `n_ports`); `0` if empty.
 - `avg_port_wt` — the average pounds per port across the lot
   (`total_lbs / n_ports`); `0` if empty.
 
+Settable property:
+
+- `fabric` — the `Fabric` these rolls are assigned to produce (initially `None`).
+  Setting it to a fabric that does not use the lot's current greige (i.e.
+  `fabric.greige != greige`) raises `ValueError`. (A greige style is identified by
+  the roll `sku`, matching `Fabric.greige`.)
+
 Methods:
 
-- `add(roll)` — add a roll to the lot. Validates the roll shares the lot's `sku`
-  and `plant` (adding to an empty lot establishes them).
+- `add(roll)` — add a roll to the lot. Validates the roll shares the lot's greige
+  and `plant` (adding to an empty lot establishes them). If a `fabric` is already
+  assigned, the roll's greige must match `fabric.greige`, otherwise `ValueError`
+  is raised (this is what enforces the invariant when `fabric` was set before any
+  rolls were added).
 - `remove(id)` — remove and return the roll with the given `id`.
 - `__iter__` — iterate over the rolls in the lot.
 

@@ -5,6 +5,7 @@ from datetime import datetime
 
 from swmtplanner.core.materials import GreigeRoll, DyeLot
 from swmtplanner.core.product.greige import Greige, BeamConfig
+from swmtplanner.core.product.fabric import Fabric
 
 _BC = BeamConfig(beamset='B', pct=1.0)
 _G700 = Greige(id='G', tgt_wt=700.0, safety=0.0, pattern='A',
@@ -20,6 +21,13 @@ def _roll(id, qty, sku='S1', plant='P1', avail=_D1):
                       variant='V', yarn_merge=1, greige=_G700)
 
 
+def _fabric(fid, greige, yld_pct=0.9):
+    # yds_per_lb = 36 * 16 / (oz_sq_yd * width) * yld_pct = 0.96 * yld_pct
+    return Fabric(id=fid, ply1_parts=(), greige=greige, style='STY', width=60.0,
+                  oz_sq_yd=10.0, yld_pct=yld_pct, name='N', number=1,
+                  shade_rating=1, jets=[])
+
+
 def _ids(lot):
     return sorted(r.id for r in lot)
 
@@ -29,7 +37,7 @@ class TestDyeLotConstruction(unittest.TestCase):
     def test_empty(self):
         """3.1.1 — empty list gives a DyeLot with default values."""
         lot = DyeLot([])
-        self.assertIsNone(lot.sku)
+        self.assertIsNone(lot.greige)
         self.assertIsNone(lot.plant)
         self.assertIsNone(lot.avail_date)
         self.assertEqual(lot.total_lbs, 0)
@@ -40,7 +48,7 @@ class TestDyeLotConstruction(unittest.TestCase):
         """3.1.2 — a single-roll lot shares all attributes with that roll."""
         r = _roll('A', 350.0)
         lot = DyeLot([r])
-        self.assertEqual(lot.sku, r.sku)
+        self.assertEqual(lot.greige, r.sku)
         self.assertEqual(lot.plant, r.plant)
         self.assertEqual(lot.avail_date, r.avail_date)
         self.assertEqual(lot.total_lbs, r.qty)
@@ -59,7 +67,7 @@ class TestDyeLotConstruction(unittest.TestCase):
         n_ports; avg_port_wt stays the rolls' value."""
         r = _roll('A', 350.0)
         lot = DyeLot([_roll('A', 350.0), _roll('B', 350.0)])
-        self.assertEqual(lot.sku, r.sku)
+        self.assertEqual(lot.greige, r.sku)
         self.assertEqual(lot.plant, r.plant)
         self.assertEqual(lot.avail_date, r.avail_date)
         self.assertEqual(lot.total_lbs, 2 * r.qty)
@@ -83,7 +91,7 @@ class TestDyeLotAddRemove(unittest.TestCase):
         lot = DyeLot([])
         r = _roll('A', 350.0)
         lot.add(r)
-        self.assertEqual(lot.sku, r.sku)
+        self.assertEqual(lot.greige, r.sku)
         self.assertEqual(lot.plant, r.plant)
         self.assertEqual(lot.avail_date, r.avail_date)
         self.assertEqual(lot.total_lbs, r.qty)
@@ -110,7 +118,7 @@ class TestDyeLotAddRemove(unittest.TestCase):
         """3.2.4 — removing the last roll returns properties to defaults."""
         lot = DyeLot([_roll('A', 350.0)])
         lot.remove('A')
-        self.assertIsNone(lot.sku)
+        self.assertIsNone(lot.greige)
         self.assertIsNone(lot.plant)
         self.assertIsNone(lot.avail_date)
         self.assertEqual(lot.total_lbs, 0)
@@ -123,7 +131,7 @@ class TestDyeLotAddRemove(unittest.TestCase):
         lot = DyeLot([_roll('A', 350.0, sku='S1', plant='P1')])
         lot.remove('A')
         lot.add(_roll('B', 350.0, sku='S2', plant='P2'))
-        self.assertEqual(lot.sku, 'S2')
+        self.assertEqual(lot.greige, 'S2')
         self.assertEqual(lot.plant, 'P2')
 
     def test_remove_from_many(self):
@@ -151,6 +159,52 @@ class TestDyeLotAddRemove(unittest.TestCase):
         self.assertEqual(_ids(lot), ['A', 'B', 'C'])
         lot.remove('A')
         self.assertEqual(_ids(lot), ['B', 'C'])
+
+    def test_add_fabric_set_wrong_greige(self):
+        """3.2.9 — fabric set, empty lot: adding a roll whose sku != fabric.greige
+        raises."""
+        lot = DyeLot([])
+        lot.fabric = _fabric('F1', greige='S1')
+        with self.assertRaises(ValueError):
+            lot.add(_roll('A', 350.0, sku='S2'))
+
+    def test_add_fabric_set_matching_greige(self):
+        """3.2.10 — fabric set, empty lot: adding a roll whose sku matches
+        fabric.greige is accepted."""
+        lot = DyeLot([])
+        lot.fabric = _fabric('F1', greige='S1')
+        lot.add(_roll('A', 350.0, sku='S1'))
+        self.assertEqual(lot.greige, 'S1')
+
+
+class TestDyeLotFabric(unittest.TestCase):
+
+    def test_set_on_empty(self):
+        """3.3.1 — fabric can be set to any style on an empty lot."""
+        lot = DyeLot([])
+        f = _fabric('F1', greige='ANY')
+        lot.fabric = f
+        self.assertIs(lot.fabric, f)
+
+    def test_set_incompatible_with_rolls(self):
+        """3.3.2 — setting a fabric whose greige mismatches the lot's rolls
+        raises."""
+        lot = DyeLot([_roll('A', 350.0, sku='S1')])
+        with self.assertRaises(ValueError):
+            lot.fabric = _fabric('F1', greige='S2')
+
+    def test_change_fabric_updates_total_yds(self):
+        """3.3.3 — changing to a different same-greige fabric updates
+        total_yds."""
+        lot = DyeLot([_roll('A', 350.0, sku='S1')])
+        f1 = _fabric('F1', greige='S1', yld_pct=0.9)
+        lot.fabric = f1
+        self.assertAlmostEqual(lot.total_yds, lot.total_lbs * f1.yds_per_lb)
+        f2 = _fabric('F2', greige='S1', yld_pct=0.95)
+        lot.fabric = f2
+        self.assertIs(lot.fabric, f2)
+        self.assertNotAlmostEqual(f1.yds_per_lb, f2.yds_per_lb)
+        self.assertAlmostEqual(lot.total_yds, lot.total_lbs * f2.yds_per_lb)
 
 
 if __name__ == '__main__':

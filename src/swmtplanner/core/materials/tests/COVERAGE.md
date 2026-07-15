@@ -61,7 +61,8 @@ Test coverage for the `core/materials/` submodules (`unittest`).
 ### 3.1 Construction
 
 1. **Empty list** — an empty list produces a `DyeLot` with the default values
-   (`sku`/`plant`/`avail_date` `None`; `total_lbs`/`n_ports`/`avg_port_wt` `0`).
+   (`greige`/`plant`/`avail_date` `None`; `total_lbs`/`n_ports`/`avg_port_wt`
+   `0`).
 2. **Single element** — a single-roll list produces a `DyeLot` that shares all its
    attributes with that `GreigeRoll`.
 3. **Mismatched rolls** — a multi-roll list with mismatched `plant`s or `sku`s
@@ -84,9 +85,23 @@ Test coverage for the `core/materials/` submodules (`unittest`).
 4. **Remove last** — removing the last roll returns all properties to their
    default values.
 5. **Remove last then add different** — removing the last roll and then adding a
-   roll with a different `plant`/`sku` changes the lot's `plant`/`sku`.
+   roll with a different `plant`/`sku` changes the lot's `plant`/`greige`.
 6. **Remove from many** — removing a roll from a `DyeLot` with at least 2 rolls
    correctly updates the aggregate properties.
 7. **Removed roll returned** — the correct roll is returned on removal.
 8. **Iteration** — a few scenarios confirming `add` / `remove` have the desired
    effect on `__iter__`.
+9. **Add with fabric set, wrong greige** — with a `fabric` assigned and no rolls
+   yet, adding a roll whose `sku` does not match `fabric.greige` raises.
+10. **Add with fabric set, matching greige** — the same setup, but a roll whose
+    `sku` matches `fabric.greige` is accepted.
+
+### 3.3 `fabric` / `total_yds`
+
+1. **Set on an empty lot** — with no rolls, `fabric` can be set to any fabric
+   style.
+2. **Set incompatible with rolls** — with rolls present, setting `fabric` to a
+   style whose greige does not match the lot's greige raises.
+3. **Change fabric with rolls** — with rolls present, `fabric` can be changed to
+   a different fabric style that uses the same greige, and `total_yds` updates
+   accordingly (recomputed from the new fabric's `yds_per_lb`).
