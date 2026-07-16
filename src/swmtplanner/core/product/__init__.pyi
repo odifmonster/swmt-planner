@@ -1,5 +1,6 @@
-from . import greige
+from . import greige, fabric
 from .greige import Greige
+from .fabric import Fabric, Color
 
 
-__all__ = ['greige', 'Greige']
+__all__ = ['greige', 'Greige', 'fabric', 'Fabric', 'Color']

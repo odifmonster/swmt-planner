@@ -1,5 +1,6 @@
 from .fabric import (
     EXTRA_LIGHT, LIGHT, MEDIUM, BLACK, SD_BLACK,
+    STRIP, EMPTY,
     Color, Fabric,
 )
 from .translation import (
@@ -9,6 +10,7 @@ from .translation import (
 
 __all__ = [
     'EXTRA_LIGHT', 'LIGHT', 'MEDIUM', 'BLACK', 'SD_BLACK',
+    'STRIP', 'EMPTY',
     'Color', 'Fabric',
     'load_ply1_translation', 'ply1_to_fabric'
 ]

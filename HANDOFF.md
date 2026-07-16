@@ -27,10 +27,20 @@ Done so far:
 - **core/product/DESIGN.md** — design complete for both submodules: `greige`
   (`Greige` style implementing `HasID[str]` + the `BeamConfig` frozen dataclass)
   and `fabric` (`Fabric` implementing `HasID[str]`, the `Color` frozen dataclass,
-  and the shade-rating int constants `EXTRA_LIGHT`/`LIGHT`/`MEDIUM`/`BLACK`/
-  `SD_BLACK` = 0–4). `yds_per_lb` is computed in the `Fabric` constructor as
-  `36 * 16 / (oz_sq_yd * width) * yld_pct`. `Color.get_needed_strip` will take a
-  `JetState` (deferred — not yet defined). Each submodule also owns cross-system
+  the shade-rating int constants `EXTRA_LIGHT`/`LIGHT`/`MEDIUM`/`BLACK`/
+  `SD_BLACK` = 0–4, and the jet-activity string constants `STRIP`/`EMPTY`).
+  `yds_per_lb` is computed in the `Fabric` constructor as
+  `36 * 16 / (oz_sq_yd * width) * yld_pct`. `Fabric` is built with a `jets` dict
+  mapping each runnable jet id to its `(min, max)` per-port load, backing
+  `can_run_on_jet` (key membership) and `load_range_on_jet` (returns the mapped
+  range, raises `ValueError` if the jet can't run the fabric).
+  `Color.get_needed_strip(state)` is fully designed: it consumes a `JetState`
+  (still deferred to `core/schedule` — the design documents only the
+  `cycles_since_strip: int` / `max_prev_shade: int | None` interface it reads)
+  and returns the list of `STRIP`/`EMPTY` prep activities needed to run the color
+  next (see the algorithm + rules + examples in the DESIGN, including the
+  single-strip-after-black edge case where `max_prev_shade == BLACK` while
+  `cycles_since_strip == 0`). Each submodule also owns cross-system
   name translations (in `translation.py`): `greige` has variant→master and
   alt-greige→`Greige`; `fabric` has ply1→`Fabric`. Lookups return `None` on a
   missing key (convention local to these translation functions).
@@ -78,8 +88,10 @@ Done so far:
   sibling `.pyi` stubs and `__init__` re-export pairs. Each `.py` has its own
   `.pyi` per the Code & stub layout convention.
 - **core/product/tests/** — `COVERAGE.md` (Section 1 `greige`, Section 2
-  `fabric`) plus `greige_tests.py` and `fabric_tests.py` (17 tests). Docstrings
-  cite their COVERAGE numbers.
+  `fabric`: 2.1 construction, 2.2 translations, 2.3 `get_needed_strip`) plus
+  `greige_tests.py` and `fabric_tests.py` (22 tests; the `get_needed_strip`
+  tests use a `_FakeJetState` stand-in exposing `cycles_since_strip` /
+  `max_prev_shade`). Docstrings cite their COVERAGE numbers.
 - **core/materials/** — implemented. `rawmat/` (`rawmat.py` `RawMat`,
   `greigeroll.py` `GreigeRoll` + size/classification constants + public
   `single_target`, `dyelot.py` `DyeLot` — a fabric-assignment: shared `greige`
@@ -107,7 +119,7 @@ Done so far:
   `inventory_tests.py`, `greigegroup_tests.py`, `greigeinv_tests.py`.
 
 `support/workcal/`, `core/product/`, and `core/materials/` are all **complete**
-through design → code → coverage → test. Full test suite passes (124 tests).
+through design → code → coverage → test. Full test suite passes (129 tests).
 `support/__init__` surfaces `workcal` (plus flattened `WorkCal`/`holiday`);
 `core/product/__init__` surfaces `greige` (plus flattened `Greige`); `core/__init__`
 surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
