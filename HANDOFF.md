@@ -121,8 +121,9 @@ Done so far:
 `support/workcal/`, `core/product/`, and `core/materials/` are all **complete**
 through design → code → coverage → test. Full test suite passes (129 tests).
 `support/__init__` surfaces `workcal` (plus flattened `WorkCal`/`holiday`);
-`core/product/__init__` surfaces `greige` (plus flattened `Greige`); `core/__init__`
-surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
+`core/product/__init__` surfaces `greige` + `fabric` (plus flattened `Greige`/
+`Fabric`/`Color`) and the `Product` union alias (`Fabric | Greige`);
+`core/__init__` surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
 `inventory` (plus flattened `RawMat`/`GreigeRoll`/`DyeLot`).
 `swmtplanner/__init__` still exposes only `support` (not `core`) — left for the
 user to curate.

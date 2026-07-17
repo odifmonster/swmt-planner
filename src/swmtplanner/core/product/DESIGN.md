@@ -15,7 +15,24 @@ hold any mutable planning state.
 
 Both submodules are documented here (neither has its own `DESIGN.md`).
 
+The package also defines `Product`, a union type alias over the concrete style
+classes, used as the generic bound for product-agnostic classes elsewhere (e.g.
+in `core.demand`).
+
 ## Core objects
+
+### Package level
+
+Defined in the package `__init__` (it spans both submodules):
+
+- Type aliases:
+  ```python
+  type Product = Fabric | Greige
+  ```
+  A union of the concrete product-style classes. `core.demand` uses it as the
+  bound for its generic classes (`RlsItem[T: Product]`, etc.). The two style
+  classes share no common interface, so this is a plain union alias rather than
+  a base class — a conceptual constraint on what a product style can be.
 
 ### `greige` submodule
 
