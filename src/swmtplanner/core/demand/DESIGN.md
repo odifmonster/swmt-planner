@@ -31,13 +31,17 @@ submodule):
 
 The views are the workhorses: they are responsible for distributing the jobs on
 the schedule across the individual orders, and `RlsItem` reports through them.
-Both share a base, `DemandView`, that holds the item, its orders, and the
-registered chunks; each concrete view defines its own `recompute` distribution
-rules.
-Schedule jobs reach the views as `Chunk[T]` records (item + availability date +
-quantity): a planner-specific `RlsItem` subclass converts its jobs into `Chunk`s
-and feeds them in via `register_chunk` / `register_chunks`, and `RlsItem`
-distributes them to the two views.
+Both share a base, `DemandView`, that holds the item and its orders; each
+concrete view defines its own `recompute` distribution rule, which takes the full
+list of `Chunk[T]`s to distribute and does not retain it.
+
+The `RlsItem` owns the chunks: schedule jobs reach it as `Chunk[T]` records
+(item + availability date + quantity) — a planner-specific `RlsItem` subclass
+converts its jobs into `Chunk`s and feeds them in via `register_chunk` /
+`register_chunks`, which keep the release's chunk list sorted by `avail_date`
+(the list starts empty and chunks are inserted one at a time, so it is always
+sorted). `RlsItem.recompute` then hands that sorted list to each view's
+`recompute`.
 
 Beneath the views are lightweight objects that simply represent individual
 requirements and their statuses — they carry no complicated logic of their own.
@@ -88,6 +92,8 @@ rather than a base class: the bound is a *conceptual* constraint on which classe
                    today: datetime,
                    due_reqs: list[tuple[float, datetime]]) -> None: ...
       @property
+      def item(self) -> T: ...
+      @property
       def raw_view(self) -> RawView[T]: ...
       @property
       def safety_view(self) -> SafetyView[T]: ...
@@ -101,8 +107,9 @@ rather than a base class: the bound is a *conceptual* constraint on which classe
       def init_on_hand(self) -> float: ...
       def register_chunk(self, chunk: Chunk[T]) -> None: ...
       def register_chunks(self, chunks: list[Chunk[T]]) -> None: ...
-      # + a planner-specific hook converting schedule jobs to Chunks (raises
-      #   NotImplementedError in the base; TBD)
+      def register_job(self, job: 'Job') -> None: ... # planner-specfic
+                                                      # raises NotImplementedError in base
+      def recompute(self) -> None: ...    # recompute both views over the held chunks
   ```
 
 Abstract classes/methods here do **not** use `ABC`; a member whose
@@ -122,21 +129,19 @@ separate `DESIGN.md`). All generic, bound to `Product`.
       def item(self) -> T: ...
       @property
       def orders(self) -> tuple[Order[T], ...]: ...
-      def clear_chunks(self) -> None: ...
-      def register_chunk(self, chunk: Chunk[T]) -> None: ...
-      def register_chunks(self, chunks: list[Chunk[T]]) -> None: ...
-      def recompute(self) -> None: ...    # raises NotImplementedError in the base
+      def recompute(self, chunks: list[Chunk[T]]) -> None: ...   # raises NotImplementedError in the base
 
   class RawView[T: Product](DemandView[T]):
       late_base: float                    # tunable lateness base; defaults to 2.0
       @property
       def lateness(self) -> float: ...    # see formula below
-      def recompute(self) -> None: ...
+      def recompute(self, chunks: list[Chunk[T]]) -> None: ...
 
   class SafetyView[T: Product](DemandView[T]):
       def __init__(self, item: T, orders: list[SafetyOrder[T]],
-                   safety_tgt: float, lead_time: timedelta,
-                   on_hand: float, today: datetime) -> None: ...
+                   safety_tgt: float, safety_on_hand: float,
+                   lead_time: timedelta, on_hand: float,
+                   today: datetime) -> None: ...
       @property
       def safety(self) -> Safety[T]: ...        # pool = safety.allocated_qty; shortfall = safety.remaining
       @property
@@ -145,7 +150,7 @@ separate `DESIGN.md`). All generic, bound to `Product`.
       def drainage(self) -> float: ...         # time-integral of pool below the safety target
       @property
       def excess(self) -> float: ...           # scalar qty beyond total demand + safety
-      def recompute(self) -> None: ...
+      def recompute(self, chunks: list[Chunk[T]]) -> None: ...
   ```
 
 ### `requirement` submodule
@@ -253,23 +258,32 @@ job → `Chunk` conversion.
     (horizon `d0` = latest order `due_date` on or before `today + lead_time`):
     cover demand through `d0` (due-date order), then top up `safety` toward
     `safety_tgt`, then cover future orders (due after `d0`). This sets
-    `covered_on_hand` on the `SafetyOrder`s **and** on the `Safety` object. Any
-    on-hand left over is simply dropped (there is no on-hand "excess" — we do not
-    penalize inventory that already exists). These `covered_on_hand` values are
+    `covered_on_hand` on the `SafetyOrder`s (they are constructed with it) **and**
+    determines the safety's covered portion, which is handed to the `SafetyView`
+    as `safety_on_hand`. Any on-hand left over is simply dropped (there is no
+    on-hand "excess" — we do not penalize inventory that already exists). These
+    `covered_on_hand` values are
     fixed for the life of the release; `recompute`'s reset does not change them.
+- `item` — the product style (`T`) this release is for (read-only).
 - `raw_view` — the `RawView[T]` (read-only).
 - `safety_view` — the `SafetyView[T]` (read-only).
 - `lead_time` — the ideal production lead time, a `timedelta` (read-only).
 - `safety_tgt` — the target safety-stock level (read-only).
 - `init_on_hand` — the starting on-hand quantity the release was constructed with
   (read-only).
-- `register_chunk(chunk)` — register one `Chunk[T]` of available supply,
-  distributing it to the views to be allocated against orders / safety.
+- The release owns the chunk list — the scheduled supply registered against the
+  item, kept sorted by `avail_date`. It starts empty, so inserting each new chunk
+  in place keeps it sorted.
+- `register_chunk(chunk)` — insert one `Chunk[T]` of available supply into the
+  release's sorted chunk list.
 - `register_chunks(chunks)` — the list convenience form of `register_chunk`.
-- A planner-specific hook converts the planner's own schedule jobs into `Chunk`s
-  to hand to the register methods. The base raises `NotImplementedError`;
-  concrete planner subclasses override it. Its signature depends on the
-  `schedule` module's job representation and is *TBD*.
+- `register_job(job)` — the planner-specific hook: convert the planner's own
+  schedule job into `Chunk`s and register them. The base raises
+  `NotImplementedError`; concrete planner subclasses override it. Its signature
+  depends on the `schedule` module's job representation and is *TBD*.
+- `recompute()` — recompute both views over the current chunk list: calls
+  `raw_view.recompute(chunks)` and `safety_view.recompute(chunks)` with the
+  release's sorted chunks.
 
 ## The `view` submodule
 
@@ -278,29 +292,25 @@ The shared base `DemandView` and the two concrete views (`RawView`,
 
 ### `DemandView[T]`
 
-The abstract base for both views. Holds the item, its orders, and the chunks
-registered against it, and exposes the machinery for (re)distributing those
-chunks. `item` and `orders` are supplied at construction (`orders` as a list,
-stored/exposed as a tuple).
+The abstract base for both views. Holds the item and its orders. `item` and
+`orders` are supplied at construction (`orders` as a list, stored/exposed as a
+tuple). The views do **not** store chunks — `recompute` receives the full chunk
+list each call.
 
 - `item` — the product style (`T`) this view is for (read-only).
 - `orders` — the view's orders, as a tuple (read-only). Concrete views narrow
   the element type (`RawOrder[T]` for `RawView`, `SafetyOrder[T]` for
   `SafetyView`).
-- Internally maintains a **sorted list of chunks** (by `avail_date`), kept in
-  order as chunks are registered/cleared.
-- `clear_chunks()` — empty the view's chunk list.
-- `register_chunk(chunk)` — insert one `Chunk[T]` into the sorted chunk list.
-- `register_chunks(chunks)` — the list convenience form of `register_chunk`.
-- `recompute()` — distribute the registered chunks across the view's
-  orders/requirements according to that view's rules. Abstract: raises
-  `NotImplementedError` in the base; each concrete view overrides it.
+- `recompute(chunks)` — distribute the given `chunks` across the view's
+  orders/requirements according to that view's rules. `chunks` is expected
+  **sorted by `avail_date`** (the `RlsItem` maintains that order). Abstract:
+  raises `NotImplementedError` in the base; each concrete view overrides it.
 
 ### `RawView[T]`
 
 Tracks whether the current schedule fills the item's hard order requirements
-late, even at the cost of draining safety stock. Distributes the registered
-chunks across the item's `RawOrder[T]`s. The main entry point for
+late, even at the cost of draining safety stock. Distributes the chunks it is
+given across the item's `RawOrder[T]`s. The main entry point for
 order-fulfillment reporting.
 
 - `late_base` — the tunable base of the lateness penalty (an instance attribute);
@@ -314,30 +324,30 @@ order-fulfillment reporting.
   applications. (Equivalently, summing `qty * late_base ** (lag.total_seconds()
   / 86400)` over each order's `late_table()` entries.) With the default
   `late_base = 2.0`, each additional day late doubles that chunk's contribution.
-- `recompute()` — the distribution algorithm:
+- `recompute(chunks)` — the distribution algorithm:
   1. Reset every order: set its `allocated_qty` to `0` and `clear_chunks()`.
-  2. Walk the view's chunks earliest → latest (by `avail_date`). For each chunk,
-     fill orders in due-date order, earliest → latest: give the current order as
-     much of the chunk as it still needs (its `remaining`), updating that order's
-     `allocated_qty` in parallel as material is assigned. When a chunk has more
-     than the current order needs, split it — carry the leftover to the next
-     order — and continue.
+  2. Walk `chunks` earliest → latest (they arrive sorted by `avail_date`). For
+     each chunk, fill orders in due-date order, earliest → latest: give the
+     current order as much of the chunk as it still needs (its `remaining`),
+     updating that order's `allocated_qty` in parallel as material is assigned.
+     When a chunk has more than the current order needs, split it — carry the
+     leftover to the next order — and continue.
   3. Because one input chunk can span several orders, a **fresh `Chunk`** (same
      `item` and `avail_date`, the split-off portion of `qty`) is created for each
      `RawOrder.add_chunk` call, so the order records only the portion allocated
      to it (and classifies it on-time/late by its own `due_date`).
 
-**Pseudo-code** (`days(δ) = δ.total_seconds() / 86400`; `self._chunks` is the
-`DemandView` chunk list, kept sorted by `avail_date`):
+**Pseudo-code** (`days(δ) = δ.total_seconds() / 86400`; `chunks` arrives sorted
+by `avail_date`):
 
 ```python
-def recompute(self):
+def recompute(self, chunks):
     for o in self.orders:
         o.allocated_qty = 0.0
         o.clear_chunks()
     by_due = sorted(self.orders, key=lambda o: o.due_date)
     i = 0                                          # earliest not-yet-full order
-    for chunk in self._chunks:
+    for chunk in chunks:
         left = chunk.qty
         while left > 0 and i < len(by_due):
             o = by_due[i]
@@ -365,16 +375,18 @@ def lateness(self):
 Tracks how well the current schedule maintains the item's desired inventory
 levels — how long safety stock stays drained when it is dipped into, and how
 long excess is carried when produced outside the ideal lead time. Distributes
-the registered chunks across the item's `SafetyOrder[T]`s and against its
+the chunks it is given across the item's `SafetyOrder[T]`s and against its
 `Safety[T]`. The main entry point for finished-goods inventory-management
-reporting. Constructed with the base `item` / `orders` plus the `safety_tgt`, the
-`lead_time`, the initial `on_hand`, and `today`; builds a `Safety[T]` from
-`safety_tgt`. The `on_hand` has two roles: it was already netted into each
-order's/safety's `covered_on_hand` at `RlsItem` construction (used by the
-chunk-distribution pass, which works against net requirements), and it enters the
-physical pool the separate `drainage` pass simulates — as a fill event at
-`today`. `today` also anchors the drainage window's start and pins past-due
-orders (see below).
+reporting. Constructed with the base `item` / `orders` plus `safety_tgt`,
+`safety_on_hand`, `lead_time`, `on_hand`, and `today`. It builds its `Safety[T]`
+from `safety_tgt` and `safety_on_hand` — the latter is the portion of on-hand the
+`RlsItem` netting assigned to safety, used as the `Safety`'s `covered_on_hand`.
+The netting is done entirely at `RlsItem` construction: the `SafetyOrder`s arrive
+with their `covered_on_hand` already set and `Safety` gets its via
+`safety_on_hand`, so the distribution pass works against net requirements. The
+raw `on_hand`, separately, is the starting level of the physical pool the
+`drainage` pass simulates — entering as a fill event at `today`, which also
+anchors the drainage window's start and pins past-due orders (see below).
 
 - `safety` — the `Safety[T]` requirement holding the safety-stock target and its
   current allocation (read-only). The total allocated to safety is its
@@ -383,10 +395,10 @@ orders (see below).
 - `carrying`, `drainage`, `excess` — the inventory-maintenance metrics defined
   below.
 
-**`recompute()` — the distribution algorithm.** After resetting every
+**`recompute(chunks)` — the distribution algorithm.** After resetting every
 `SafetyOrder`'s `allocated_qty` to `0`, the safety allocation to `0`, and the
-metrics to `0`, walk the chunks earliest → latest (by `avail_date`). For each
-chunk, in priority order:
+metrics to `0`, walk `chunks` earliest → latest (they arrive sorted by
+`avail_date`). For each chunk, in priority order:
 
 1. **Near-term demand.** Let `d` be the *latest* order `due_date` on or before
    `chunk.avail_date + lead_time`. Fill any still-unfilled demand for orders due
@@ -409,14 +421,14 @@ drained by a future order.
 on or before `horizon`, so "due `≤ horizon`" is exactly "due through `d`"):
 
 ```python
-def recompute(self):
+def recompute(self, chunks):
     for o in self.orders:
         o.allocated_qty = 0.0
     self.safety.allocated_qty = 0.0
     self._carrying = self._excess = 0.0
 
     by_due = sorted(self.orders, key=lambda o: o.due_date)
-    for chunk in self._chunks:                     # sorted by avail_date
+    for chunk in chunks:                           # sorted by avail_date
         left = chunk.qty
         horizon = chunk.avail_date + self.lead_time
         # (1) near-term demand: unfilled orders due on/before the horizon
@@ -443,7 +455,7 @@ def recompute(self):
         if left > 0:
             self._excess += left
 
-    self._drainage = self._compute_drainage()      # separate physical-pool pass
+    self._drainage = self._compute_drainage(chunks)  # separate physical-pool pass
 ```
 
 **Metrics.** (`days(δ) = δ.total_seconds() / 86400`.)
@@ -491,7 +503,7 @@ def recompute(self):
   **Pseudo-code — drainage pass** (`days` as above):
 
   ```python
-  def _compute_drainage(self):
+  def _compute_drainage(self, chunks):
       if not self.orders:
           return 0.0
       window_end = max(o.due_date for o in self.orders)   # cap at the last due date
@@ -499,7 +511,7 @@ def recompute(self):
       events =  [(self.today, +self.on_hand)]                          # on-hand fill at today
       events += [(max(o.due_date, self.today), -o.init_qty)            # full-amount drains
                  for o in self.orders]                                 #   (past-due pinned to today)
-      events += [(c.avail_date, +c.qty) for c in self._chunks]         # chunk fills
+      events += [(c.avail_date, +c.qty) for c in chunks]              # chunk fills
       events.sort(key=lambda e: (e[0], 0 if e[1] > 0 else 1))          # fills before drains on ties
 
       total, pool = 0.0, 0.0
