@@ -5,135 +5,47 @@ project/development norms, and current progress.
 
 ## Current Status
 
-Working from a clean slate on branch `combined-planners`; prior code was
-hard-reset, so ignore the git history. The only code that exists is the generic
-`support/` utilities: `hasid` (`HasID[T]` protocol), `counters` (`Counters`,
-`mk_counter`), and `observable` (`Observer` / `Observable`). Python 3.12+
-(uses native generic syntax).
+Clean slate on branch `combined-planners`; prior code was hard-reset — ignore
+git history. Python 3.12+ (native generic syntax). `support/` holds the generic
+utilities (`hasid`, `counters`, `observable`); the rest of the tree is being
+built out module by module.
 
-Done so far:
+See `PLAN.md` for the five project phases. We are in **Phase 1** (dyeing planner,
+CLI), **step 1** — building the internals: product info, demand, inventory, and
+machines/schedules. This section tracks **status only**; the per-module
+`DESIGN.md` files are the source of truth for structure and algorithms (top-level
+`DESIGN.md` covers `support`/`core`/`planners`/`app`; `core/DESIGN.md` covers
+core's five submodules). Each piece runs through the design → code → coverage →
+test cycle (see Development Workflow below); "complete" means it has been through
+all four.
 
-- **PLAN.md** — whole-project plan: five phases, plus Phase 1 deliverables and
-  the development order within Phase 1.
-- **DESIGN.md** (top level) — the four modules (`support`, `core`, `planners`,
-  `app`) and what each owns.
-- **core/DESIGN.md** — `core`'s five submodules and what each owns: `product`
-  (static style definitions), `materials` (physical quantities, in inventory and
-  on the schedule), `demand` (order fulfillment status), `schedule` (machines +
-  job-placement logic), `debuglog` (self-contained decision-log architecture as
-  linked tables). Each defines abstract concepts + concrete planner-specific
-  subclasses and gets its own `DESIGN.md`; `product`'s and `materials`' are
-  written so far.
-- **core/product/DESIGN.md** — design complete for both submodules: `greige`
-  (`Greige` style implementing `HasID[str]` + the `BeamConfig` frozen dataclass)
-  and `fabric` (`Fabric` implementing `HasID[str]`, the `Color` frozen dataclass,
-  the shade-rating int constants `EXTRA_LIGHT`/`LIGHT`/`MEDIUM`/`BLACK`/
-  `SD_BLACK` = 0–4, and the jet-activity string constants `STRIP`/`EMPTY`).
-  `yds_per_lb` is computed in the `Fabric` constructor as
-  `36 * 16 / (oz_sq_yd * width) * yld_pct`. `Fabric` is built with a `jets` dict
-  mapping each runnable jet id to its `(min, max)` per-port load, backing
-  `can_run_on_jet` (key membership) and `load_range_on_jet` (returns the mapped
-  range, raises `ValueError` if the jet can't run the fabric).
-  `Color.get_needed_strip(state)` is fully designed: it consumes a `JetState`
-  (still deferred to `core/schedule` — the design documents only the
-  `cycles_since_strip: int` / `max_prev_shade: int | None` interface it reads)
-  and returns the list of `STRIP`/`EMPTY` prep activities needed to run the color
-  next (see the algorithm + rules + examples in the DESIGN, including the
-  single-strip-after-black edge case where `max_prev_shade == BLACK` while
-  `cycles_since_strip == 0`). Each submodule also owns cross-system
-  name translations (in `translation.py`): `greige` has variant→master and
-  alt-greige→`Greige`; `fabric` has ply1→`Fabric`. Lookups return `None` on a
-  missing key (convention local to these translation functions).
-- **core/materials/DESIGN.md** & **core/materials/inventory/DESIGN.md** — design
-  complete. `materials` tracks physical raw-material quantities and has two
-  submodules:
-  - `rawmat` — abstract `RawMat(HasID[str | int])` (concrete `id`/`sku`/
-    `avail_date` (a `datetime`)/`qty`/`unit`), concrete `GreigeRoll` (str `id`;
-    `unit='lbs'`; adds `plant`/`variant`/`yarn_merge`/`greige`; computed
-    `single_target`, `size` (`SMALL`/`STANDARD`/`LARGE`), `n_ports`,
-    `avg_port_wt`; `split`/`combine`), and `DyeLot` (groups same-`sku`/`plant`
-    rolls; `sku`/`plant`/`avail_date`/`total_lbs`/`n_ports`/`avg_port_wt`;
-    `add`/`remove`/`__iter__`).
-  - `inventory` (own `DESIGN.md`) — `Condition` alias (frozen `Exactly`/
-    `NotExactly`/`Greater`/`Less`/`InRange`, each with `to_func()`);
-    `Inventory[T: RawMat]` (`__init__(grouped, sorted)`, `add`/`remove`/
-    `select_where`); the `group` sub-submodule (abstract `Group[T: RawMat]` +
-    `ValGroup`/`SortedGroup`, plus `GreigeGroup`: `skus`, `prepare_dye_pool` via
-    greedy sweep, `dye_lots`, `has_cached_lots`); and `GreigeInv` (grouped
-    size/plant/variant/yarn_merge, sorted qty/avail_date, `sku` via a
-    `GreigeGroup`; owns `transform_rolls` — remove→transform→add — and delegates
-    the other dye-lot ops; `create_roll` mints `FSNEW-`/`WVNEW-` ids). Machine
-    limits are constants (`MIN_PORT_LBS`/`MAX_PORT_LBS`/`PORT_EVEN_TOL`/
-    `MAX_TRIM_LBS` in `group`; `DEFAULT_ROLL_WT`/`SINGLE_PORT_MAX`/`STD_SIZE_TOL`
-    in `rawmat`).
-- **support/workcal/DESIGN.md** — design complete: the `holiday` submodule
-  (`Holiday`/`FixedDate`/`FlexDate` frozen dataclasses + `load_holidays`) and the
-  `WorkCal` class, including per-method details.
-- **support/workcal/holiday/** — implemented (`holiday.py` + `__init__` re-export
-  + `__init__.pyi` stub). Reviewed.
-- **support/workcal/workcal.py** — `WorkCal` fully implemented and reviewed: the
-  constructor + read-only properties, `is_workday` (with lazy holiday-ordinal
-  caching), `offset_work_days`, `offset_work_hours`, `get_work_hours_between`, and
-  `avail_hours_before_weekend`. The hour-based methods apply `cal_shift` by
-  transforming into "aligned" coordinates (`aligned = real - cal_shift`), running
-  the calendar there, then transforming back. Stub in `workcal/__init__.pyi`.
+Progress by module:
 
-- **support/workcal/tests/** — `COVERAGE.md` (Section 1 `holiday`, Section 2
-  `WorkCal`) plus `holiday_tests.py` and `workcal_tests.py`. Full suite passes
-  (40 tests: 10 holiday + 30 WorkCal). Test method docstrings cite their
-  COVERAGE numbers.
+- **`support/workcal/`** — complete. `holiday` submodule + the `WorkCal` class.
+- **`core/product/`** — complete. `greige` + `fabric` submodules.
+- **`core/materials/`** — complete. `rawmat` + `inventory` submodules (`inventory`
+  has its own `DESIGN.md`).
+- **`core/demand/`** — complete. `requirement` + `view` submodules, plus
+  module-level `Chunk` and the top-level `RlsItem`. All generic on `Product`.
+- **`core/schedule/`** and **`core/debuglog/`** — not started (undesigned).
 
-- **core/product/greige/** & **core/product/fabric/** — implemented: classes in
-  `greige.py`/`fabric.py`, translation functions in each `translation.py`, with
-  sibling `.pyi` stubs and `__init__` re-export pairs. Each `.py` has its own
-  `.pyi` per the Code & stub layout convention.
-- **core/product/tests/** — `COVERAGE.md` (Section 1 `greige`, Section 2
-  `fabric`: 2.1 construction, 2.2 translations, 2.3 `get_needed_strip`) plus
-  `greige_tests.py` and `fabric_tests.py` (22 tests; the `get_needed_strip`
-  tests use a `_FakeJetState` stand-in exposing `cycles_since_strip` /
-  `max_prev_shade`). Docstrings cite their COVERAGE numbers.
-- **core/materials/** — implemented. `rawmat/` (`rawmat.py` `RawMat`,
-  `greigeroll.py` `GreigeRoll` + size/classification constants + public
-  `single_target`, `dyelot.py` `DyeLot` — a fabric-assignment: shared `greige`
-  (= roll `sku`) + `plant`, a settable `fabric` (raises unless
-  `fabric.greige == greige`; `add` enforces the same when a fabric is pre-set),
-  and `total_yds` = `total_lbs * fabric.yds_per_lb` or `None`) and `inventory/`
-  (`condition.py`,
-  `inventory.py` `Inventory`, `greigeinv.py` `GreigeInv`, and the `group/`
-  sub-submodule: `group.py` `Group`/`ValGroup`/`SortedGroup`, `greigegroup.py`
-  `GreigeGroup` + port constants). Each `.py` has a sibling `.pyi`.
-  `ValGroup`/`SortedGroup` `remove` and `Inventory.remove` raise on a missing id
-  (broken-grouping guard); `Inventory.add` raises on a duplicate id.
-  - Two behaviors were changed while writing tests: (a) `SortedGroup` now
-    **snapshots each element's key at `add` time** (stores `(key, mat)` pairs) so
-    a mutated sort-key is caught by the `remove` guard, matching `ValGroup`;
-    (b) `GreigeGroup.prepare_dye_pool` now **partitions dye lots by `plant`**
-    (bucket by plant, then greedy-sweep `avg_port_wt` within each), consistent
-    with `DyeLot`'s and `transform_rolls`' plant invariant.
-- **core/materials/tests/** — `COVERAGE.md` (Section 1 `RawMat`, Section 2
-  `GreigeRoll`, Section 3 `DyeLot`) + `rawmat_tests.py`, `greigeroll_tests.py`,
-  `dyelot_tests.py`.
-- **core/materials/inventory/tests/** — `COVERAGE.md` (Section 1 `Condition`s,
-  Section 2 `ValGroup`/`SortedGroup`, Section 3 `Inventory`, Section 4
-  `GreigeGroup`/`GreigeInv`) + `condition_tests.py`, `group_tests.py`,
-  `inventory_tests.py`, `greigegroup_tests.py`, `greigeinv_tests.py`.
+Cross-cutting notes:
 
-`support/workcal/`, `core/product/`, and `core/materials/` are all **complete**
-through design → code → coverage → test. Full test suite passes (129 tests).
-`support/__init__` surfaces `workcal` (plus flattened `WorkCal`/`holiday`);
-`core/product/__init__` surfaces `greige` + `fabric` (plus flattened `Greige`/
-`Fabric`/`Color`) and the `Product` union alias (`Fabric | Greige`);
-`core/__init__` surfaces `product` + `materials`. `materials/__init__` surfaces `rawmat` +
-`inventory` (plus flattened `RawMat`/`GreigeRoll`/`DyeLot`).
-`swmtplanner/__init__` still exposes only `support` (not `core`) — left for the
-user to curate.
+- **Deferred types.** `JetState` (read by `Color.get_needed_strip`) and `Job`
+  (converted by `RlsItem.register_job`) both belong to `core/schedule`; `product`
+  and `demand` reference only their documented interfaces until it is designed.
+- **`__init__` curation.** `core/__init__` now surfaces `product` + `materials`
+  + `demand`; `swmtplanner/__init__` still exposes only `support`, left for the
+  user to curate as modules finish.
+- Full suite passes (**181 tests**). Test-method docstrings cite their
+  `COVERAGE.md` numbers.
 
-Run the full suite with:
+Run the full suite:
 `PYTHONPATH=src python3 -m unittest $(find src -name '*_tests.py' | sort)`
 
-Next up: design the next `core` submodule. `demand`, `schedule`, and `debuglog`
-are still undesigned; `demand` (order fulfillment) or `schedule` (machines +
-job placement) is the natural next piece toward the Phase 1 dyeing planner.
+Next up: design `core/schedule` (machines + job placement), which brings in the
+deferred `JetState` (read by `Color.get_needed_strip`) and `Job` (converted by
+`RlsItem.register_job`); later `core/debuglog`.
 
 ## Development Workflow
 
