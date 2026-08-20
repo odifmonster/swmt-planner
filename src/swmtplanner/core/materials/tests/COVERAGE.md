@@ -95,6 +95,10 @@ Test coverage for the `core/materials/` submodules (`unittest`).
    yet, adding a roll whose `sku` does not match `fabric.greige` raises.
 10. **Add with fabric set, matching greige** — the same setup, but a roll whose
     `sku` matches `fabric.greige` is accepted.
+11. **Add after freeze** — after `freeze()`, adding a roll (even a valid one)
+    raises `RuntimeError`.
+12. **Remove after freeze** — after `freeze()`, removing a roll raises
+    `RuntimeError`.
 
 ### 3.3 `fabric` / `total_yds`
 
@@ -105,3 +109,5 @@ Test coverage for the `core/materials/` submodules (`unittest`).
 3. **Change fabric with rolls** — with rolls present, `fabric` can be changed to
    a different fabric style that uses the same greige, and `total_yds` updates
    accordingly (recomputed from the new fabric's `yds_per_lb`).
+4. **Set after freeze** — after `freeze()`, setting `fabric` (even to a
+   compatible style) raises `RuntimeError`.

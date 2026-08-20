@@ -47,16 +47,19 @@ class SafetyView[T: Product](DemandView[T]):
     def excess(self) -> float:
         return self._excess
 
-    def recompute(self, chunks: 'list[Chunk[T]]') -> None:
+    def recompute(self, chunks: 'list[Chunk[T]]') \
+            -> 'list[tuple[Chunk[T], int | str]]':
         for order in self.orders:
             order.allocated_qty = 0.0
         self._safety.allocated_qty = 0.0
         self._carrying = 0.0
         self._excess = 0.0
 
+        pairs = []
         by_due = sorted(self.orders, key=lambda o: o.due_date)
         for chunk in chunks:
             left = chunk.qty
+            first = None
             horizon = chunk.avail_date + self._lead_time
 
             # (1) near-term demand: unfilled orders due on/before the horizon
@@ -67,12 +70,16 @@ class SafetyView[T: Product](DemandView[T]):
                     take = min(left, order.remaining)
                     order.allocated_qty += take
                     left -= take
+                    if first is None:
+                        first = order.week_offset
 
             # (2) safety
             if left > 0:
                 take = min(left, self._safety.remaining)
                 self._safety.allocated_qty += take
                 left -= take
+                if take > 0 and first is None:
+                    first = 'S'
 
             # (3) future demand -> carrying (held beyond the lead time)
             for order in by_due:
@@ -84,12 +91,18 @@ class SafetyView[T: Product](DemandView[T]):
                     left -= take
                     self._carrying += take * _days(
                         (order.due_date - chunk.avail_date) - self._lead_time)
+                    if first is None:
+                        first = order.week_offset
 
             # (4) excess
             if left > 0:
                 self._excess += left
 
+            if first is not None:
+                pairs.append((chunk, first))
+
         self._drainage = self._compute_drainage(chunks)
+        return pairs
 
     def _compute_drainage(self, chunks: 'list[Chunk[T]]') -> float:
         if not self.orders:

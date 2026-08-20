@@ -16,6 +16,7 @@ class DyeLot:
         self._greige = None
         self._plant = None
         self._fabric = None
+        self._frozen = False
         for roll in rolls:
             self.add(roll)
 
@@ -33,6 +34,8 @@ class DyeLot:
 
     @fabric.setter
     def fabric(self, fabric: 'Fabric | None') -> None:
+        if self._frozen:
+            raise RuntimeError('cannot set the fabric of a frozen dye lot')
         if (fabric is not None and self._greige is not None
                 and fabric.greige != self._greige):
             raise ValueError("fabric does not use this lot's greige")
@@ -63,7 +66,12 @@ class DyeLot:
         n = self.n_ports
         return self.total_lbs / n if n else 0
 
+    def freeze(self) -> None:
+        self._frozen = True
+
     def add(self, roll: 'GreigeRoll') -> None:
+        if self._frozen:
+            raise RuntimeError('cannot add a roll to a frozen dye lot')
         if not self._rolls:
             if self._fabric is not None and roll.sku != self._fabric.greige:
                 raise ValueError('roll greige does not match the assigned fabric')
@@ -75,6 +83,8 @@ class DyeLot:
         self._rolls[roll.id] = roll
 
     def remove(self, id: str) -> 'GreigeRoll':
+        if self._frozen:
+            raise RuntimeError('cannot remove a roll from a frozen dye lot')
         roll = self._rolls.pop(id)
         if not self._rolls:
             self._greige = None

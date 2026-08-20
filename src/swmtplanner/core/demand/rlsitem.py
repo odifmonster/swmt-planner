@@ -10,6 +10,7 @@ from swmtplanner.core.demand.view import RawView, SafetyView
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
     from swmtplanner.core.demand.chunk import Chunk
+    from swmtplanner.core.schedule import Job
 
 
 def _net_raw_reqs(reqs: 'list[tuple[float, datetime]]',
@@ -66,7 +67,8 @@ class RlsItem[T: Product]:
         self._safety_tgt = safety_tgt
         self._today = today
         self._init_on_hand = on_hand
-        self._chunks = []
+        self._chunks: 'list[Chunk[T]]' = []
+        self._chunk_jobs: 'dict[Chunk[T], Job]' = {}
 
         raw_netted = _net_raw_reqs(due_reqs, on_hand)
         raw_orders = [RawOrder(item, qty, covered, start_week, due_date)
@@ -108,12 +110,16 @@ class RlsItem[T: Product]:
     def init_on_hand(self) -> float:
         return self._init_on_hand
 
-    def register_chunk(self, chunk: 'Chunk[T]') -> None:
+    def register_chunk(self, chunk: 'Chunk[T]',
+                       job: 'Job | None' = None) -> None:
         insort(self._chunks, chunk, key=lambda c: c.avail_date)
+        if job is not None:
+            self._chunk_jobs[chunk] = job
 
-    def register_chunks(self, chunks: 'list[Chunk[T]]') -> None:
+    def register_chunks(self, chunks: 'list[Chunk[T]]',
+                        job: 'Job | None' = None) -> None:
         for chunk in chunks:
-            self.register_chunk(chunk)
+            self.register_chunk(chunk, job)
 
     def register_job(self, job) -> None:
         raise NotImplementedError(
@@ -121,5 +127,14 @@ class RlsItem[T: Product]:
         )
 
     def recompute(self) -> None:
+        for job in self._chunk_jobs.values():
+            job.priority.value = None
         self._raw_view.recompute(self._chunks)
-        self._safety_view.recompute(self._chunks)
+        pairs = self._safety_view.recompute(self._chunks)
+        written = set()
+        for chunk, priority in pairs:
+            job = self._chunk_jobs.get(chunk)
+            if job is None or job in written:
+                continue
+            job.priority.value = priority
+            written.add(job)

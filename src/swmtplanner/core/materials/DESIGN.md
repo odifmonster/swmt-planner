@@ -99,8 +99,9 @@ No dedicated `DESIGN.md`; documented here.
       def n_ports(self) -> int: ...         # 0 when empty
       @property
       def avg_port_wt(self) -> float: ...   # 0 when empty
-      def add(self, roll: GreigeRoll) -> None: ...
-      def remove(self, id: str) -> GreigeRoll: ...
+      def freeze(self) -> None: ...
+      def add(self, roll: GreigeRoll) -> None: ...    # raises when frozen
+      def remove(self, id: str) -> GreigeRoll: ...    # raises when frozen
       def __iter__(self) -> Iterator[GreigeRoll]: ...
   ```
 
@@ -208,16 +209,21 @@ Settable property:
 - `fabric` — the `Fabric` these rolls are assigned to produce (initially `None`).
   Setting it to a fabric that does not use the lot's current greige (i.e.
   `fabric.greige != greige`) raises `ValueError`. (A greige style is identified by
-  the roll `sku`, matching `Fabric.greige`.)
+  the roll `sku`, matching `Fabric.greige`.) Setting it on a frozen lot raises
+  `RuntimeError` (see `freeze`).
 
 Methods:
 
+- `freeze()` — freeze the lot. Takes no arguments and sets a private flag; once
+  frozen, mutating the lot — `add`, `remove`, or setting `fabric` — raises
+  `RuntimeError`. There is no unfreeze.
 - `add(roll)` — add a roll to the lot. Validates the roll shares the lot's greige
   and `plant` (adding to an empty lot establishes them). If a `fabric` is already
   assigned, the roll's greige must match `fabric.greige`, otherwise `ValueError`
   is raised (this is what enforces the invariant when `fabric` was set before any
-  rolls were added).
-- `remove(id)` — remove and return the roll with the given `id`.
+  rolls were added). Raises `RuntimeError` if the lot is frozen.
+- `remove(id)` — remove and return the roll with the given `id`. Raises
+  `RuntimeError` if the lot is frozen.
 - `__iter__` — iterate over the rolls in the lot.
 
 ## `inventory` submodule

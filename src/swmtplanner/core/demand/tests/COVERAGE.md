@@ -326,15 +326,84 @@ orders filled by several chunks and chunks spanning several orders.
     chunk rebuilds safety, fills the near order on time and a later order early
     (carrying), and overshoots total demand (excess).
 
+#### 2.2.3 Chunk pairing — single chunk
+
+`recompute` returns the `(chunk, first-fill priority)` pairs. These cases
+register **exactly one chunk**; the surrounding state is created entirely by
+the initial `covered_on_hand` values (and `safety_on_hand`). Terminology: a
+chunk is *early* for an order when the order is due beyond the chunk's horizon
+(`due > avail_date + lead_time` — future demand, step 3), *on time* when the
+order falls within the horizon (step 1), and *late* when
+`avail_date > due_date` (still step 1 — a past-due order is always near-term);
+safety (step 2) sits between the two steps.
+
+1. **On-time fill** — one open order due inside the chunk's horizon, chunk
+   arriving before the due date: one pair, the order's `week_offset`.
+2. **Late fill** — the chunk's `avail_date` is past the open order's
+   `due_date`: still pairs with the order's `week_offset` (lateness itself is
+   `RawView`'s concern, not the pairing's).
+3. **Early fill, safety pre-covered** — safety fully covered
+   (`safety_on_hand == safety_tgt`); the only open order is due beyond the
+   chunk's horizon: the chunk skips to future demand and pairs with that
+   order's `week_offset`.
+4. **Early fill, safety short** — same, but safety has `remaining`: the
+   chunk's first quantity goes to safety, so the pair is `'S'` (the remainder
+   fills the future order).
+5. **Safety only** — all orders covered on hand, safety short: the pair is
+   `'S'`.
+6. **Order fill without touching safety** — safety short, chunk exactly
+   consumed by a near-term order (`qty <= remaining`): the order's
+   `week_offset`, and the safety allocation is unchanged.
+7. **One chunk, multiple orders** — the chunk spans the tail of order A and
+   part of order B (both near-term): exactly one pair, with A's `week_offset`
+   (the first order to use part of the chunk).
+8. **One chunk, order + safety** — the chunk finishes the last near-term
+   order and the overflow goes to safety: the order's `week_offset`, not
+   `'S'`.
+9. **Fully covered → no pair** — every order *and* safety covered on hand:
+   the chunk allocates nothing (pure excess) and `recompute` returns no
+   pairs.
+
+#### 2.2.4 Chunk pairing — multiple chunks
+
+The same target scenarios as 2.2.3, but the surrounding requirements are
+covered by **other chunks** in the same `recompute` rather than by
+`covered_on_hand`; every chunk's pairing is asserted.
+
+1. **On-time fill** — chunk A fills the earlier order (pair: its
+   `week_offset`); chunk B fills its own order on time (pair: its
+   `week_offset`).
+2. **Late fill** — chunk A covers the earlier order; chunk B arrives past the
+   second order's due date: pair is the second order's `week_offset`.
+3. **Early fill, safety covered mid-pass** — chunk A tops up safety (pair:
+   `'S'`); chunk B, early for the remaining order, pairs with that order's
+   `week_offset` — the pairing reacts to safety state as it evolves within
+   one pass, not just to the initial netting.
+4. **Early fill, safety short** — chunk A fills all near-term demand (pair:
+   its `week_offset`); chunk B, early for the last order with safety still
+   short: pair is `'S'`.
+5. **Safety only** — earlier chunks fill every order (pairs asserted); the
+   last chunk goes entirely to safety: `'S'`.
+6. **Order fill without touching safety** — chunk A fills the earlier order;
+   chunk B is exactly consumed by the later near-term order with safety still
+   short: that order's `week_offset`, and the safety allocation is unchanged.
+7. **Multiple chunks, one order** — two chunks each partially fill the same
+   order: two pairs, both carrying that order's `week_offset`.
+8. **Trailing excess → no pair** — earlier chunks fill everything (pairs
+   asserted); a trailing chunk allocates nothing and produces no pair.
+9. **Ordering and shape** — a mixed scenario asserting the pairs come back in
+   chunk (`avail_date`) order, with at most one pair per chunk.
+
 ## Section 3 — `RlsItem`
 
 The view computations are covered by Section 2, so `RlsItem`'s tests focus on
 what it adds: the **initial netting** of on-hand into each view's
 `covered_on_hand` (raw = sequential by due date; safety = near-term demand →
-safety → future), and that the full pipeline — construction/netting +
-`register_chunks` + `recompute` — drives the views correctly end to end. Tests
-use a concrete `FabRlsItem(RlsItem[Fabric])` whose `register_job` body is empty
-(no planner job → `Chunk` conversion is under test yet). Both views' order lists
+safety → future), that the full pipeline — construction/netting +
+`register_chunks` + `recompute` — drives the views correctly end to end, and
+the **chunk → job map / priority push** (3.3). Tests use a concrete
+`FabRlsItem(RlsItem[Fabric])`; 3.1/3.2 leave its `register_job` unused, while
+3.3 gives it the job → `Chunk` conversion described there. Both views' order lists
 are sorted by due date, so index `i` is the same demand in each. Setups place
 `today` / `lead_time` so the first order is within the safety-side near-term
 horizon (`first_due <= today + lead_time < second_due`), isolating the
@@ -382,3 +451,49 @@ that scenario's initial state, `register_chunks` with the scenario's chunks, cal
   `on_hand == first init_qty + safety_tgt` (netting yields the first safety order
   covered and the `Safety` covered to target), checking the `safety_view`
   `carrying` / `drainage` / `excess`.
+
+### 3.3 `register_job` and the priority push
+
+`FabRlsItem.register_job(job)` converts a `core.schedule` `Job` into chunks:
+each job produces **50-unit chunks at 10 units/hour** — one `Chunk` per 5
+hours of runtime, available at its completion time (a 10-hour job yields two
+50-unit chunks at `start + 5h` and `start + 10h`) — registered via
+`register_chunks(chunks, job)` so the map records the source. Jobs are built
+with `Priority(None)`; after each `recompute`, assert every job's
+`priority.value`.
+
+1. **Job → chunk conversion** — `register_job` on a job spanning N hours
+   produces the right number of 50-unit chunks at the right `avail_date`s,
+   verified through the view allocations after `recompute` (the chunk list
+   itself is private).
+2. **Late job** — the job runs past the earliest unfilled order's due date:
+   its chunks fill that earliest unfilled order, and the job's priority
+   becomes that order's `week_offset`.
+3. **On-time job** — the job completes within `lead_time` of its order's due
+   date, safety short: it fills the order *before* safety and is assigned the
+   on-time order's `week_offset`.
+4. **Early job** — the job completes more than `lead_time` before every open
+   order's due date, safety short: it fills safety first and is assigned
+   `'S'`.
+5. **Pure excess job** — all orders and safety already covered: after
+   `recompute` the job's priority is still `None`.
+6. **Multiple jobs, same priority** — two jobs whose chunks all land in one
+   large order: both end up with that order's `week_offset`.
+7. **One job spanning requirements (first write wins)** — a single job whose
+   earlier chunk fills an order and whose later chunk tops up safety: the
+   job's priority is the order's `week_offset` (from its earliest paired
+   chunk), not `'S'`.
+8. **Insertion, no change** — a new job is registered covering a different
+   requirement than the existing jobs'; after `recompute`, every existing
+   job's priority is unchanged.
+9. **Insertion, moving down** — a new job running earlier takes over the
+   order an existing job used to fill; on `recompute` the existing job now
+   fills a later order and its priority moves down (a larger `week_offset`).
+10. **Insertion, non-safety → safety** — the new earlier job fills the
+    near-term order the existing job used to fill; the existing job's first
+    fill becomes the safety top-up, so its priority changes from a
+    `week_offset` to `'S'`.
+11. **Insertion, safety → non-safety** — the existing early job was `'S'`
+    (topping safety); the new earlier job replenishes safety instead; on
+    `recompute` the existing job's first fill becomes a future order, so its
+    priority changes from `'S'` to that order's `week_offset`.

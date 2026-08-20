@@ -176,6 +176,21 @@ class TestDyeLotAddRemove(unittest.TestCase):
         lot.add(_roll('A', 350.0, sku='S1'))
         self.assertEqual(lot.greige, 'S1')
 
+    def test_add_after_freeze(self):
+        """3.2.11 — after freeze(), adding a roll (even a valid one) raises
+        RuntimeError."""
+        lot = DyeLot([_roll('A', 350.0)])
+        lot.freeze()
+        with self.assertRaises(RuntimeError):
+            lot.add(_roll('B', 350.0))
+
+    def test_remove_after_freeze(self):
+        """3.2.12 — after freeze(), removing a roll raises RuntimeError."""
+        lot = DyeLot([_roll('A', 350.0)])
+        lot.freeze()
+        with self.assertRaises(RuntimeError):
+            lot.remove('A')
+
 
 class TestDyeLotFabric(unittest.TestCase):
 
@@ -205,6 +220,14 @@ class TestDyeLotFabric(unittest.TestCase):
         self.assertIs(lot.fabric, f2)
         self.assertNotAlmostEqual(f1.yds_per_lb, f2.yds_per_lb)
         self.assertAlmostEqual(lot.total_yds, lot.total_lbs * f2.yds_per_lb)
+
+    def test_set_after_freeze(self):
+        """3.3.4 — after freeze(), setting fabric (even to a compatible style)
+        raises RuntimeError."""
+        lot = DyeLot([_roll('A', 350.0, sku='S1')])
+        lot.freeze()
+        with self.assertRaises(RuntimeError):
+            lot.fabric = _fabric('F1', greige='S1')
 
 
 if __name__ == '__main__':

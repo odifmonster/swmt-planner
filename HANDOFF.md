@@ -37,7 +37,7 @@ Cross-cutting notes:
 - **`__init__` curation.** `core/__init__` now surfaces `product` + `materials`
   + `demand`; `swmtplanner/__init__` still exposes only `support`, left for the
   user to curate as modules finish.
-- Full suite passes (**181 tests**). Test-method docstrings cite their
+- Full suite passes (**184 tests**). Test-method docstrings cite their
   `COVERAGE.md` numbers.
 
 Run the full suite:

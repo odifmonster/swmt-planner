@@ -59,7 +59,8 @@ See `src/swmtplanner/core/demand/DESIGN.md`. *(Not yet written.)*
 Defines the properties of the various machines and the logic for adding new jobs
 to the plant's schedule.
 
-See `src/swmtplanner/core/schedule/DESIGN.md`. *(Not yet written.)*
+See `src/swmtplanner/core/schedule/DESIGN.md`. *(In progress: `activity`
+designed; `machine` pending.)*
 
 ### `debuglog`
 A self-contained module holding only the debug / decision log architecture: a

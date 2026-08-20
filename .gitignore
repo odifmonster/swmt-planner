@@ -1,5 +1,6 @@
 tests/misc*.py
 temp-io/
+temp-misc/
 __pycache__/
 temp*.txt
 .ipynb_checkpoints/

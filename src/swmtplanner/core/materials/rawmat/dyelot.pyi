@@ -31,7 +31,8 @@ class DyeLot:
     @fabric.setter
     def fabric(self, fabric: Fabric | None) -> None:
         """Assign the fabric to produce. Raises ValueError if the fabric does not
-        use the lot's current greige (fabric.greige != greige)."""
+        use the lot's current greige (fabric.greige != greige), or RuntimeError
+        if the lot is frozen."""
         ...
     @property
     def avail_date(self) -> datetime | None:
@@ -55,13 +56,19 @@ class DyeLot:
     def avg_port_wt(self) -> float:
         """The average pounds per port (total_lbs / n_ports); 0 if empty."""
         ...
+    def freeze(self) -> None:
+        """Freeze the lot: once frozen, add, remove, and setting fabric raise
+        RuntimeError. There is no unfreeze."""
+        ...
     def add(self, roll: GreigeRoll) -> None:
         """Add a roll; it must share the lot's greige and plant (adding to an
         empty lot establishes them). If a fabric is assigned, the roll's greige
-        must match fabric.greige, else ValueError."""
+        must match fabric.greige, else ValueError. Raises RuntimeError if the
+        lot is frozen."""
         ...
     def remove(self, id: str) -> GreigeRoll:
-        """Remove and return the roll with the given id."""
+        """Remove and return the roll with the given id. Raises RuntimeError if
+        the lot is frozen."""
         ...
     def __iter__(self) -> Iterator[GreigeRoll]:
         """Iterate over the rolls in the lot."""

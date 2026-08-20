@@ -77,7 +77,8 @@ No dedicated `DESIGN.md`; documented here.
 
 No dedicated `DESIGN.md`; documented here.
 
-- Constants — shade ratings (integer constants, ordered lightest → darkest):
+- Constants — shade ratings (integer constants; the values are arbitrary
+  identifiers):
   ```python
   EXTRA_LIGHT = 0
   LIGHT = 1
@@ -187,10 +188,12 @@ Defines finished fabric styles and the colors they are dyed to.
 
 ### Shade rating constants
 
-Integer constants naming the shade-rating levels, ordered from lightest to
-darkest and assigned `0`–`4` in that order: `EXTRA_LIGHT = 0`, `LIGHT = 1`,
-`MEDIUM = 2`, `BLACK = 3`, `SD_BLACK = 4`. A `Color`'s `shade_rating` is one of
-these.
+Integer constants naming the shade-rating levels: `EXTRA_LIGHT = 0`,
+`LIGHT = 1`, `MEDIUM = 2`, `BLACK = 3`, `SD_BLACK = 4`. The numeric values are
+arbitrary identifiers, **not** a darkness ordering — for darkness comparisons
+the scale is `BLACK` > `SD_BLACK` > `MEDIUM` > `LIGHT` = `EXTRA_LIGHT` (see
+`JetState` in `src/swmtplanner/core/schedule/DESIGN.md`). A `Color`'s
+`shade_rating` is one of these.
 
 ### `Color`
 

@@ -43,6 +43,14 @@ converts its jobs into `Chunk`s and feeds them in via `register_chunk` /
 sorted). `RlsItem.recompute` then hands that sorted list to each view's
 `recompute`.
 
+The release also pushes priorities back onto the schedule: it maintains a map
+from each registered chunk to its source `Job` (the `core.schedule` job whose
+conversion produced it). Each `recompute` first clears every mapped job's
+`priority` to `None`, then rewrites it from the `(chunk, priority)` pairs the
+`SafetyView`'s `recompute` returns — `'S'` when the chunk's first fill went to
+safety stock, the filled order's `week_offset` otherwise. A job left at `None`
+is entirely excess: nothing it produced filled any requirement.
+
 Beneath the views are lightweight objects that simply represent individual
 requirements and their statuses — they carry no complicated logic of their own.
 They live in the `requirement` submodule and share a common base,
@@ -80,11 +88,14 @@ rather than a base class: the bound is a *conceptual* constraint on which classe
 - Constants: none (so far).
 - Module-level classes (all generic, bound to `Product`):
   ```python
-  @dataclass(frozen=True)
-  class Chunk[T: Product]:
+  @dataclass(frozen=True, eq=False)   # eq=False: HasID supplies id-based eq/hash
+  class Chunk[T: Product](HasID[int]):
       item: T
       avail_date: datetime
       qty: float
+      _id: int = field(default_factory=mk_counter())   # auto-incremented
+      @property
+      def id(self) -> int: ...
 
   class RlsItem[T: Product]:              # abstract; planner-specific subclasses
       def __init__(self, item: T, lead_time: timedelta, on_hand: float,
@@ -105,11 +116,14 @@ rather than a base class: the bound is a *conceptual* constraint on which classe
       def today(self) -> datetime: ...
       @property
       def init_on_hand(self) -> float: ...
-      def register_chunk(self, chunk: Chunk[T]) -> None: ...
-      def register_chunks(self, chunks: list[Chunk[T]]) -> None: ...
+      def register_chunk(self, chunk: Chunk[T],
+                         job: 'Job | None' = None) -> None: ...
+      def register_chunks(self, chunks: list[Chunk[T]],
+                          job: 'Job | None' = None) -> None: ...
       def register_job(self, job: 'Job') -> None: ... # planner-specfic
                                                       # raises NotImplementedError in base
-      def recompute(self) -> None: ...    # recompute both views over the held chunks
+      def recompute(self) -> None: ...    # recompute both views over the held chunks,
+                                          # then push priorities onto the source Jobs
   ```
 
 Abstract classes/methods here do **not** use `ABC`; a member whose
@@ -150,7 +164,8 @@ separate `DESIGN.md`). All generic, bound to `Product`.
       def drainage(self) -> float: ...         # time-integral of pool below the safety target
       @property
       def excess(self) -> float: ...           # scalar qty beyond total demand + safety
-      def recompute(self, chunks: list[Chunk[T]]) -> None: ...
+      def recompute(self, chunks: list[Chunk[T]]) \
+          -> list[tuple[Chunk[T], int | str]]: ...   # (chunk, first-fill priority) pairs
   ```
 
 ### `requirement` submodule
@@ -208,11 +223,23 @@ The lightweight per-requirement classes (documented here; no separate
 
 A simple, immutable record of a quantity of product becoming available on a date
 — the unit of scheduled supply that gets fed into an `RlsItem`. A frozen
-dataclass.
+dataclass implementing `HasID[int]`.
 
 - `item` — the product style (`T`) the chunk is of.
 - `avail_date` — the `datetime` the quantity becomes available.
 - `qty` — the quantity (a `float`).
+- `id` — a read-only property over the private `_id` field: a unique
+  auto-incremented `int` assigned by the field's default factory (a
+  module-level `support.counters.mk_counter()` counter). Never passed
+  explicitly; every chunk — including the fresh split chunks `RawView`
+  creates — gets its own id. (As with `Activity`, the id lives in a private
+  field behind a property — a dataclass field literally named `id` would
+  collide with `HasID`'s abstract `id` property.)
+
+The dataclass is declared `eq=False` so that `HasID`'s id-based `__eq__` /
+`__hash__` apply rather than the dataclass's field-wise equality: two chunks
+with the same item, date, and quantity are still distinct, which is what lets
+the `RlsItem` key its chunk → job map by chunk.
 
 ## `RlsItem[T]`
 
@@ -273,17 +300,33 @@ job → `Chunk` conversion.
   (read-only).
 - The release owns the chunk list — the scheduled supply registered against the
   item, kept sorted by `avail_date`. It starts empty, so inserting each new chunk
-  in place keeps it sorted.
-- `register_chunk(chunk)` — insert one `Chunk[T]` of available supply into the
-  release's sorted chunk list.
-- `register_chunks(chunks)` — the list convenience form of `register_chunk`.
+  in place keeps it sorted. Alongside it, the release maintains a map from each
+  registered chunk to its source `Job` (when one was given), keyed by the chunk
+  itself — safe because `Chunk` implements `HasID[int]` with a unique
+  auto-incremented id, so two chunks with identical item/date/quantity from
+  different jobs never collide.
+- `register_chunk(chunk, job=None)` — insert one `Chunk[T]` of available supply
+  into the release's sorted chunk list; when `job` is given, record it as the
+  chunk's source in the chunk → job map.
+- `register_chunks(chunks, job=None)` — the list convenience form of
+  `register_chunk` (all the chunks share the one source `job`).
 - `register_job(job)` — the planner-specific hook: convert the planner's own
-  schedule job into `Chunk`s and register them. The base raises
-  `NotImplementedError`; concrete planner subclasses override it. Its signature
-  depends on the `schedule` module's job representation and is *TBD*.
-- `recompute()` — recompute both views over the current chunk list: calls
+  schedule job (a `core.schedule` `Job` subclass — e.g. a `DyeJob` for the dye
+  planner) into `Chunk`s and register them with `job` as their source. The base
+  raises `NotImplementedError`; concrete planner subclasses override it.
+- `recompute()` — recompute both views over the current chunk list, then push
+  priorities back onto the source jobs. First, **clear** the priority of every
+  job in the chunk → job map (set its `priority.value` to `None`). Then call
   `raw_view.recompute(chunks)` and `safety_view.recompute(chunks)` with the
-  release's sorted chunks.
+  release's sorted chunks, walk the `(chunk, priority)` pairs the latter
+  returns and, for each pair whose chunk has a source job in the map, set that
+  job's `priority.value` to the pair's priority (`'S'` or a week offset).
+  Pairs are applied in chunk order and the **first** write to a job wins (a
+  `None` left by the clearing pass does not count as a write), so a job that
+  produced several chunks takes the priority of its earliest paired chunk.
+  Chunks registered without a source job are skipped. A job whose priority is
+  still `None` after the push is **entirely excess** — none of its chunks
+  filled any requirement.
 
 ## The `view` submodule
 
@@ -304,7 +347,9 @@ list each call.
 - `recompute(chunks)` — distribute the given `chunks` across the view's
   orders/requirements according to that view's rules. `chunks` is expected
   **sorted by `avail_date`** (the `RlsItem` maintains that order). Abstract:
-  raises `NotImplementedError` in the base; each concrete view overrides it.
+  raises `NotImplementedError` in the base; each concrete view overrides it. A
+  concrete view may return distribution results — `RawView` returns nothing,
+  `SafetyView` returns its `(chunk, priority)` pairs.
 
 ### `RawView[T]`
 
@@ -409,6 +454,13 @@ metrics to `0`, walk `chunks` earliest → latest (they arrive sorted by
    (those due after `d`, in due-date order).
 4. **Excess.** Any remainder is added to `excess`.
 
+Throughout, the pass records each chunk's **first fill** — the priority of the
+first requirement to use part of the chunk: the `week_offset` of the first
+order it filled, or `'S'` when the first quantity taken went to the `safety`
+requirement. `recompute` returns the `(chunk, first-fill priority)` pairs as a
+list, in chunk order; a chunk that fills nothing (pure excess) produces no
+pair. The `RlsItem` uses these pairs to set the source jobs' priorities.
+
 This distribution pass has no on-hand seeding — the on-hand was already netted
 into each order's `covered_on_hand` at construction, so it distributes only
 scheduled supply against net requirements, filling `safety` and accumulating
@@ -427,9 +479,11 @@ def recompute(self, chunks):
     self.safety.allocated_qty = 0.0
     self._carrying = self._excess = 0.0
 
+    pairs = []
     by_due = sorted(self.orders, key=lambda o: o.due_date)
     for chunk in chunks:                           # sorted by avail_date
         left = chunk.qty
+        first = None                               # priority of the chunk's first fill
         horizon = chunk.avail_date + self.lead_time
         # (1) near-term demand: unfilled orders due on/before the horizon
         for o in by_due:
@@ -438,11 +492,15 @@ def recompute(self, chunks):
                 take = min(left, o.remaining)
                 o.allocated_qty += take
                 left -= take
+                if first is None:
+                    first = o.week_offset
         # (2) safety
         if left > 0:
             take = min(left, self.safety.remaining)
             self.safety.allocated_qty += take
             left -= take
+            if take > 0 and first is None:
+                first = 'S'
         # (3) future demand -> carrying (held beyond the lead time)
         for o in by_due:
             if left <= 0: break
@@ -451,11 +509,16 @@ def recompute(self, chunks):
                 o.allocated_qty += take
                 left -= take
                 self._carrying += take * days((o.due_date - chunk.avail_date) - self.lead_time)
+                if first is None:
+                    first = o.week_offset
         # (4) excess
         if left > 0:
             self._excess += left
+        if first is not None:
+            pairs.append((chunk, first))
 
     self._drainage = self._compute_drainage(chunks)  # separate physical-pool pass
+    return pairs
 ```
 
 **Metrics.** (`days(δ) = δ.total_seconds() / 86400`.)

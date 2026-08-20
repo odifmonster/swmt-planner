@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from swmtplanner.core.product import Product
 from swmtplanner.core.demand.chunk import Chunk
 from swmtplanner.core.demand.view import RawView, SafetyView
+from swmtplanner.core.schedule import Job
 
 
 __all__ = ['RlsItem']
@@ -49,20 +50,26 @@ class RlsItem[T: Product]:
     def init_on_hand(self) -> float:
         """The starting on-hand quantity the release was constructed with."""
         ...
-    def register_chunk(self, chunk: Chunk[T]) -> None:
+    def register_chunk(self, chunk: Chunk[T], job: Job | None = None) -> None:
         """Insert one chunk of scheduled supply into the release's chunk list,
-        kept sorted by avail_date. Does not recompute."""
+        kept sorted by avail_date; when job is given, record it as the chunk's
+        source in the chunk -> job map. Does not recompute."""
         ...
-    def register_chunks(self, chunks: list[Chunk[T]]) -> None:
-        """Register each chunk (list convenience form). Does not recompute."""
+    def register_chunks(self, chunks: list[Chunk[T]],
+                        job: Job | None = None) -> None:
+        """Register each chunk (list convenience form; all the chunks share
+        the one source job). Does not recompute."""
         ...
     def register_job(self, job) -> None:
-        """Convert a planner schedule job into Chunks, register them, and
-        recompute. Abstract: raises NotImplementedError on the base; concrete
-        planner subclasses implement it (the job type comes from the schedule
-        module)."""
+        """Convert a planner schedule job into Chunks and register them with
+        the job as their source. Abstract: raises NotImplementedError on the
+        base; concrete planner subclasses implement it."""
         ...
     def recompute(self) -> None:
         """Recompute both views over the release's current (sorted) chunk
-        list."""
+        list, then push priorities back onto the source jobs: clear every
+        mapped job's priority.value to None, then apply the SafetyView's
+        (chunk, priority) pairs in chunk order — the first write to a job
+        wins ('S' or a week offset). A job whose priority is still None after
+        the push is entirely excess."""
         ...
