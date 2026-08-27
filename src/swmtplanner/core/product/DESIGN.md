@@ -1,8 +1,9 @@
 # product — Design
 
 `core.product` owns the static product-style definitions used throughout
-planning. It has two submodules:
+planning. It has three submodules:
 
+- `yarn` — yarns and the beam sets they are wound onto.
 - `greige` — greige (knitted, undyed) fabric styles.
 - `fabric` — finished fabric styles.
 
@@ -13,7 +14,12 @@ identity, target weights, and the bill-of-materials needed to produce it. Styles
 are referenced by demand, inventory, and the planners; they do not themselves
 hold any mutable planning state.
 
-Both submodules are documented here (neither has its own `DESIGN.md`).
+`yarn` sits below `greige`: a `Greige` style is knitted from one to four
+**bars**, and each bar is a beam set of a single yarn. `yarn` defines that yarn
+and beam set; `greige` composes them into a style. `fabric` sits above both,
+naming the greige style it is dyed from.
+
+All three submodules are documented here (none has its own `DESIGN.md`).
 
 The package also defines `Product`, a union type alias over the concrete style
 classes, used as the generic bound for product-agnostic classes elsewhere (e.g.
@@ -27,12 +33,62 @@ Defined in the package `__init__` (it spans both submodules):
 
 - Type aliases:
   ```python
-  type Product = Fabric | Greige
+  type Product = Fabric | Greige | BeamSetItem
   ```
   A union of the concrete product-style classes. `core.demand` uses it as the
-  bound for its generic classes (`RlsItem[T: Product]`, etc.). The two style
-  classes share no common interface, so this is a plain union alias rather than
-  a base class — a conceptual constraint on what a product style can be.
+  bound for its generic classes (`RlsItem[T: Product]`, etc.). The classes share
+  no common interface, so this is a plain union alias rather than a base class —
+  a conceptual constraint on what a product style can be.
+
+  `BeamSetItem` is a member because the warping plant plans against it the same
+  way the knitting plant plans against a `Greige`: beam sets are demanded,
+  produced, and stocked. `Yarn` is deliberately **not** a member — it is an
+  ingredient of a beam set, not something any plant plans production of.
+
+### `yarn` submodule
+
+No dedicated `DESIGN.md`; documented here. `Yarn` lives in `yarn.py`,
+`BeamSetItem` in `beamsetitem.py`.
+
+- Constants:
+  ```python
+  LUSTER_CODES: dict[str, str]     # luster name    -> id code
+  MATERIAL_CODES: dict[str, str]   # material name  -> id code
+  ATTR_CODES: dict[str, str]       # attribute name -> id code
+  ```
+- Functions: none.
+- Classes:
+  ```python
+  class Yarn(HasID[str]):
+      def __init__(self, denier: int, fill_ct: int, luster: str, material: str,
+                   attributes: list[str]): ...
+      @property
+      def id(self) -> str: ...
+      @property
+      def denier(self) -> int: ...
+      @property
+      def fill_ct(self) -> int: ...
+      @property
+      def luster(self) -> str: ...
+      @property
+      def material(self) -> str: ...
+      @property
+      def attributes(self) -> tuple[str, ...]: ...
+
+  class BeamSetItem(HasID[str]):
+      def __init__(self, beams: int, ends: int, yarn: Yarn,
+                   is_split: bool): ...
+      @property
+      def id(self) -> str: ...
+      @property
+      def beams(self) -> int: ...
+      @property
+      def ends(self) -> int: ...
+      @property
+      def yarn(self) -> Yarn: ...
+      @property
+      def is_split(self) -> bool: ...
+  ```
 
 ### `greige` submodule
 
@@ -49,14 +105,15 @@ No dedicated `DESIGN.md`; documented here.
 - Classes:
   ```python
   @dataclass(frozen=True)
-  class BeamConfig:
-      beamset: str   # product SKU string of the beam set on this bar
-      pct: float     # percent of the bar used per pound of knitted greige
+  class BarConfig:
+      bset: BeamSetItem   # the beam set mounted on this bar
+      pct: float          # percent of the bar used per pound of knitted greige
+      stitch: str         # the bar's stitch (lapping) notation
+      thread: str         # the bar's threading notation
 
   class Greige(HasID[str]):
       def __init__(self, id: str, tgt_wt: float, safety: float, pattern: str,
-                   top: BeamConfig, bottom: BeamConfig,
-                   alt_names: list[str]): ...
+                   bars: list[BarConfig], alt_names: list[str]): ...
       @property
       def id(self) -> str: ...
       @property
@@ -66,9 +123,8 @@ No dedicated `DESIGN.md`; documented here.
       @property
       def pattern(self) -> str: ...
       @property
-      def top(self) -> BeamConfig: ...
-      @property
-      def bottom(self) -> BeamConfig: ...
+      def n_bars(self) -> int: ...
+      def bar(self, i: int) -> BarConfig: ...
       @property
       def alt_names(self) -> tuple[str, ...]: ...
   ```
@@ -129,18 +185,130 @@ No dedicated `DESIGN.md`; documented here.
       def load_range_on_jet(self, jet: str) -> tuple[float, float]: ...
   ```
 
+## `yarn` submodule
+
+Defines the yarns the mill knits with and the beam sets they are wound onto.
+Both are static reference data: they carry no planning state.
+
+### Code maps
+
+Every component of a `Yarn.id` is a short code. The properties themselves hold
+the readable long form; these module-level maps convert to the codes the id is
+built from.
+
+```python
+LUSTER_CODES = {
+    'Semi-Dull':           'SDL',
+    'Solution Dyed Black': 'DBK',
+    'Solution Dyed Grey':  'DGY',
+}
+
+MATERIAL_CODES = {
+    'Polyester': 'POL',
+}
+
+ATTR_CODES = {
+    'Cationic': 'CAT',
+    'Repreve':  'REP',
+    'Textured': 'TX',
+}
+```
+
+Each map covers only what the mill currently knits; they are the extension point
+as new yarns appear (nylon being the obvious next `MATERIAL_CODES` entry).
+
+`LUSTER_CODES` conflates two things that are, for now, the same thing: how dull
+the yarn is, and whether it was dyed before knitting. Every yarn the mill
+currently knits is semi-dull, and the only alternative luster in use elsewhere is
+bright — which comes in white only, so a future `'Bright': 'BRT'` entry would
+slot in beside `'Semi-Dull'` without disturbing the dyed-colour entries. Should
+a bright dyed yarn ever appear, luster and colour would have to split into two
+properties; nothing in the current data forces that.
+
+### `Yarn`
+
+A single yarn. Implements the `HasID` protocol (keyed by its `id`). All
+attributes are exposed as read-only properties; every one except `id` is
+supplied at construction.
+
+- `denier` — the yarn's denier as the vendor names it, **not** a measured value.
+  Vendors disagree on this (the same yarn is sold as 70 or 75 denier), so the
+  loader normalises before constructing: 70 becomes 75.
+- `fill_ct` — the filament count. Also vendor-dependent and normalised by the
+  loader: a 40-denier yarn is 24 filaments, a 75-denier yarn is 36.
+- `luster` — the luster, long form, and where the yarn is dyed before knitting
+  rather than left white, its colour comes with it: `'Semi-Dull'`,
+  `'Solution Dyed Black'`, `'Solution Dyed Grey'`. Dull and semi-dim are folded
+  into semi-dull by the loader; the dyed-colour distinction is preserved,
+  because whether the yarn was dyed before knitting genuinely changes the style.
+  See the note under Code maps on why luster and colour share one property.
+- `material` — the fibre, long form, e.g. `'Polyester'`.
+- `attributes` — the yarn's remaining attributes as a **sorted** tuple of long
+  form names, e.g. `('Repreve', 'Textured')`. Empty when the yarn has none.
+  Sorting makes the id deterministic regardless of the order the loader supplies
+  them in.
+- `id` — derived, not supplied. Structure:
+
+  ```
+  <denier>D<fill_ct>F-<luster code>-<material code>[-<attr codes, dash-joined>]
+  ```
+
+  Examples:
+
+  ```
+  75D36F-SDL-POL-TX        semi-dull textured polyester
+  40D24F-SDL-POL-CAT       semi-dull cationic polyester
+  75D36F-DBK-POL-TX        dyed-black textured polyester
+  50D34F-SDL-POL-REP-TX    semi-dull textured Repreve polyester
+  40D24F-SDL-POL           semi-dull polyester, no further attributes
+  ```
+
+  The attribute segment is omitted entirely — along with its leading dash — when
+  `attributes` is empty, so an id never ends in a dash.
+
+### `BeamSetItem`
+
+The set of beams one bar of the knitting machine draws from. Implements the
+`HasID` protocol (keyed by its `id`), and is one of the `Product` types: the
+warping plant plans its production the way the knitting plant plans a `Greige`.
+
+- `beams` — the number of beams in the set.
+- `ends` — the total number of ends across the set.
+- `yarn` — the `Yarn` wound on those beams.
+- `is_split` — whether the set runs split lease. A split-lease set feeds **two**
+  adjacent bars rather than one, each taking half the ends; both bars therefore
+  reference the same set. This is what makes a style's bar count exceed the
+  number of distinct beam sets.
+- `id` — derived, not supplied. Structure:
+
+  ```
+  <yarn id> <ends>X<beams>[ S/L]
+  ```
+
+  The trailing ` S/L` appears only when `is_split`. Examples:
+
+  ```
+  75D36F-SDL-POL-TX 1172X4         the textured bar of a typical style
+  40D24F-SDL-POL 1172X4 S/L        its split-lease pair, feeding two bars
+  40D24F-DBK-POL 1172X4 S/L        the same, in dyed-black yarn
+  ```
+
 ## `greige` submodule
 
-Defines a greige (knitted, undyed) fabric style and the per-bar beam-set
-configuration it knits from.
+Defines a greige (knitted, undyed) fabric style and the per-bar configuration it
+knits from.
 
-### `BeamConfig`
+### `BarConfig`
 
-A frozen dataclass describing the beam set mounted on one bar (top or bottom) of
-the knitting machine.
+A frozen dataclass describing one bar of the knitting machine. Replaces the old
+`BeamConfig`, which could only express a two-bar (top/bottom) style with the
+beam set held as an opaque SKU string.
 
-- `beamset` — the product SKU string for the beam set that goes on the given bar.
+- `bset` — the `BeamSetItem` mounted on this bar.
 - `pct` — the float percent of the bar used per pound of knitted greige fabric.
+- `stitch` — the bar's stitch (lapping) notation, e.g. `'1/0,2/3'`. Styles
+  sharing a stitch set run the same pattern wheels.
+- `thread` — the bar's threading notation, e.g. `'SOLID'` or `'1 IN, 1 OUT'`.
 
 ### `Greige`
 
@@ -150,11 +318,21 @@ attributes are exposed as read-only properties.
 - `id` — the style's unique identifier.
 - `tgt_wt` — the expected weight, in pounds, of every roll of this greige style.
 - `safety` — the target safety stock level, in pounds.
-- `pattern` — a one-letter code representing the style's pattern "family".
-- `top` — the `BeamConfig` for the top bar.
-- `bottom` — the `BeamConfig` for the bottom bar.
+- `pattern` — a one-letter code representing the style's pattern "family". It is
+  a function of the style's stitch notations — two styles share a pattern letter
+  exactly when their bars' stitches match — but it is stored rather than derived,
+  for ease of reference.
+- `n_bars` — the number of bars the style knits on, between 1 and 4.
+- `bar(i)` — the `BarConfig` for bar `i`, numbered from 1 as the mill numbers
+  them, so valid `i` runs `1..n_bars`. Raises `IndexError` otherwise. Bars are
+  ordered as the machine mounts them, top to bottom; where a split-lease set
+  feeds two bars, those two are adjacent and share one `BeamSetItem`.
 - `alt_names` — the alternate (product-BOM) greige style names that condense into
   this knitting-plant style (see Translations below).
+
+**Initialization.** `Greige` takes its bars as a `list[BarConfig]` in bar order;
+`n_bars` and `bar(i)` read from it. The list is copied to a tuple internally, as
+`alt_names` already is.
 
 ### Translations
 
