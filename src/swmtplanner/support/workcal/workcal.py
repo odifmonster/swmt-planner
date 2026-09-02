@@ -53,6 +53,10 @@ class WorkCal:
         return self._day_end - self._day_start
     
     @property
+    def cal_shift(self):
+        return self._cal_shift
+    
+    @property
     def holidays(self):
         return self._holidays
 

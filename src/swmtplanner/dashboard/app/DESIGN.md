@@ -167,18 +167,23 @@ Constructed with the reader **`cursor`**, the ordered **viewable specs**
 
 - **Left — sidebar** (`QTreeWidget`, no header): three top-level rows —
   **Run selection** (leaf), **Raw view** (expandable; one child per spec in
-  `table_specs`, by `name`), **Pretty view** (leaf).
-- **Right — content**: a `QVBoxLayout` of a **header label** (large, bold) over a
-  `QStackedWidget` holding the three pages plus a shared **"no run" placeholder**
-  reading *"Please select a run to investigate."*
+  `table_specs`, labelled by the spec's **`disp_name`** — the readable name, not
+  the DB `name`; the node still carries `name` for navigation), **Pretty view**
+  (leaf).
+- **Right — content**: a `QVBoxLayout` of a **header bar** over a `QStackedWidget`
+  holding the three pages plus a shared **"no run" placeholder** reading *"Please
+  select a run to investigate."* The header bar (a `#headerBox` widget owning the
+  background + bottom border) stacks a **header label** (large, bold — the
+  spec's `disp_name`) over a small **description label** (the spec's `desc`),
+  which is **hidden when empty** (run-selection / pretty pages).
 
 State: `selected_run_id` starts `None`.
 
 Navigation (on sidebar selection):
-- **Run selection** → show `RunSelectionPage`; header `"Run selection"`.
+- **Run selection** → show `RunSelectionPage`; header `"Run selection"` (no desc).
 - **Raw view ▸ \<table\>** → if no run selected, show the placeholder; else
-  `RawViewPage.show_table(spec, run_id)` and header = the table name. (Clicking
-  the **Raw view** parent just expands/collapses it.)
+  `RawViewPage.show_table(spec, run_id)`; header = the spec's `disp_name` with its
+  `desc` underneath. (Clicking the **Raw view** parent just expands/collapses it.)
 - **Pretty view** → if no run selected, the placeholder; else `PrettyViewPage`
   (its own *"Pretty view — not yet implemented"* message). Header `"Pretty view"`.
 
@@ -485,10 +490,11 @@ top-left position; shown when depth > 1) … a stretch … **"Go to…"** (shown
 the current frame has a selection). The per-frame paging buttons stay in each
 `PagedGrid`'s own top-right, as today.
 
-The shell's header label (owned by `DashboardWindow`) must track the current
+The shell's header bar (owned by `DashboardWindow`) must track the current
 frame's table across drills and backs: `RawViewPage` emits
-`current_table_changed(name)` and the shell updates the header. (`window.py`'s
-`_show_raw` still sets the initial header + run before the first frame builds.)
+`current_table_changed(name)` and the shell's `_on_table_changed` looks the spec
+up and sets the header to its `disp_name` + `desc`. (`window.py`'s `_show_raw`
+still sets the initial header + run before the first frame builds.)
 
 ### Component changes (summary)
 

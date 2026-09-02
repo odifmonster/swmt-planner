@@ -258,14 +258,23 @@ class DebugLogPopulationTests(unittest.TestCase):
         df = self.dl.get_df('run_configs')
         got = dict(zip(df[df.kind == 'state'].label,
                        df[df.kind == 'state'].value))
-        # timedelta knobs recorded in hours; scalar knobs as-is (State defaults).
-        self.assertEqual(got['window_advance_amount'], 24.0)
-        self.assertEqual(got['carrying_avoidance_margin'], 24.0)
-        self.assertEqual(got['planning_horizon_buffer'], 672.0)     # 4 weeks
-        self.assertEqual(got['candidate_threshold'], 1.0)
-        self.assertEqual(got['reference_week_idx'], 1.0)
-        self.assertEqual(got['reference_advance_amount'], 1.0)
-        self.assertEqual(got['reference_threshold'], 5.0)
+        st = _make_state()              # same State config the log was built from
+        # The full set of recorded knobs (no more, no fewer).
+        self.assertEqual(set(got), {
+            'window_advance_amount', 'carrying_avoidance_margin',
+            'planning_horizon_buffer', 'candidate_threshold',
+            'reference_week_idx', 'reference_advance_amount',
+            'reference_threshold',
+        })
+        # timedelta knobs recorded in hours, the rest as their scalar value —
+        # derived from the State so the test survives default tuning.
+        for label in ('window_advance_amount', 'carrying_avoidance_margin',
+                      'planning_horizon_buffer'):
+            self.assertEqual(
+                got[label], getattr(st, label).total_seconds() / 3600.0)
+        for label in ('candidate_threshold', 'reference_week_idx',
+                      'reference_advance_amount', 'reference_threshold'):
+            self.assertEqual(got[label], float(getattr(st, label)))
 
     def test_iteration_states_cover_iteration_log(self):
         states = self.dl.get_df('iteration_states')

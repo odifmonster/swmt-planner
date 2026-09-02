@@ -856,7 +856,7 @@ resolve against; its `holidays` must also be inlined.
 
 The CLI writes a single Excel workbook at
 `<output_dir>/knit_plan_<YYYYMMDD>.xlsx` where the YYYYMMDD is the
-resolved `start_date`. Six sheets:
+resolved `start_date`. Seven sheets:
 
 - `demand` — the original input demand, one row per order across all
   `rls_items`, **regular and safety**. Built from `PlanReport.rls_items`.
@@ -875,6 +875,9 @@ resolved `start_date`. Six sheets:
     still place after initial inventory
 - `schedule` — multi-indexed by `(machine, activity_id)`, every
   activity across all machines.
+- `collapsed_sched` — a higher-level, operator-facing view of the same
+  per-machine activity schedule, with consecutive activities folded into
+  coarse steps (see "Collapsed schedule" below).
 - `production` — multi-indexed by `(item, job_id)`, one row per
   committed `Job`: its `total_rolls`, `total_lbs`, `completion`
   (when the job finishes — its last roll's `completion_time`), and
@@ -918,6 +921,66 @@ an in-memory `DebugLog` audit trail during the run — see "Verbose
 audit log" below.
 
 See `report.py` for the per-sheet layouts.
+
+#### Collapsed schedule (`collapsed_sched`)
+
+A condensed, operator-facing rewrite of the per-machine activity schedule:
+runs of fine-grained activities are folded into a few coarse step types so the
+sheet reads as "knit this, swap that, change to this" rather than the full
+activity ledger. Built by a new `collapsed_schedule_dataframe(report)` in
+`report.py`, written as the `collapsed_sched` sheet.
+
+**Indexing & columns.** Indexed by `machine` (single level, so repeated machine
+cells merge in Excel, matching the `schedule` sheet's grouped look); the
+remaining columns are **`label`, `start`, `end`, `lbs`, `desc`**. As on the
+`schedule` sheet, `lbs` is populated only for knit rows and **blank (NaN) for
+every other row** (`_round_int` → nullable `Int64`). Collapsed rows carry **no
+id** — `label` names the step instead.
+
+**Collapsing.** Walk each machine's activities in chronological order
+(`report.schedules[machine]`, already chronological) and fold maximal runs into
+collapsed rows. Every collapsed row inherits `start` from its **first** source
+activity and `end` from its **last**. The step types:
+
+- **`knit`** — a maximal run of consecutive `Knit` / `Doff` activities (one
+  uninterrupted stretch of knitting + doffing the same style; a beam swap or
+  changeover, being neither `Knit` nor `Doff`, ends the run). `lbs` = the **sum**
+  of the component `Knit` lbs; `desc` = the **first** `Knit`'s description (the
+  greige item id), matching the `schedule` sheet's Knit `desc`.
+- **`runout`** — a re-thread block with **no `TapeOut`** (`Waste*` then
+  `Hanging` + `Threading`) — a beam was re-hung without breaking into a
+  still-usable set. `desc` = the **`Hanging`'s** description; `lbs` blank.
+- **`yarn change`** — a re-thread block that **contains a `TapeOut`** (`TapeOut`,
+  optional `Waste*`, `Hanging` + `Threading`) — the operator broke into a
+  still-usable beamset and swapped it for a different one. Any changeover
+  activity is **excluded** (emitted as its own row, below). `desc` = the
+  **`Hanging`'s** description; `lbs` blank.
+- **`style change` / `runner change` / `pattern change`** — each
+  `StyleChange` / `RunnerChange` / `PatternChange` is **left alone** as its own
+  row. `label` is the change type; `desc` = its own `'from <item> to <item>'`;
+  `lbs` blank.
+- **`idle`** — each `Idle` is passed through as its own row (blank `desc`, blank
+  `lbs`), left alone like the changeovers.
+
+So a same-style mid-production beam swap reads `knit → runout → knit`; a style
+changeover that swaps yarn reads `… knit → yarn change → <style|runner|pattern>
+change → knit …`; and a style change onto the *same* yarn reads `… knit →
+runout → <…> change → knit …` (no yarn was actually swapped).
+
+**Classifying a re-thread block (runout vs. yarn change).** A re-thread block is
+the maximal run of `Waste` / `TapeOut` / `Hanging` / `Threading`. It is a
+**`yarn change`** iff it contains a `TapeOut` (the planner taps out only when
+breaking into a beamset worth preserving), else a **`runout`** — what matters is
+*breaking into* a set, not whether a style change happens to follow. The
+classification is **independent of any following changeover**: changing to a new
+style on the *same* yarn is a `runout` then a change, not a `yarn change`. The
+rare genuine yarn swap with no tape-out (an item change whose mismatched bars
+are near-empty and so are `Waste`d rather than taped out) is, by this rule,
+shown as a `runout` followed by the change — acceptable, since `yarn change`
+specifically captures tape-out break-ins.
+
+**Note.** A re-thread block with **two `Hanging`s** (the two bars re-threaded in
+back-to-back single steps) takes the **first** `Hanging`'s `desc`.
 
 ### Verbose audit log
 

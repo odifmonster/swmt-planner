@@ -85,14 +85,16 @@ def plan(
     while True:
         print(f'Total moves committed: {move_count}', end='\r')
         candidates = enumerate_candidates(state)
+        unique_machines = set(m.machine_id for m in candidates)
         # Advance the window as needed: when below threshold AND the
         # window hasn't reached the horizon, ask for more decisions.
         while (
-            len(candidates) < state.candidate_threshold
+            len(unique_machines) < state.candidate_threshold
             and state.window_end < horizon
         ):
             state.advance_window()
             candidates = enumerate_candidates(state)
+            unique_machines = set(m.machine_id for m in candidates)
 
         # Terminate when nothing more is eligible — even after the
         # window has been pushed to the horizon.
@@ -102,6 +104,21 @@ def plan(
         # Build the per-iteration scoring context (priorities, earliest
         # DP time, new-machine availability) once before scoring.
         ctx = build_context(state, candidates)
+        urgent_items = {
+            k.item_id for k in ctx.regular_orders_by_key.keys()
+            if k.week_idx is not None and k.week_idx <= state.reference_week_idx
+        }
+        while (
+            len(urgent_items) < state.reference_threshold
+            and state.reference_week_idx <= 8
+        ):
+            state.advance_reference_week()
+            candidates = enumerate_candidates(state)
+            ctx = build_context(state, candidates)
+            urgent_items = {
+                k.item_id for k in ctx.regular_orders_by_key.keys()
+                if k.week_idx is not None and k.week_idx <= state.reference_week_idx
+            }
 
         if debuglog is None:
             # Hot path: scalar score only, pick the min.

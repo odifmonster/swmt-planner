@@ -52,7 +52,9 @@ def eligible_decision_points(state: State) -> list[DecisionPoint]:
                 start_at='schedule_tail',
                 time=job_end,
             ))
-        if runout != job_end and runout <= state.window_end:
+        if (runout != job_end
+            and runout <= state.window_end
+            and machine.current_status.current_item.id != 'NONE'):
             out.append(DecisionPoint(
                 machine_id=machine_id,
                 start_at='next_runout',

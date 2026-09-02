@@ -17,10 +17,23 @@ if TYPE_CHECKING:
 
 __all__ = [
     'demand_dataframe',
-    'schedule_dataframe', 'production_dataframe', 'xref_dataframe',
+    'schedule_dataframe', 'collapsed_schedule_dataframe',
+    'production_dataframe', 'xref_dataframe',
     'unmet_demand_dataframe',
     'late_orders_dataframe', 'write_plan_report_xlsx',
 ]
+
+# Activity groupings for the collapsed schedule (see DESIGN.md, Collapsed
+# schedule). A maximal run of these is one `knit` step…
+_KNIT_RUN = (Knit, Doff)
+# …and a maximal run of these is one re-thread block (`runout` / `yarn change`).
+_RETHREAD = (Waste, TapeOut, Hanging, Threading)
+# Changeover activities pass through one-to-one, each with its own label.
+_CHANGE_LABEL = {
+    StyleChange: 'style change',
+    RunnerChange: 'runner change',
+    PatternChange: 'pattern change',
+}
 
 
 # ----- DataFrame builders -------------------------------------------------
@@ -121,6 +134,76 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
     )
     df['lbs'] = _round_int(df['lbs'])
     return df.set_index(['machine', 'activity_id'])
+
+
+def collapsed_schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    """A condensed, operator-facing rewrite of `schedule_dataframe`: consecutive
+    activities are folded into coarse steps. Indexed by `machine` (so rows group
+    in Excel, as `schedule` does); columns `label`, `start`, `end`, `lbs`,
+    `desc`. Collapsed rows carry **no id** — `label` names the step — and each
+    inherits `start` from its first source activity and `end` from its last.
+    `lbs` is populated only for `knit` rows (the sum of the run's `Knit` lbs);
+    `NaN` for every other row (rendered blank, as on `schedule`).
+
+    Step types (see `planners/infinite/DESIGN.md`, Collapsed schedule):
+
+    - **`knit`** — a maximal run of `Knit` / `Doff`; `desc` = the first `Knit`'s
+      description (the greige id), `lbs` = the run's summed `Knit` lbs.
+    - **`runout`** — a re-thread block (`Waste`/`Hanging`/`Threading`) with **no**
+      `TapeOut`; `desc` = the first `Hanging`'s description.
+    - **`yarn change`** — a re-thread block that **contains a `TapeOut`** (a
+      break-in to a still-usable beamset); `desc` = the first `Hanging`'s
+      description. The changeover that may follow is its own row, not folded in.
+    - **`style change` / `runner change` / `pattern change`** — each changeover
+      activity, one-to-one; `desc` = its `'from <item> to <item>'`.
+    - **`idle`** — each `Idle`, one-to-one; blank `desc`.
+
+    Rows stay in chronological order within each machine."""
+    rows = []
+    for machine_id, activities in report.schedules.items():
+        acts = list(activities)
+        i, n = 0, len(acts)
+        while i < n:
+            a = acts[i]
+            if isinstance(a, _KNIT_RUN):
+                j = i
+                lbs = 0.0
+                desc = ''
+                while j < n and isinstance(acts[j], _KNIT_RUN):
+                    if isinstance(acts[j], Knit):
+                        lbs += acts[j].lbs
+                        if not desc:
+                            desc = _activity_desc(acts[j])
+                    j += 1
+                label, lbs_val = 'knit', lbs
+            elif isinstance(a, _RETHREAD):
+                j = i
+                has_tape = False
+                desc = ''
+                while j < n and isinstance(acts[j], _RETHREAD):
+                    if isinstance(acts[j], TapeOut):
+                        has_tape = True
+                    if isinstance(acts[j], Hanging) and not desc:
+                        desc = _activity_desc(acts[j])
+                    j += 1
+                label, lbs_val = ('yarn change' if has_tape else 'runout'), math.nan
+            elif isinstance(a, Idle):
+                j = i + 1
+                label, lbs_val, desc = 'idle', math.nan, ''
+            else:                                   # a changeover activity
+                j = i + 1
+                label, lbs_val, desc = _CHANGE_LABEL[type(a)], math.nan, _activity_desc(a)
+            rows.append({
+                'machine': machine_id, 'label': label,
+                'start': acts[i].start, 'end': acts[j - 1].end,
+                'lbs': lbs_val, 'desc': desc,
+            })
+            i = j
+    df = pd.DataFrame(
+        rows, columns=['machine', 'label', 'start', 'end', 'lbs', 'desc'],
+    )
+    df['lbs'] = _round_int(df['lbs'])
+    return df.set_index('machine')
 
 
 def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
@@ -296,23 +379,27 @@ def _activity_desc(a: 'Activity') -> str:
 def write_plan_report_xlsx(
     report: 'PlanReport', path: str | Path,
 ) -> None:
-    """Write `report` to a single Excel workbook at `path` with six
-    sheets: `demand`, `schedule`, `production`, `xref`, `unmet_demand`,
-    and `late_orders`. Each corresponds to a DataFrame builder in this
-    module — split out so callers who want the data as DataFrames (for
+    """Write `report` to a single Excel workbook at `path` with seven
+    sheets: `demand`, `schedule`, `collapsed_sched`, `production`, `xref`,
+    `unmet_demand`, and `late_orders`. Each corresponds to a DataFrame builder
+    in this module — split out so callers who want the data as DataFrames (for
     testing or for other render targets) can use those directly.
 
-    The `schedule` and `production` sheets keep their MultiIndex on the
-    leftmost two columns so pandas merges repeated outer-index cells
-    (`merge_cells=True` is the `to_excel` default), giving a visibly-
-    grouped layout. `demand`, `xref`, `unmet_demand`, and `late_orders`
-    are flat tables (written with `index=False`)."""
+    The `schedule` / `production` (MultiIndex) and `collapsed_sched`
+    (single-level `machine` index) sheets keep their index columns so pandas
+    merges repeated outer-index cells (`merge_cells=True` is the `to_excel`
+    default), giving a visibly-grouped layout. `demand`, `xref`,
+    `unmet_demand`, and `late_orders` are flat tables (written with
+    `index=False`)."""
     with pd.ExcelWriter(path) as writer:
         demand_dataframe(report).to_excel(
             writer, sheet_name='demand', index=False,
         )
         schedule_dataframe(report).to_excel(
             writer, sheet_name='schedule',
+        )
+        collapsed_schedule_dataframe(report).to_excel(
+            writer, sheet_name='collapsed_sched',
         )
         production_dataframe(report).to_excel(
             writer, sheet_name='production',

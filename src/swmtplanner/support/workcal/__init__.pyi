@@ -1,7 +1,7 @@
 from .holidays import (
     FlexDate, FixedDate, holidays_from_list, load_holidays,
 )
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,9 @@ class WorkCal:
     @property
     def hours_per_day(self) -> int:
         """Availabe working hours in a day."""
+        ...
+    @property
+    def cal_shift(self) -> timedelta:
         ...
     @property
     def holidays(self) -> tuple[FlexDate | FixedDate]: ...

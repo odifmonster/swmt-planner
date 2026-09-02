@@ -328,11 +328,13 @@ Granularity by `label`:
 - **excess** — `days` blank; one row carrying the excess `qty`, `value` =
   `weight × qty`.
 
-**Strict reconciliation:** detail is emitted for **every** item (each scored
-candidate runs every `RlsItem` through `cost_if`, not just the ones its plan
-touches), so the rows for a given `summary_id` sum (their `value`) exactly to
-that `cost_summary` row's `cost`. Rows that aren't of interest (e.g. items the
-move didn't affect) are filtered in the dashboard, not dropped here. Config:
+**Affected-items only:** detail is emitted **only for the items the move's plan
+touches** (the items with jobs in the candidate's plan), not for every
+`RlsItem`. The `cost_summary` totals are still summed over *all* items (each is
+run through `cost_if` to contribute its scalar), so the detail rows for a given
+`summary_id` are a **subset** of that component's cost — they no longer
+reconcile to the `cost_summary` `cost`, by design (the untouched items'
+unchanged windows would just be noise in the per-move view). Config:
 `set_pk('inv_cost_detail', 'icost_id', ctr_name='icost_id')`,
 `set_fk('inv_cost_detail', 'summary_id', 'cost_summary', 'summary_id')`,
 `set_fk('inv_cost_detail', 'move_id', 'iteration_log', 'move_id')`.

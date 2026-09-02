@@ -172,8 +172,7 @@ class Costing:
         # lateness / drainage / carrying / excess window (with its unweighted
         # `contribution`); we weight it and write the row. Linked to its
         # `cost_summary` parent by `summary_id`; `icost_id` (PK) and `move_id`
-        # (FK) auto-fill. The rows for a given label sum to its cost_summary
-        # `cost`.
+        # (FK) auto-fill.
         inv_weight = {
             'lateness': w.lateness, 'drainage': w.drainage,
             'carrying': w.carrying, 'excess': w.excess,
@@ -188,16 +187,18 @@ class Costing:
                 value=inv_weight[label] * contribution,
             )
 
-        # Demand quantities, summed across items — every item runs through
-        # cost_if (with no extra jobs for the ones the plan doesn't touch) so
-        # its windows are emitted; the returned scalars are the same as the
-        # hot path's cost_if / view-tracker mix.
+        # Demand quantities, summed across items so the `cost_summary` totals
+        # stay complete. Only the items the move actually touches emit
+        # `inv_cost_detail` rows (the sink) — the untouched items still run
+        # through cost_if (no sink) to contribute their scalars, but their
+        # windows aren't recorded.
         jobs_by_item: dict[str, list[Job]] = {}
         for job in move.plan.jobs:
             jobs_by_item.setdefault(job.item.id, []).append(job)
         lateness_q = drainage_q = carrying_q = excess_q = 0.0
         for item_id, rls in state.rls_items.items():
-            cc = rls.cost_if(jobs_by_item.get(item_id, []), inv_sink)
+            sink = inv_sink if item_id in jobs_by_item else None
+            cc = rls.cost_if(jobs_by_item.get(item_id, []), sink)
             lateness_q += cc.lateness
             drainage_q += cc.drainage
             carrying_q += cc.carrying

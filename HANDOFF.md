@@ -39,7 +39,7 @@ pandas/numpy + pymysql; no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **466 tests, all passing** (`python -m unittest discover -s
+> **Suite state:** **487 tests, all passing** (`python -m unittest discover -s
 > tests -p '*_tests.py'`; the MySQL-gated tests — `persist_run` end-to-end plus
 > the whole `sqlload` read layer — run against a local `swmtinftest`, else skip).
 > The planner prints `Total moves committed: N` (and per-table `Dumping …` lines
@@ -70,29 +70,38 @@ guard rail) and a three-way changeover split (`StyleChange` / `RunnerChange` /
 `PatternChange`), alongside a `Status` accessor refactor. Full detail lives in
 `schedule/DESIGN.md` and `planners/infinite/DESIGN.md`.
 
-## Debug log + investigation — ✅ committed; GUI ⏸ next
+## Debug log + investigation — data layer done; GUI through phase 4
 
 A codebase-wide **debug mode**: the planner records *why* each move was chosen
 into a `DebugLog`, persists a run to a local **MySQL** store, and investigates it
 through a planner-agnostic **PyQt6 dashboard**. The debug log, the MySQL writer,
-and the dashboard's `sqlload` read layer are committed; the GUI is the remaining
-piece.
+and the dashboard's `sqlload` read layer are done (the earlier pieces committed;
+the composite-PK + two-new-table work is in the working tree); the GUI is built
+through phase 4, with the pretty view (phase 5) remaining.
 
 ### The debug log — `swmtplanner.debuglog` (done)
 
 `DebugLog` is a generic, config-driven container of named tables (declare tables
 + `set_pk` / `set_fk`; populate with `add_row` / `update_row`; read with
 `get_df` / `get_nrows` / the `tables` / `schema` accessors). It is
-planner-agnostic, hard-coding no schema of its own.
+planner-agnostic, hard-coding no schema of its own. **Primary keys may be
+composite**: `set_pk(table, *columns)` stores `@pk_cols` as a tuple and keys rows
+by the tuple of PK values; the public API returns a **scalar for a single-column
+PK** (back-compat) and a **tuple for a composite** one. `add_row`/`get_last_pk_val`
+follow that; `get_df` keeps a composite PK's columns as ordinary leading columns
+(no MultiIndex). An FK may reference only a **single-column** PK.
+`TableSchema.pk` is now a `tuple[str, ...]` (empty for key-less).
 
 The planner threads it as an optional `debuglog` kwarg through the loop +
-costing and **populates eight tables live as it runs** — `iteration_log`,
-`cost_summary`, `inv_cost_detail`, `sched_cost_detail`, `priority_detail`,
-`production` — plus a post-loop copy of `demand` / `unmet_demand`. Supporting
-provenance feeds these: `Job.tgt_order`, per-roll `Roll.knits`, and the
-`SafetyAwareView` roll→order fill-links. This **replaced** an earlier
-after-the-fact reconstruction (the old `iterlog` / `cost_breakdown` machinery),
-which has been removed. Design: `swmtplanner/debuglog/DESIGN.md`.
+costing and **populates ten tables** — live per-iteration: `iteration_states`
+(window end + reference week), `iteration_log`, `cost_summary`,
+`inv_cost_detail`, `sched_cost_detail`, `priority_detail`, `production`; once
+before the loop: `run_configs` (cost weights + State knobs, timedeltas in hours,
+keyed by composite `(kind, label)`); and post-loop copies of `demand` /
+`unmet_demand`. Supporting provenance feeds these: `Job.tgt_order`, per-roll
+`Roll.knits`, and the `SafetyAwareView` roll→order fill-links. This **replaced**
+an earlier after-the-fact reconstruction (the old `iterlog` / `cost_breakdown`
+machinery), which has been removed. Design: `swmtplanner/debuglog/DESIGN.md`.
 
 ### Planner-owned: debug schema + MySQL writer (done)
 
@@ -103,15 +112,18 @@ translation); it also holds a `runs` registry and two read-only views
 **user-provisioned** — the tool only INSERTs. The planner owns its concrete
 schema + the write path:
 
-- **`planners/infinite/manifest.py`** — the concrete schema: per-table column
-  types, PKs, the FK graph (incl. `production.knit_id →
-  sched_cost_detail.activity_id`, a link beyond `DebugLog.schema`, plus the
-  committed views' identity-column FK back to `sched_cost_detail`), the
-  FK-topological insert order, and per-table `order_by` (the explicit paging
-  order, overriding the pk when set).
-  Built from the generic dataclasses in `swmtplanner.dashboard.manifest`. A test
-  guards it against drift from the live `DebugLog`. The MySQL DDL is documented
-  in `planners/infinite/DESIGN.md` (Debug-log persistence).
+- **`planners/infinite/manifest.py`** — the concrete schema for **ten** tables
+  (+ the `runs` registry and the two committed views): per-table column types,
+  PKs (incl. `run_configs`' composite `(kind, label)`), the FK graph (incl.
+  `production.knit_id → sched_cost_detail.activity_id` and `iteration_log.
+  iteration_idx → iteration_states.iteration_idx`, links beyond `DebugLog.schema`,
+  plus the committed views' identity-column FK back to `sched_cost_detail`), the
+  FK-topological insert order (`iteration_states` before `iteration_log`), and
+  per-table `order_by` (the explicit paging order, overriding the pk when set).
+  Built from the generic dataclasses in `swmtplanner.dashboard.manifest`; each
+  `TableSpec` also carries a `disp_name` + `desc` for the GUI. A test guards it
+  against drift from the live `DebugLog`. The MySQL DDL is documented in
+  `planners/infinite/DESIGN.md` (Debug-log persistence).
 - **`planners/infinite/sqldump/persistence.py`** — `persist_run(debuglog, conn,
   …)`: connect as the writer, INSERT a `runs` row → `run_id`, then
   bulk-`executemany` every table's run-tagged rows in FK-topological order, one
@@ -129,8 +141,9 @@ generic `manifest` dataclasses + reader `config` at top; the `sqlload` read
 layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
 
 - **`manifest.py`** — generic `TableSpec` / `Column` / `ForeignKey` dataclasses
-  (shape only — the planner fills them in) + the universal `RUN_ID` and the
-  `order_columns` accessor.
+  (shape only — the planner fills them in; `TableSpec` carries `disp_name` +
+  `desc` for the GUI) + the universal `RUN_ID`, the `order_columns` accessor
+  (`order_by` if set, else `pk`), and `referencing_fks` (the reverse-FK map).
 - **`config.py`** — `ConnConfig` / `DatabaseConfigError` /
   `resolve_conn_config(block, env, *, prefix)` over a **flat** connection block
   (`host`/`port`/`name`/`user`/`password`). The planner's writer uses `SWMT_DB_*`;
@@ -187,24 +200,48 @@ layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
 
 ### Tests
 
+- `tests/debuglog_tests.py` — white-box `DebugLog` coverage incl. the
+  **composite-PK** section (multi-col `set_pk`, tuple `add_row`/`update_row`/
+  `get_last_pk_val`, flat composite `get_df`, FK-onto-composite rejected). Spec:
+  `DEBUGLOG_TEST_SPEC.md`.
 - `tests/persistence_tests.py` (planner) — manifest↔DebugLog consistency +
-  structure, persistence pure helpers, `persist_run` end-to-end (MySQL-gated) +
-  `run.py` wiring. Spec: `PERSISTENCE_TEST_SPEC.md`.
+  structure (incl. `run_configs`/`iteration_states`), persistence pure helpers
+  (incl. composite-PK `project_rows`), the `plan`→`run_configs`/`iteration_states`
+  population, `persist_run` end-to-end (MySQL-gated) + `run.py` wiring. Spec:
+  `PERSISTENCE_TEST_SPEC.md`.
 - `tests/dashboard_tests.py` (generic dashboard) — config resolution + reader
   config, `Filter`/`FKLookup` (pure), the `referencing_fks` reverse-FK map (pure),
-  `Query`/`Table`/`Row` incl. `Table.unique` (MySQL-gated, using the knit
-  planner's persisted run as the fixture). Spec: `DASHBOARD_TEST_SPEC.md`.
+  `Query`/`Table`/`Row` incl. `Table.unique` (MySQL-gated). The gated tests
+  persist a **synthetic, controlled `DebugLog`** (`_dashboard_fixture_log`, built
+  via `add_row`) — decoupled from the planner so row counts stay stable through
+  planner tuning. Spec: `DASHBOARD_TEST_SPEC.md`.
+- `tests/inf_plan_tests.py` — planner loop / coordination, incl. `eligible_orders`
+  (see the precedence note below). Spec: `INF_PLAN_TEST_SPEC.md`.
 - `tests/mysql_support.py` — shared MySQL connection scaffolding (not collected).
 - The **`app/` GUI is verified by running it** (`knit-debug`), not unit-tested —
   per convention; the `Table`/`Query`/`Row` stack beneath it is covered.
 
+## Planner — `eligible_orders` precedence (one order per item)
+
+`coordination.eligible_orders` now returns **at most one order per item**, by
+precedence: (1) **urgent regular** — the earliest unmet order with `week_idx <=
+state.reference_week_idx`; else (2) **safety** — when the pool is below target;
+else (3) **future regular**. So an item gets a safety order only once its urgent
+demand is met *and* it is below safety target; otherwise it gets a regular order.
+This shrank the default planner run (fewer candidates / iterations), which is why
+the dashboard read-layer tests moved to the synthetic fixture above. Detail:
+`INF_PLAN_TEST_SPEC.md` §1.3.2.
+
 ## Next concrete action
 
-GUI phase 4 (FK/PK navigation + back button) is **done** — code, the
-`referencing_fks` reverse-FK map + its coverage, and the suite green; the
-interactive GUI still wants a manual run-verify pass (`knit-debug`: drill an FK
-cell, check PK rows + "Go to…", retrace with **‹ Back**, clear a nav filter via
-the header ✕). Design lives in `swmtplanner/dashboard/app/DESIGN.md` (Phase 4).
+Recently landed (working tree, suite green): `DebugLog` **composite PKs**, the
+two new tables (`run_configs` / `iteration_states`) end-to-end (manifest +
+`_build_debug_log` + population + persist round-trip), the `eligible_orders`
+precedence rework + its tests, and the **decoupled dashboard fixture**. The two
+new tables surface automatically in the GUI raw view (each table now also shows a
+`disp_name` + `desc`). GUI phase 4 (FK/PK navigation + back button) is also done;
+it still wants a manual run-verify pass (`knit-debug`: drill an FK cell, check PK
+rows + "Go to…", retrace with **‹ Back**, clear a nav filter via the header ✕).
 
 Next: **phase 5 — the planner-specific pretty view**, DESIGN-first per the usual
 workflow. The elaborate, non-technical view built from custom `QtWidget`

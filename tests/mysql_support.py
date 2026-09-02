@@ -7,15 +7,15 @@ module, so test discovery skips it."""
 
 import os
 
-_HOST = os.environ.get('SWMT_TEST_DB_HOST', '127.0.0.1')
+_HOST = os.environ.get('SWMT_TEST_DB_HOST', '35.188.224.154')
 _PORT = int(os.environ.get('SWMT_TEST_DB_PORT', '3306'))
 _DB = os.environ.get('SWMT_TEST_DB_NAME', 'swmtinftest')
-_WRITER = (os.environ.get('SWMT_TEST_WRITER_USER', 'knitwritetest'),
-           os.environ.get('SWMT_TEST_WRITER_PASSWORD', 'testpass'))
-_READER = (os.environ.get('SWMT_TEST_READER_USER', 'knitreadtest'),
-           os.environ.get('SWMT_TEST_READER_PASSWORD', 'testpass'))
-_ADMIN = (os.environ.get('SWMT_TEST_ADMIN_USER', 'ktroot'),
-          os.environ.get('SWMT_TEST_ADMIN_PASSWORD', 'InfTestRoot'))
+_WRITER = (os.environ.get('SWMT_TEST_WRITER_USER', 'debuglogtest'),
+           os.environ.get('SWMT_TEST_WRITER_PASSWORD', 'TestWriter!'))
+_READER = (os.environ.get('SWMT_TEST_READER_USER', 'dashboardtest'),
+           os.environ.get('SWMT_TEST_READER_PASSWORD', 'TestReader!'))
+_ADMIN = (os.environ.get('SWMT_TEST_ADMIN_USER', 'testroot'),
+          os.environ.get('SWMT_TEST_ADMIN_PASSWORD', 'W@rp-Kn!tt!ng-Rul3s'))
 
 
 def _connect(creds, autocommit=True):

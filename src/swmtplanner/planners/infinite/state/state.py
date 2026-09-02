@@ -104,7 +104,7 @@ class State:
     # before reference_week_idx. When this falls below the threshold, the
     # main loop calls `advance_reference_week()` until met or until the
     # reference week exceeds the latest order's week_idx.
-    reference_threshold: int = 5
+    reference_threshold: int = 1
 
     def commit_move(self, move: Move) -> None:
         """Apply `move` to the appropriate machine and rls_items. The
@@ -123,6 +123,7 @@ class State:
             jobs_by_item.setdefault(job.item.id, []).append(job)
 
         for item_id, jobs in jobs_by_item.items():
+            if item_id not in self.rls_items: continue
             self.rls_items[item_id].register_jobs(jobs)
 
     def advance_window(self) -> None:

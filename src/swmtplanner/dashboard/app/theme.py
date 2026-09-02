@@ -34,14 +34,24 @@ QTreeWidget::item:selected {
     border-right: 1px solid #5192a5;
 }
 
-/* Content header */
+/* Content header bar (header label + optional description) */
+QWidget#headerBox {
+    background-color: #f0f0f0;
+    border-bottom: 1px solid #c0c0c0;
+}
 QLabel#headerLabel {
     font-size: 20px;
     font-weight: bold;
     color: #3c3c3c;
-    padding: 10px 4px;
-    background-color: #f0f0f0;
-    border-bottom: 1px solid #c0c0c0;
+    padding: 10px 4px 2px 4px;
+    background: transparent;
+}
+/* Small table description under the header */
+QLabel#descLabel {
+    font-size: 12px;
+    color: #6c6c6c;
+    padding: 0 4px 8px 4px;
+    background: transparent;
 }
 QLabel#message { font-size: 16px; color: #52606d; }
 

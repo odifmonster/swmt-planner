@@ -50,7 +50,7 @@ class DashboardWindow(QWidget):
         raw_item = QTreeWidgetItem(['Raw view'])
         raw_item.setData(0, _ROLE, ('raw_root',))
         for spec in table_specs:
-            child = QTreeWidgetItem([spec.name])
+            child = QTreeWidgetItem([spec.disp_name])     # readable name, not the DB name
             child.setData(0, _ROLE, ('raw', spec.name))
             raw_item.addChild(child)
         pretty_item = QTreeWidgetItem(['Pretty view'])
@@ -63,14 +63,21 @@ class DashboardWindow(QWidget):
 
         # ----- content -----
         self._header = QLabel('')
-        self._header.setContentsMargins(10, 10, 10, 10)
+        self._header.setContentsMargins(10, 10, 10, 2)
         self._header.setObjectName('headerLabel')
+        # A small description under the header (the table's `desc`); hidden when
+        # there's nothing to describe (run-selection / pretty pages).
+        self._desc = QLabel('')
+        self._desc.setContentsMargins(12, 0, 10, 8)
+        self._desc.setObjectName('descLabel')
+        self._desc.setWordWrap(True)
+        self._desc.hide()
         self._run_page = RunSelectionPage(cursor, runs_spec)
         self._run_page.run_chosen.connect(self._on_run_chosen)
         self._raw_page = RawViewPage(
             cursor, self._specs, referencing_fks(table_specs),
         )
-        self._raw_page.current_table_changed.connect(self._header.setText)
+        self._raw_page.current_table_changed.connect(self._on_table_changed)
         self._pretty_page = PrettyViewPage()
         self._placeholder = message_page(_NO_RUN)
 
@@ -81,11 +88,21 @@ class DashboardWindow(QWidget):
         self._stack.addWidget(self._pretty_page)
         self._stack.addWidget(self._placeholder)
 
+        # Header + description share one bar (so its bottom border sits below
+        # whichever is the last visible line, desc shown or not).
+        header_box = QWidget()
+        header_box.setObjectName('headerBox')
+        header_layout = QVBoxLayout(header_box)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+        header_layout.addWidget(self._header)
+        header_layout.addWidget(self._desc)
+
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
-        content_layout.addWidget(self._header)
+        content_layout.addWidget(header_box)
         content_layout.addWidget(self._stack)
 
         outer = QHBoxLayout(self)
@@ -113,12 +130,26 @@ class DashboardWindow(QWidget):
         elif tag == 'pretty':
             self._show_pretty()
 
+    def _set_header(self, title: str, desc: str = '') -> None:
+        """Set the content header to `title` and the description line to `desc`
+        (the description is hidden when empty)."""
+        self._header.setText(title)
+        self._desc.setText(desc)
+        self._desc.setVisible(bool(desc))
+
+    def _on_table_changed(self, name: str) -> None:
+        """Header follows the raw view's current table — its readable `disp_name`
+        with the `desc` underneath."""
+        spec = self._specs[name]
+        self._set_header(spec.disp_name, spec.desc)
+
     def _show_run_selection(self) -> None:
-        self._header.setText('Run selection')
+        self._set_header('Run selection')
         self._stack.setCurrentWidget(self._run_page)
 
     def _show_raw(self, name: str) -> None:
-        self._header.setText(name)
+        spec = self._specs[name]
+        self._set_header(spec.disp_name, spec.desc)
         if self.selected_run_id is None:
             self._stack.setCurrentWidget(self._placeholder)
             return
@@ -128,7 +159,7 @@ class DashboardWindow(QWidget):
         self._raw_page.show_table(self._specs[name], self.selected_run_id)
 
     def _show_pretty(self) -> None:
-        self._header.setText('Pretty view')
+        self._set_header('Pretty view')
         if self.selected_run_id is None:
             self._stack.setCurrentWidget(self._placeholder)
             return

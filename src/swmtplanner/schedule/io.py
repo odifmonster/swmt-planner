@@ -50,7 +50,7 @@ def machines_from_list(
         machine = Machine(
             id=entry['id'],
             init_item=init_item,
-            start=start_date,
+            start=start_date + workcal.cal_shift,
             init_top_beam=BeamSet(item_cfg.top_beam),
             init_top_lbs=float(entry['init_top_lbs']),
             init_btm_beam=BeamSet(item_cfg.btm_beam),
