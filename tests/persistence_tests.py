@@ -2,7 +2,7 @@
 
 """Coverage of the infinite planner's debug-log persistence — its concrete
 `manifest` (checked against the live `DebugLog`) and the `sqldump` writer (pure
-helpers + a MySQL-gated end-to-end). See
+helpers + a SQL Server-gated end-to-end). See
 `tests/spec-files/PERSISTENCE_TEST_SPEC.md`."""
 
 import datetime
@@ -26,9 +26,12 @@ from swmtplanner.planners.infinite.sqldump.persistence import (
     PersistenceError, persist_run,
 )
 from swmtplanner.dashboard.config import ConnConfig
+from swmtplanner.dashboard import storage
 
 from inf_plan_tests import _make_state, _weights
-from mysql_support import _HOST, _PORT, _DB, _WRITER, _READER, _ADMIN, _connect
+from sqlserver_support import (
+    _HOST, _PORT, _DB, _WRITER, _READER, _ADMIN, _connect, _clean_slate,
+)
 
 
 def _populated_log():
@@ -182,15 +185,20 @@ class PersistenceHelperTests(unittest.TestCase):
             persistence.to_sql(pd.Timestamp('2026-05-18')), datetime.datetime,
         )
 
-    def test_insert_sql_backticks_and_order(self):
+    def test_insert_sql_brackets_physical_columns_and_qmarks(self):
         spec = spec_for_name('sched_cost_detail')
         sql = persistence.insert_sql(spec)
+        # physical (knit_) table, every identifier bracket-quoted, run_id first
         self.assertTrue(sql.startswith(
-            'INSERT INTO `sched_cost_detail` (`run_id`, `activity_id`, `move_id`, '
+            'INSERT INTO [knit_sched_cost_detail] '
+            '([run_id], [activity_id], [move_id], [machine], '
         ))
-        for col in ('desc', 'start', 'end'):       # reserved words backticked
-            self.assertIn(f'`{col}`', sql)
-        self.assertEqual(sql.count('%s'), 1 + len(spec.column_names))
+        # each datetime column expands to its _date/_time INT pair, in order
+        self.assertIn(
+            '[start_date], [start_time], [end_date], [end_time], [desc]', sql)
+        n_physical = sum(len(storage.physical_columns(c)) for c in spec.columns)
+        self.assertEqual(sql.count('?'), 1 + n_physical)     # qmark placeholders
+        self.assertNotIn('%s', sql)
 
     def test_project_rows_shape_and_counts(self):
         for name in ('iteration_log', 'cost_summary', 'priority_detail',
@@ -200,7 +208,9 @@ class PersistenceHelperTests(unittest.TestCase):
             self.assertEqual(len(rows), len(self.dl.get_df(name)), name)
             for r in rows:
                 self.assertEqual(r[0], 42)                         # run_id first
-                self.assertEqual(len(r), 1 + len(spec.column_names))
+                n_physical = sum(
+                    len(storage.physical_columns(c)) for c in spec.columns)
+                self.assertEqual(len(r), 1 + n_physical)    # datetimes = 2 cells
 
     def test_project_rows_exposes_keyed_pk(self):
         spec = spec_for_name('iteration_log')
@@ -208,6 +218,19 @@ class PersistenceHelperTests(unittest.TestCase):
         rows = list(persistence.project_rows(self.dl, spec, run_id=1))
         self.assertTrue(rows)
         self.assertTrue(all(isinstance(r[1 + mi], int) for r in rows))
+
+    def test_project_rows_splits_datetimes_into_int_pairs(self):
+        spec = spec_for_name('production')              # start / end are datetimes
+        rows = list(persistence.project_rows(self.dl, spec, run_id=1))
+        self.assertTrue(rows)
+        physical = [p for c in spec.columns for p in storage.physical_columns(c)]
+        i = 1 + physical.index('start_date')             # offset of start's pair
+        src = self.dl.get_df('production').reset_index()
+        for r, (_, s) in zip(rows, src.iterrows()):
+            self.assertEqual(
+                (r[i], r[i + 1]),
+                (storage.encode_date(s['start']), storage.encode_time(s['start'])),
+            )
 
     def test_project_rows_empty_table_yields_nothing(self):
         spec = spec_for_name('unmet_demand')                  # empty in this fixture
@@ -240,7 +263,7 @@ class PersistenceHelperTests(unittest.TestCase):
 
 class DebugLogPopulationTests(unittest.TestCase):
     """`plan(..., debuglog=dl)` fills the new config / per-iteration tables.
-    Pure — drives a small in-memory run, no MySQL."""
+    Pure — drives a small in-memory run, no server."""
 
     @classmethod
     def setUpClass(cls):
@@ -288,36 +311,29 @@ class DebugLogPopulationTests(unittest.TestCase):
 
 
 # ===================================================================
-# 4. persist_run end-to-end (MySQL-gated)
+# 4. persist_run end-to-end (SQL Server-gated)
 # ===================================================================
 
-class PersistRunMySQLTests(unittest.TestCase):
-    """End-to-end against a local test MySQL. Skips when the server / driver is
-    unavailable. Each test truncates all knit* tables (admin role) for a clean
-    slate; persists via the write role; reads back via the read role."""
+class PersistRunSQLServerTests(unittest.TestCase):
+    """End-to-end against a SQL Server test database (`SWMT_TEST_*`). Skips when
+    the driver / server is unavailable — none is provisioned yet, so these skip
+    until then. Each test empties every knit_ table (admin role, FK-safe order)
+    for a clean slate; persists via the write role; reads back via the read
+    role."""
 
     @classmethod
     def setUpClass(cls):
         try:
             _connect(_ADMIN).close()
         except Exception as exc:                   # driver missing or server down
-            raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
+            raise unittest.SkipTest(f'test SQL Server {_DB!r} unreachable: {exc}')
         cls.dl = _build_debug_log()
         cls.report = plan(_make_state(), Costing(_weights()), debuglog=cls.dl)
         cls.writer_conn = ConnConfig(_HOST, _PORT, _DB, *_WRITER)
         cls.reader_conn = ConnConfig(_HOST, _PORT, _DB, *_READER)
 
     def setUp(self):
-        conn = _connect(_ADMIN)
-        try:
-            with conn.cursor() as cur:
-                cur.execute('SET FOREIGN_KEY_CHECKS=0')
-                for spec in manifest.ALL_TABLES:
-                    cur.execute(f'TRUNCATE TABLE `{spec.name}`')
-                cur.execute('SET FOREIGN_KEY_CHECKS=1')
-            conn.commit()
-        finally:
-            conn.close()
+        _clean_slate(manifest.ALL_TABLES)               # FK-safe, children first
 
     def _query(self, sql, params=()):
         conn = _connect(_READER)
@@ -328,11 +344,11 @@ class PersistRunMySQLTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _count(self, table, run_id=None):
+    def _count(self, spec, run_id=None):
         if run_id is None:
-            return self._query(f'SELECT COUNT(*) FROM `{table}`')[0][0]
+            return self._query(f'SELECT COUNT(*) FROM [{spec.db_name}]')[0][0]
         return self._query(
-            f'SELECT COUNT(*) FROM `{table}` WHERE run_id=%s', (run_id,),
+            f'SELECT COUNT(*) FROM [{spec.db_name}] WHERE [run_id]=?', (run_id,),
         )[0][0]
 
     def test_round_trip_counts_and_metadata(self):
@@ -341,19 +357,20 @@ class PersistRunMySQLTests(unittest.TestCase):
             start_date=datetime.date(2026, 5, 18), total_score=123.5, n_unmet=7,
         )
         self.assertIsInstance(rid, int)
-        self.assertEqual(self._count('runs'), 1)
+        self.assertEqual(self._count(manifest.RUNS), 1)
         score, n_unmet, start_date = self._query(
-            'SELECT total_score, n_unmet, start_date FROM runs '
-            'WHERE run_id=%s', (rid,),
+            f'SELECT [total_score], [n_unmet], [start_date] '
+            f'FROM [{manifest.RUNS.db_name}] WHERE [run_id]=?', (rid,),
         )[0]
         self.assertAlmostEqual(score, 123.5)
         self.assertEqual(n_unmet, 7)
-        self.assertEqual(start_date, datetime.date(2026, 5, 18))
+        self.assertEqual(start_date, 20260518)               # a YYYYMMDD int
+        self.assertEqual(storage.decode_date(start_date), datetime.date(2026, 5, 18))
         # every table's row count for this run matches the in-memory log; a
         # successful insert also proves the FK-topological order held.
         for spec in manifest.TABLES:
             self.assertEqual(
-                self._count(spec.name, rid),
+                self._count(spec, rid),
                 len(self.dl.get_df(spec.name)), spec.name,
             )
 
@@ -363,12 +380,14 @@ class PersistRunMySQLTests(unittest.TestCase):
             start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
         )
         roles = {r[0] for r in self._query(
-            'SELECT DISTINCT role FROM iteration_log WHERE run_id=%s', (rid,),
+            f'SELECT DISTINCT [role] FROM [{spec_for_name("iteration_log").db_name}] '
+            f'WHERE [run_id]=?', (rid,),
         )}
         self.assertTrue(roles <= {'committed', 'rejected'})
         self.assertIn('committed', roles)
         db_committed = self._query(
-            "SELECT COUNT(*) FROM iteration_log WHERE run_id=%s AND role='committed'",
+            f"SELECT COUNT(*) FROM [{spec_for_name('iteration_log').db_name}] "
+            f"WHERE [run_id]=? AND [role]='committed'",
             (rid,),
         )[0][0]
         il = self.dl.get_df('iteration_log')
@@ -379,21 +398,21 @@ class PersistRunMySQLTests(unittest.TestCase):
         rid1 = persist_run(self.dl, self.writer_conn, **kw)
         rid2 = persist_run(self.dl, self.writer_conn, **kw)
         self.assertNotEqual(rid1, rid2)
-        self.assertEqual(self._count('runs'), 2)
+        self.assertEqual(self._count(manifest.RUNS), 2)
         for spec in manifest.TABLES:
             n = len(self.dl.get_df(spec.name))
-            self.assertEqual(self._count(spec.name, rid1), n, spec.name)
-            self.assertEqual(self._count(spec.name, rid2), n, spec.name)
-            self.assertEqual(self._count(spec.name), 2 * n, spec.name)
+            self.assertEqual(self._count(spec, rid1), n, spec.name)
+            self.assertEqual(self._count(spec, rid2), n, spec.name)
+            self.assertEqual(self._count(spec), 2 * n, spec.name)
 
     def test_reader_role_cannot_write(self):
-        self.assertEqual(self._count('runs'), 0)
+        self.assertEqual(self._count(manifest.RUNS), 0)
         with self.assertRaises(PersistenceError):
             persist_run(
                 self.dl, self.reader_conn,
                 start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
             )
-        self.assertEqual(self._count('runs'), 0)   # rollback / denied: nothing written
+        self.assertEqual(self._count(manifest.RUNS), 0)   # rollback / denied: nothing written
 
     def test_run_py_wiring_persists_with_label_and_notes(self):
         # The run.py `--verbose` glue: resolve the writer config from a
@@ -409,13 +428,14 @@ class PersistRunMySQLTests(unittest.TestCase):
             'baseline run', 'first line\nsecond line\n',
         )
         self.assertIsInstance(rid, int)
-        self.assertEqual(self._count('runs'), 1)
+        self.assertEqual(self._count(manifest.RUNS), 1)
         self.assertEqual(
-            self._count('iteration_log', rid),
+            self._count(spec_for_name('iteration_log'), rid),
             len(self.dl.get_df('iteration_log')),
         )
         n_unmet, label, notes = self._query(
-            'SELECT n_unmet, label, notes FROM runs WHERE run_id=%s', (rid,),
+            f'SELECT [n_unmet], [label], [notes] FROM [{manifest.RUNS.db_name}] '
+            f'WHERE [run_id]=?', (rid,),
         )[0]
         self.assertEqual(n_unmet, len(self.report.unmet_lbs_by_item_week))
         self.assertEqual(label, 'baseline run')
@@ -427,7 +447,7 @@ class PersistRunMySQLTests(unittest.TestCase):
             None, self.dl, self.report, datetime.datetime(2026, 5, 18),
             'lbl', 'notes',
         ))
-        self.assertEqual(self._count('runs'), 0)
+        self.assertEqual(self._count(manifest.RUNS), 0)
 
 
 if __name__ == '__main__':

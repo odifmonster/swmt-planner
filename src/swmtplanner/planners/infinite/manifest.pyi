@@ -7,6 +7,7 @@ from swmtplanner.dashboard.manifest import (
 )
 
 RUNS_TABLE: str
+DB_PREFIX: str
 RUNS: TableSpec
 TABLES: tuple[TableSpec, ...]
 VIEWS: tuple[TableSpec, ...]

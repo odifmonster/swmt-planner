@@ -95,7 +95,9 @@ class RawViewPage(QWidget):
         # build, so the new header/placeholder paint first.
         self._stack.setCurrentWidget(self._loading)
         self.window().repaint()
-        table = Table(spec, self._cursor, self._run_id)
+        # `ref_specs` lets an FK lookup name the referenced table's physical
+        # `db_name` in its sub-query.
+        table = Table(spec, self._cursor, self._run_id, ref_specs=self._specs)
         if apply is not None:                       # apply the nav constraint
             apply(table)                            # before the grid renders page 1
         grid = PagedGrid()

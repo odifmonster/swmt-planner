@@ -2,7 +2,7 @@
 
 """Coverage of the generic dashboard — `config` (connection resolution incl. the
 reader's `SWMT_DASHBOARD_CONFIG`) and the `sqlload` read layer (`Filter` /
-`FKLookup` pure; `Query` / `Table` / `Row` MySQL-gated). The gated tests persist
+`FKLookup` pure; `Query` / `Table` / `Row` SQL Server-gated). The gated tests persist
 a **synthetic, controlled `DebugLog`** (`_dashboard_fixture_log`) as the fixture —
 decoupled from the planner so row counts stay stable regardless of planner tuning.
 See `tests/spec-files/DASHBOARD_TEST_SPEC.md`."""
@@ -10,8 +10,11 @@ See `tests/spec-files/DASHBOARD_TEST_SPEC.md`."""
 import datetime
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 from swmtplanner.planners.infinite.run import _build_debug_log
 from swmtplanner.planners.infinite import manifest
@@ -20,17 +23,30 @@ from swmtplanner.planners.infinite.sqldump.persistence import persist_run
 
 from swmtplanner.dashboard.config import (
     ConnConfig, DatabaseConfigError, resolve_conn_config, read_reader_config,
+    connection_string, connect,
 )
 from swmtplanner.dashboard.manifest import (
     Column, ForeignKey, TableSpec, referencing_fks,
 )
+from swmtplanner.dashboard import storage
 from swmtplanner.dashboard.sqlload.helpers import Filter, FKLookup, FilterError
 from swmtplanner.dashboard.sqlload import query as sqlquery
 from swmtplanner.dashboard.sqlload.query import Query
 from swmtplanner.dashboard.sqlload import table as sqltable
 from swmtplanner.dashboard.sqlload.table import Table
 
-from mysql_support import _HOST, _PORT, _DB, _WRITER, _READER, _ADMIN, _connect
+from sqlserver_support import (
+    _HOST, _PORT, _DB, _WRITER, _READER, _ADMIN, _connect, _clean_slate,
+)
+
+# For the raw-SQL oracles: every spec by logical name (FK lookups need the
+# referenced table's physical db_name) and a physical-name shortcut.
+_ALL_SPECS = {s.name: s for s in manifest.ALL_TABLES + manifest.VIEWS}
+
+
+def _db(name):
+    """Physical (`knit_`-prefixed) table name for the raw-SQL oracles."""
+    return spec_for_name(name).db_name
 
 
 # ===================================================================
@@ -70,7 +86,7 @@ class ConfigResolutionTests(unittest.TestCase):
             'SWMT_DB_PASSWORD': 'p',
         }
         c = resolve_conn_config(None, env=env)
-        self.assertEqual(c, ConnConfig('127.0.0.1', 3306, 'envdb', 'envu', 'p'))
+        self.assertEqual(c, ConnConfig('127.0.0.1', 1433, 'envdb', 'envu', 'p'))
 
     def test_null_password_allowed(self):
         c = resolve_conn_config(_block(password=None), env={})
@@ -78,7 +94,7 @@ class ConfigResolutionTests(unittest.TestCase):
 
     def test_defaults_host_and_port(self):
         c = resolve_conn_config({'name': 'd', 'user': 'u'}, env={})
-        self.assertEqual((c.host, c.port), ('127.0.0.1', 3306))
+        self.assertEqual((c.host, c.port), ('127.0.0.1', 1433))
 
     def test_missing_name_raises(self):
         with self.assertRaises(DatabaseConfigError):
@@ -91,6 +107,70 @@ class ConfigResolutionTests(unittest.TestCase):
     def test_invalid_port_raises(self):
         with self.assertRaises(DatabaseConfigError):
             resolve_conn_config(_block(port='not-a-port'), env={})
+
+    # ----- the optional ODBC settings -----
+
+    def test_odbc_options_default(self):
+        c = resolve_conn_config(_block(), env={})
+        self.assertEqual(
+            (c.driver, c.encrypt, c.trust_server_certificate),
+            ('ODBC Driver 17 for SQL Server', 'no', 'yes'),
+        )
+
+    def test_odbc_options_from_block_then_env_wins(self):
+        c = resolve_conn_config(_block(
+            driver='ODBC Driver 18 for SQL Server', encrypt='yes',
+            trust_server_certificate='no',
+        ), env={})
+        self.assertEqual(
+            (c.driver, c.encrypt, c.trust_server_certificate),
+            ('ODBC Driver 18 for SQL Server', 'yes', 'no'),
+        )
+        env = {
+            'SWMT_DB_DRIVER': 'Custom Driver', 'SWMT_DB_ENCRYPT': 'no',
+            'SWMT_DB_TRUST_SERVER_CERTIFICATE': 'yes',
+        }
+        c = resolve_conn_config(_block(
+            driver='x', encrypt='yes', trust_server_certificate='no',
+        ), env=env)
+        self.assertEqual(                            # env wins over the file
+            (c.driver, c.encrypt, c.trust_server_certificate),
+            ('Custom Driver', 'no', 'yes'),
+        )
+
+    def test_odbc_booleans_normalised(self):
+        # JSON true / false for the yes/no ODBC settings become 'yes' / 'no'
+        # (a false must not fall through to the default).
+        c = resolve_conn_config(
+            _block(encrypt=False, trust_server_certificate=True), env={})
+        self.assertEqual((c.encrypt, c.trust_server_certificate), ('no', 'yes'))
+        c = resolve_conn_config(
+            _block(encrypt=True, trust_server_certificate=False), env={})
+        self.assertEqual((c.encrypt, c.trust_server_certificate), ('yes', 'no'))
+
+    def test_connection_string(self):
+        c = ConnConfig('db.local', 1433, 'swmtinfinite', 'u_user', 'u_pw')
+        self.assertEqual(
+            connection_string(c),
+            'DRIVER={ODBC Driver 17 for SQL Server};SERVER=db.local,1433;'
+            'DATABASE=swmtinfinite;UID=u_user;PWD=u_pw;Encrypt=no;'
+            'TrustServerCertificate=yes',
+        )
+        # no password -> no PWD segment at all
+        self.assertNotIn(
+            'PWD', connection_string(ConnConfig('h', 1433, 'd', 'u', None)))
+
+    def test_connect_uses_connection_string_and_autocommit(self):
+        # `connect` imports pyodbc lazily; stand in a fake module so the wiring
+        # (string + autocommit flag) is proven without the driver installed.
+        calls = []
+        fake = types.SimpleNamespace(
+            connect=lambda s, autocommit: calls.append((s, autocommit)) or 'conn',
+        )
+        c = ConnConfig('h', 1433, 'd', 'u', 'p')
+        with mock.patch.dict(sys.modules, {'pyodbc': fake}):
+            self.assertEqual(connect(c, autocommit=True), 'conn')
+        self.assertEqual(calls, [(connection_string(c), True)])
 
 
 class ReaderConfigTests(unittest.TestCase):
@@ -114,7 +194,7 @@ class ReaderConfigTests(unittest.TestCase):
         env = {'SWMT_DASHBOARD_NAME': 'rdb', 'SWMT_DASHBOARD_USER': 'reader',
                'SWMT_DASHBOARD_PASSWORD': 'rp'}
         c = read_reader_config(env=env)
-        self.assertEqual(c, ConnConfig('127.0.0.1', 3306, 'rdb', 'reader', 'rp'))
+        self.assertEqual(c, ConnConfig('127.0.0.1', 1433, 'rdb', 'reader', 'rp'))
 
     def test_unreadable_file_raises(self):
         with self.assertRaises(DatabaseConfigError):
@@ -179,10 +259,10 @@ class FilterTests(unittest.TestCase):
             Filter('selection', {'b', 'a'}).to_sql_str(),
             "{colname} IN ('a', 'b')",
         )
-        # the {colname} field is filled by the Query
+        # the {colname} field is filled by the Query (bracket-quoted T-SQL)
         self.assertEqual(
-            Filter('selection', {1}).to_sql_str().format(colname='`t`.`c`'),
-            '`t`.`c` IN (1)',
+            Filter('selection', {1}).to_sql_str().format(colname='[t].[c]'),
+            '[t].[c] IN (1)',
         )
 
     def test_exclusion_compiles(self):
@@ -208,8 +288,19 @@ class FilterTests(unittest.TestCase):
         )
 
     def test_pattern_compiles(self):
+        # T-SQL LIKE with the ESCAPE clause that makes the GUI's `\` escapes bite.
         self.assertEqual(
-            Filter('pattern', 'AB%').to_sql_str(), "{colname} LIKE 'AB%'",
+            Filter('pattern', 'AB%').to_sql_str(),
+            "{colname} LIKE 'AB%' ESCAPE '\\'",
+        )
+
+    def test_pattern_backslash_is_not_doubled(self):
+        # A backslash is not special in a T-SQL string literal, so an escaped
+        # `%` in the pattern must reach the server as `\%` — doubling it (the
+        # MySQL rule) would corrupt the value and defeat the ESCAPE clause.
+        self.assertEqual(
+            Filter('pattern', 'a\\%b').to_sql_str(),
+            "{colname} LIKE 'a\\%b' ESCAPE '\\'",
         )
 
 
@@ -221,18 +312,138 @@ class FKLookupTests(unittest.TestCase):
             fk.to_sql_str()
 
     def test_valid_output(self):
-        fk = FKLookup('demand', 'order_id', {'O2', 'O1'})
+        # `ref_table` / `ftable` are physical (db_name) names; every identifier
+        # is bracket-quoted.
+        fk = FKLookup('knit_demand', 'order_id', {'O2', 'O1'})
         out = fk.to_sql_str().format(
-            ftable='iteration_log', fcol='order_id', run_id=7,
+            ftable='knit_iteration_log', fcol='order_id', run_id=7,
         )
         self.assertEqual(
             out,
-            'INNER JOIN (SELECT `run_id`, `order_id` FROM `demand` '
-            "WHERE `run_id` = 7 AND `order_id` IN ('O1', 'O2')) "
-            'AS `fk_order_id` '
-            'ON `iteration_log`.`run_id` = `fk_order_id`.`run_id` '
-            'AND `iteration_log`.`order_id` = `fk_order_id`.`order_id`',
+            'INNER JOIN (SELECT [run_id], [order_id] FROM [knit_demand] '
+            "WHERE [run_id] = 7 AND [order_id] IN ('O1', 'O2')) "
+            'AS [fk_order_id] '
+            'ON [knit_iteration_log].[run_id] = [fk_order_id].[run_id] '
+            'AND [knit_iteration_log].[order_id] = [fk_order_id].[order_id]',
         )
+
+
+# ===================================================================
+# 2b. Query.build — T-SQL text and physical->logical handling (no server)
+# ===================================================================
+
+class _FakeCursor:
+    """Stand-in cursor: records every executed SQL and serves canned results —
+    `fetchone` returns `(nrows,)`, `fetchall` the given physical rows."""
+
+    def __init__(self, nrows=0, rows=()):
+        self.executed = []
+        self._nrows = nrows
+        self._rows = [tuple(r) for r in rows]
+
+    def execute(self, sql, *args, **kwargs):
+        self.executed.append(sql)
+
+    def fetchone(self):
+        return (self._nrows,)
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+_Q_COLS = (
+    Column('event_id', 'int'),
+    Column('when', 'datetime'),
+    Column('due_date', 'datetime', nullable=True),   # stem rule: due_date/due_time
+    Column('day', 'date', nullable=True),            # date-only: one INT
+    Column('label', 'str'),
+)
+_Q_SPEC = TableSpec('events', 'Events', '', _Q_COLS, pk=('event_id',),
+                    db_name='knit_events')
+_Q_WHEN = ('CAST([knit_events].[when_date] AS BIGINT) * 1000000 '
+           '+ [knit_events].[when_time]')
+
+
+class QueryBuildTests(unittest.TestCase):
+    """The exact T-SQL `Query.build` emits and its physical -> logical row
+    handling, proven against a fake cursor — this is the read-side translation,
+    covered with no server."""
+
+    def test_select_expands_temporal_columns_and_pages_with_offset_fetch(self):
+        cur = _FakeCursor(nrows=3)
+        q = Query.build(cur, 7, _Q_SPEC)
+        self.assertEqual(cur.executed, [               # build runs only the count
+            'SELECT COUNT(*) FROM [knit_events] WHERE [knit_events].[run_id] = 7'])
+        self.assertEqual(q.nrows, 3)
+        self.assertEqual(
+            q._sql,
+            'SELECT [knit_events].[event_id], '
+            '[knit_events].[when_date], [knit_events].[when_time], '
+            '[knit_events].[due_date], [knit_events].[due_time], '
+            '[knit_events].[day], [knit_events].[label] '
+            'FROM [knit_events] WHERE [knit_events].[run_id] = 7 '
+            'ORDER BY [knit_events].[event_id] '
+            'OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY',
+        )
+
+    def test_datetime_order_column_uses_combined_integer(self):
+        spec = TableSpec('events', 'Events', '', _Q_COLS, pk=('event_id',),
+                         order_by=('when', 'event_id'), db_name='knit_events')
+        q = Query.build(_FakeCursor(), 7, spec)
+        self.assertIn(f'ORDER BY {_Q_WHEN}, [knit_events].[event_id] OFFSET',
+                      q._sql)
+
+    def test_temporal_filters_are_encoded_against_sort_expr(self):
+        q = Query.build(
+            _FakeCursor(), 7, _Q_SPEC,
+            when=Filter('range', (datetime.datetime(2026, 5, 18), None)),
+            day=Filter('selection', {datetime.date(2026, 5, 18)}),
+        )
+        self.assertIn(f'{_Q_WHEN} >= 20260518000000', q._sql)
+        self.assertIn('[knit_events].[day] IN (20260518)', q._sql)
+
+    def test_already_encoded_temporal_values_pass_through(self):
+        q = Query.build(_FakeCursor(), 7, _Q_SPEC,
+                        when=Filter('selection', {20260518130709}))
+        self.assertIn(f'{_Q_WHEN} IN (20260518130709)', q._sql)
+
+    def test_fk_lookup_joins_physical_reference_table(self):
+        q = Query.build(_FakeCursor(), 7, _Q_SPEC,
+                        label=FKLookup('knit_tags', 'tag', {'a'}))
+        self.assertIn(
+            'INNER JOIN (SELECT [run_id], [tag] FROM [knit_tags] '
+            "WHERE [run_id] = 7 AND [tag] IN ('a')) AS [fk_label] "
+            'ON [knit_events].[run_id] = [fk_label].[run_id] '
+            'AND [knit_events].[label] = [fk_label].[tag]',
+            q._sql,
+        )
+
+    def test_chunks_are_recombined_to_logical_rows(self):
+        physical = [
+            (1, 20260518, 130709, None, None, 20260601, 'x'),
+            (2, 20260519, 0, 20260520, 90000, None, 'y'),
+        ]
+        cur = _FakeCursor(nrows=2, rows=physical)
+        q = Query.build(cur, 7, _Q_SPEC)
+        self.assertEqual(q.next_chunk(), (
+            (1, datetime.datetime(2026, 5, 18, 13, 7, 9), None,
+             datetime.date(2026, 6, 1), 'x'),
+            (2, datetime.datetime(2026, 5, 19, 0, 0, 0),
+             datetime.datetime(2026, 5, 20, 9, 0, 0), None, 'y'),
+        ))
+        # the chunk fetch filled in the OFFSET / FETCH placeholders
+        self.assertTrue(cur.executed[-1].endswith(
+            'OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY'))
+
+    def test_unique_distincts_the_combined_expression_and_decodes(self):
+        cur = _FakeCursor(nrows=2, rows=[(20260518130709,), (None,)])
+        q = Query.build(cur, 7, _Q_SPEC)
+        self.assertEqual(set(q.unique('when')),
+                         {datetime.datetime(2026, 5, 18, 13, 7, 9), None})
+        self.assertEqual(
+            cur.executed[-1],
+            f'SELECT DISTINCT {_Q_WHEN} FROM [knit_events] '
+            'WHERE [knit_events].[run_id] = 7')
 
 
 # ===================================================================
@@ -293,8 +504,109 @@ class ReferencingFKsTests(unittest.TestCase):
 
 
 # ===================================================================
-# 3. Read layer (sqlload) — Query (MySQL-gated)
+# 3. Read layer (sqlload) — Query (SQL Server-gated)
 # ===================================================================
+
+# ===================================================================
+# 7. Storage mapping (manifest -> SQL Server physical shape, no server)
+# ===================================================================
+
+class StorageMappingTests(unittest.TestCase):
+
+    def test_stem_strips_only_trailing_date(self):
+        self.assertEqual(storage.stem('start'), 'start')
+        self.assertEqual(storage.stem('due_date'), 'due')
+        self.assertEqual(storage.stem('window_end'), 'window_end')
+        self.assertEqual(storage.stem('created_at'), 'created_at')
+
+    def test_physical_columns(self):
+        self.assertEqual(storage.physical_columns(Column('start', 'datetime')),
+                         ('start_date', 'start_time'))
+        self.assertEqual(storage.physical_columns(Column('window_end', 'datetime')),
+                         ('window_end_date', 'window_end_time'))
+        # a name already ending in _date keeps it as the date half
+        self.assertEqual(storage.physical_columns(Column('due_date', 'datetime')),
+                         ('due_date', 'due_time'))
+        # a date-only column is a lone INT under its own name
+        self.assertEqual(storage.physical_columns(Column('start_date', 'date')),
+                         ('start_date',))
+        for t in ('int', 'float', 'str'):
+            with self.subTest(type=t):
+                self.assertEqual(storage.physical_columns(Column('x', t)), ('x',))
+
+    def test_datetime_round_trip_at_second_precision(self):
+        col = Column('start', 'datetime')
+        dt = datetime.datetime(2026, 5, 18, 13, 7, 9, 123456)
+        cells = storage.to_storage(col, dt)
+        self.assertEqual(cells, (20260518, 130709))
+        self.assertEqual(storage.from_storage(col, *cells),
+                         datetime.datetime(2026, 5, 18, 13, 7, 9))   # micros dropped
+        exact = datetime.datetime(2026, 12, 31, 23, 59, 59)
+        self.assertEqual(
+            storage.from_storage(col, *storage.to_storage(col, exact)), exact)
+
+    def test_datetime_none_round_trip(self):
+        col = Column('start', 'datetime', nullable=True)
+        self.assertEqual(storage.to_storage(col, None), (None, None))
+        self.assertIsNone(storage.from_storage(col, None, None))
+        self.assertIsNone(storage.from_storage(col, 20260518, None))   # half-null
+
+    def test_date_round_trip_and_datetime_input(self):
+        col = Column('start_date', 'date', nullable=True)
+        d = datetime.date(2026, 5, 18)
+        self.assertEqual(storage.to_storage(col, d), (20260518,))
+        self.assertEqual(storage.from_storage(col, 20260518), d)
+        # a datetime handed to a date column keeps only its date part
+        self.assertEqual(
+            storage.to_storage(col, datetime.datetime(2026, 5, 18, 9, 30)),
+            (20260518,))
+        self.assertEqual(storage.to_storage(col, None), (None,))
+        self.assertIsNone(storage.from_storage(col, None))
+
+    def test_scalars_pass_through(self):
+        for t, v in (('int', 7), ('float', 2.5), ('str', 'M1'), ('int', None)):
+            col = Column('x', t, nullable=True)
+            with self.subTest(type=t, value=v):
+                self.assertEqual(storage.to_storage(col, v), (v,))
+                self.assertEqual(storage.from_storage(col, v), v)
+
+    def test_encode_datetime_is_monotonic_and_invertible(self):
+        dts = [
+            datetime.datetime(2025, 12, 31, 23, 59, 59),
+            datetime.datetime(2026, 1, 1, 0, 0, 0),
+            datetime.datetime(2026, 5, 18, 0, 0, 0),
+            datetime.datetime(2026, 5, 18, 0, 0, 1),
+            datetime.datetime(2026, 5, 18, 13, 7, 9),
+        ]
+        codes = [storage.encode_datetime(d) for d in dts]
+        self.assertEqual(codes, sorted(codes))                  # order preserved
+        self.assertEqual(len(set(codes)), len(codes))           # all distinct
+        self.assertEqual(codes[-1], 20260518130709)             # YYYYMMDDHHMMSS
+        for d, c in zip(dts, codes):
+            self.assertEqual(storage.decode_datetime(c), d)
+
+    def test_sort_expr(self):
+        self.assertEqual(
+            storage.sort_expr(Column('start', 'datetime'), 'knit_sched_cost_detail'),
+            'CAST([knit_sched_cost_detail].[start_date] AS BIGINT) * 1000000 '
+            '+ [knit_sched_cost_detail].[start_time]',
+        )
+        self.assertEqual(
+            storage.sort_expr(Column('due_date', 'datetime'), 'knit_demand'),
+            'CAST([knit_demand].[due_date] AS BIGINT) * 1000000 '
+            '+ [knit_demand].[due_time]',
+        )
+        self.assertEqual(
+            storage.sort_expr(Column('move_id', 'int'), 'knit_iteration_log'),
+            '[knit_iteration_log].[move_id]')
+        self.assertEqual(
+            storage.sort_expr(Column('start_date', 'date'), 'knit_runs'),
+            '[knit_runs].[start_date]')
+
+    def test_quote_brackets_and_escapes(self):
+        self.assertEqual(storage.quote('rank'), '[rank]')
+        self.assertEqual(storage.quote('a]b'), '[a]]b]')
+
 
 class _CountingCursor:
     """Wraps a real cursor, counting `execute` calls (to check lazy loading)."""
@@ -316,7 +628,7 @@ class _CountingCursor:
 
 def _dashboard_fixture_log():
     """A `DebugLog` populated with synthetic, controlled rows for the read-layer
-    MySQL tests — **decoupled from the planner** so the fixture's row counts are
+    SQL Server-gated tests — **decoupled from the planner** so the fixture's row counts are
     stable regardless of planner tuning (e.g. the eligible-order precedence).
 
     Populates only the tables these tests read, with the relationships their
@@ -375,8 +687,8 @@ def _dashboard_fixture_log():
     return dl
 
 
-class QueryMySQLTests(unittest.TestCase):
-    """`Query` against a populated run in the local test MySQL. Skips when the
+class QuerySQLServerTests(unittest.TestCase):
+    """`Query` against a populated run in the test SQL Server. Skips when the
     server / driver is unavailable. `CHUNK_SIZE` is shrunk so the fixture spans
     several chunks; the original is restored in `tearDownClass`."""
 
@@ -387,18 +699,9 @@ class QueryMySQLTests(unittest.TestCase):
         try:
             _connect(_ADMIN).close()
         except Exception as exc:
-            raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
+            raise unittest.SkipTest(f'test SQL Server {_DB!r} unreachable: {exc}')
         cls.dl = _dashboard_fixture_log()
-        conn = _connect(_ADMIN)                     # clean slate
-        try:
-            with conn.cursor() as cur:
-                cur.execute('SET FOREIGN_KEY_CHECKS=0')
-                for spec in manifest.ALL_TABLES:
-                    cur.execute(f'TRUNCATE TABLE `{spec.name}`')
-                cur.execute('SET FOREIGN_KEY_CHECKS=1')
-            conn.commit()
-        finally:
-            conn.close()
+        _clean_slate(manifest.ALL_TABLES)               # FK-safe, children first
         cls.run_id = persist_run(
             cls.dl, ConnConfig(_HOST, _PORT, _DB, *_WRITER),
             start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
@@ -425,9 +728,9 @@ class QueryMySQLTests(unittest.TestCase):
         spec's `order_columns` — the independent oracle for chunk contents."""
         spec = spec_for_name(table)
         cols = [c for c in spec.column_names if c != manifest.RUN_ID]
-        collist = ', '.join(f'`{c}`' for c in cols)
-        order = ', '.join(f'`{c}`' for c in spec.order_columns)
-        sql = f'SELECT {collist} FROM `{table}` WHERE run_id=%s'
+        collist = ', '.join(f'[{c}]' for c in cols)
+        order = ', '.join(f'[{c}]' for c in spec.order_columns)
+        sql = f'SELECT {collist} FROM [{spec.db_name}] WHERE [run_id]=?'
         if extra:
             sql += ' AND ' + extra
         sql += f' ORDER BY {order}'
@@ -466,11 +769,12 @@ class QueryMySQLTests(unittest.TestCase):
 
     def test_nrows_filtered(self):
         kind = self._fetch(
-            'SELECT kind FROM cost_summary WHERE run_id=%s LIMIT 1', (self.run_id,),
+            f'SELECT TOP 1 [kind] FROM [{_db("cost_summary")}] WHERE [run_id]=?',
+            (self.run_id,),
         )[0][0]
         q = self._build('cost_summary', kind=Filter('selection', {kind}))
         expected = self._fetch(
-            'SELECT COUNT(*) FROM cost_summary WHERE run_id=%s AND kind=%s',
+            f'SELECT COUNT(*) FROM [{_db("cost_summary")}] WHERE [run_id]=? AND [kind]=?',
             (self.run_id, kind),
         )[0][0]
         self.assertGreater(expected, 0)
@@ -482,7 +786,8 @@ class QueryMySQLTests(unittest.TestCase):
         q = self._build('cost_summary')
         for col in spec_for_name('cost_summary').column_names:
             n = self._fetch(
-                f'SELECT COUNT(DISTINCT `{col}`) FROM cost_summary WHERE run_id=%s',
+                f'SELECT COUNT(DISTINCT [{col}]) FROM [{_db("cost_summary")}] '
+                f'WHERE [run_id]=?',
                 (self.run_id,),
             )[0][0]
             with self.subTest(col=col):
@@ -490,7 +795,8 @@ class QueryMySQLTests(unittest.TestCase):
                     self.assertIsNone(q.unique(col))
                 else:
                     vals = {r[0] for r in self._fetch(
-                        f'SELECT DISTINCT `{col}` FROM cost_summary WHERE run_id=%s',
+                        f'SELECT DISTINCT [{col}] FROM [{_db("cost_summary")}] '
+                        f'WHERE [run_id]=?',
                         (self.run_id,),
                     )}
                     self.assertEqual(set(q.unique(col)), vals)
@@ -562,11 +868,11 @@ class QueryMySQLTests(unittest.TestCase):
 
 
 # ===================================================================
-# 4. Read layer (sqlload) — Table / Row paging (MySQL-gated)
+# 4. Read layer (sqlload) — Table / Row paging (SQL Server-gated)
 # ===================================================================
 
-class TableMySQLTests(unittest.TestCase):
-    """`Table` paging against a populated run. Skips when MySQL is unavailable.
+class TableSQLServerTests(unittest.TestCase):
+    """`Table` paging against a populated run. Skips when SQL Server is unavailable.
     `CHUNK_SIZE` and the page-size cap are shrunk (and the page size set) so a
     few-hundred-row fixture spans several chunks and pages; all shared state is
     restored in `tearDownClass`."""
@@ -579,18 +885,9 @@ class TableMySQLTests(unittest.TestCase):
         try:
             _connect(_ADMIN).close()
         except Exception as exc:
-            raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
+            raise unittest.SkipTest(f'test SQL Server {_DB!r} unreachable: {exc}')
         cls.dl = _dashboard_fixture_log()
-        conn = _connect(_ADMIN)
-        try:
-            with conn.cursor() as cur:
-                cur.execute('SET FOREIGN_KEY_CHECKS=0')
-                for spec in manifest.ALL_TABLES:
-                    cur.execute(f'TRUNCATE TABLE `{spec.name}`')
-                cur.execute('SET FOREIGN_KEY_CHECKS=1')
-            conn.commit()
-        finally:
-            conn.close()
+        _clean_slate(manifest.ALL_TABLES)               # FK-safe, children first
         cls.run_id = persist_run(
             cls.dl, ConnConfig(_HOST, _PORT, _DB, *_WRITER),
             start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
@@ -614,17 +911,19 @@ class TableMySQLTests(unittest.TestCase):
     # ----- helpers -------------------------------------------------------
 
     def _table(self, name):
-        return Table(spec_for_name(name), self.rconn.cursor(), self.run_id)
+        return Table(spec_for_name(name), self.rconn.cursor(), self.run_id,
+                     ref_specs=_ALL_SPECS)
 
     def _ordered(self, table):
         spec = spec_for_name(table)
         cols = ', '.join(
-            f'`{c}`' for c in spec.column_names if c != manifest.RUN_ID
+            f'[{c}]' for c in spec.column_names if c != manifest.RUN_ID
         )
-        order = ', '.join(f'`{c}`' for c in spec.order_columns)
+        order = ', '.join(f'[{c}]' for c in spec.order_columns)
         with self.rconn.cursor() as cur:
             cur.execute(
-                f'SELECT {cols} FROM `{table}` WHERE run_id=%s ORDER BY {order}',
+                f'SELECT {cols} FROM [{spec.db_name}] WHERE [run_id]=? '
+                f'ORDER BY {order}',
                 (self.run_id,),
             )
             return list(cur.fetchall())
@@ -646,7 +945,7 @@ class TableMySQLTests(unittest.TestCase):
         t = self._table('cost_summary')
         with self.rconn.cursor() as cur:
             cur.execute(
-                'SELECT DISTINCT kind FROM cost_summary WHERE run_id=%s',
+                f'SELECT DISTINCT [kind] FROM [{_db("cost_summary")}] WHERE [run_id]=?',
                 (self.run_id,),
             )
             kinds = {r[0] for r in cur.fetchall()}
@@ -776,12 +1075,12 @@ class TableMySQLTests(unittest.TestCase):
 
 
 # ===================================================================
-# 5. Read layer (sqlload) — selection & filtering (MySQL-gated)
+# 5. Read layer (sqlload) — selection & filtering (SQL Server-gated)
 # ===================================================================
 
-class SelectFilterMySQLTests(unittest.TestCase):
+class SelectFilterSQLServerTests(unittest.TestCase):
     """Row selection, filters, and FK lookups against a populated run. Skips
-    when MySQL is unavailable. The page size is set large enough that a filtered
+    when SQL Server is unavailable. The page size is set large enough that a filtered
     result fits in one page (so a single `next_page()` is the whole result);
     `Table._page_size` is restored in `tearDownClass`."""
 
@@ -790,18 +1089,9 @@ class SelectFilterMySQLTests(unittest.TestCase):
         try:
             _connect(_ADMIN).close()
         except Exception as exc:
-            raise unittest.SkipTest(f'test MySQL {_DB!r} unreachable: {exc}')
+            raise unittest.SkipTest(f'test SQL Server {_DB!r} unreachable: {exc}')
         cls.dl = _dashboard_fixture_log()
-        conn = _connect(_ADMIN)
-        try:
-            with conn.cursor() as cur:
-                cur.execute('SET FOREIGN_KEY_CHECKS=0')
-                for spec in manifest.ALL_TABLES:
-                    cur.execute(f'TRUNCATE TABLE `{spec.name}`')
-                cur.execute('SET FOREIGN_KEY_CHECKS=1')
-            conn.commit()
-        finally:
-            conn.close()
+        _clean_slate(manifest.ALL_TABLES)               # FK-safe, children first
         cls.run_id = persist_run(
             cls.dl, ConnConfig(_HOST, _PORT, _DB, *_WRITER),
             start_date=datetime.date(2026, 5, 18), total_score=0.0, n_unmet=0,
@@ -820,7 +1110,8 @@ class SelectFilterMySQLTests(unittest.TestCase):
     # ----- helpers -------------------------------------------------------
 
     def _table(self, name):
-        return Table(spec_for_name(name), self.rconn.cursor(), self.run_id)
+        return Table(spec_for_name(name), self.rconn.cursor(), self.run_id,
+                     ref_specs=_ALL_SPECS)
 
     def _fetch(self, sql, params=()):
         with self.rconn.cursor() as cur:
@@ -830,11 +1121,11 @@ class SelectFilterMySQLTests(unittest.TestCase):
     def _ordered_where(self, table, where='1=1', params=()):
         spec = spec_for_name(table)
         cols = ', '.join(
-            f'`{c}`' for c in spec.column_names if c != manifest.RUN_ID
+            f'[{c}]' for c in spec.column_names if c != manifest.RUN_ID
         )
-        order = ', '.join(f'`{c}`' for c in spec.order_columns)
+        order = ', '.join(f'[{c}]' for c in spec.order_columns)
         return list(self._fetch(
-            f'SELECT {cols} FROM `{table}` WHERE run_id=%s AND {where} '
+            f'SELECT {cols} FROM [{spec.db_name}] WHERE [run_id]=? AND {where} '
             f'ORDER BY {order}', (self.run_id,) + tuple(params),
         ))
 
@@ -844,8 +1135,8 @@ class SelectFilterMySQLTests(unittest.TestCase):
 
     def _committed_order_id(self):
         return self._fetch(
-            "SELECT order_id FROM iteration_log WHERE run_id=%s "
-            "AND role='committed' AND order_id IS NOT NULL LIMIT 1", (self.run_id,),
+            f"SELECT TOP 1 [order_id] FROM [{_db('iteration_log')}] WHERE [run_id]=? "
+            "AND [role]='committed' AND [order_id] IS NOT NULL", (self.run_id,),
         )[0][0]
 
     # ----- 9.1 Row selection ---------------------------------------------
@@ -910,7 +1201,7 @@ class SelectFilterMySQLTests(unittest.TestCase):
     def test_filtered_rows(self):
         t = self._table('iteration_log')
         t.apply_filter_to('role', 'selection', {'committed'})
-        expected = self._ordered_where('iteration_log', 'role=%s', ('committed',))
+        expected = self._ordered_where('iteration_log', '[role]=?', ('committed',))
         self.assertEqual(t.nrows, len(expected))
         self.assertEqual(self._data(t.next_page()), expected)
 
@@ -935,7 +1226,7 @@ class SelectFilterMySQLTests(unittest.TestCase):
         t = self._table('iteration_log')
         t.apply_filter_to('role', 'selection', {'committed'})
         t.apply_filter_to('order_id', 'selection', {oid})
-        committed = self._ordered_where('iteration_log', 'role=%s', ('committed',))
+        committed = self._ordered_where('iteration_log', '[role]=?', ('committed',))
         self.assertLess(t.nrows, len(committed))     # order_id genuinely subsets
         t.remove_filter('order_id')
         self.assertEqual(t.nrows, len(committed))
@@ -954,7 +1245,7 @@ class SelectFilterMySQLTests(unittest.TestCase):
         oid = self._committed_order_id()
         t = self._table('iteration_log')
         t.apply_fk_lookup('order_id', {oid})
-        expected = self._ordered_where('iteration_log', 'order_id=%s', (oid,))
+        expected = self._ordered_where('iteration_log', '[order_id]=?', (oid,))
         self.assertGreater(len(expected), 0)
         self.assertEqual(t.nrows, len(expected))
         self.assertEqual(self._data(t.next_page()), expected)
@@ -968,9 +1259,9 @@ class SelectFilterMySQLTests(unittest.TestCase):
         keys = t1.selected_keys
         t2 = self._table('iteration_log')
         t2.apply_fk_lookup('order_id', keys)
-        placeholders = ', '.join(['%s'] * len(keys))
+        placeholders = ', '.join(['?'] * len(keys))
         expected = self._ordered_where(
-            'iteration_log', f'order_id IN ({placeholders})', tuple(keys),
+            'iteration_log', f'[order_id] IN ({placeholders})', tuple(keys),
         )
         self.assertGreater(len(expected), 0)
         self.assertEqual(t2.nrows, len(expected))
@@ -990,7 +1281,7 @@ class SelectFilterMySQLTests(unittest.TestCase):
         t = self._table('iteration_log')
         t.apply_filter_to('role', 'selection', {'committed'})
         t.apply_fk_lookup('order_id', {oid})
-        committed = self._ordered_where('iteration_log', 'role=%s', ('committed',))
+        committed = self._ordered_where('iteration_log', '[role]=?', ('committed',))
         self.assertLess(t.nrows, len(committed))     # the FK lookup subsets
         t.remove_filter('order_id')                  # drop only the FK lookup
         self.assertEqual(t.nrows, len(committed))    # the role filter remains

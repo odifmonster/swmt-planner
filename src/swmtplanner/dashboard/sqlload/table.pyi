@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Mapping
 
 from ..manifest import TableSpec
 from .helpers import FilterKind
@@ -24,7 +24,10 @@ class Table:
     def set_page_size(cls, n: int) -> None: ...
     @property
     def page_size(self) -> int: ...
-    def __init__(self, schema: TableSpec, cursor: Any, run_id: int) -> None: ...
+    def __init__(
+        self, schema: TableSpec, cursor: Any, run_id: int, *,
+        ref_specs: Mapping[str, TableSpec] | None = ...,
+    ) -> None: ...
     @property
     def schema(self) -> TableSpec: ...
     @property

@@ -1,7 +1,7 @@
 # Debug Dashboard — Design
 
 The **PyQt6 desktop app** for investigating a planner's verbose debug log. A
-planner persists a run-tagged debug log to a **local MySQL** store (one row-set
+planner persists a run-tagged debug log to a **SQL Server** store (one row-set
 per run, tagged by an auto-incremented `run_id`); the dashboard reads it on
 demand. Its **data layer and raw view are planner-agnostic** — driven by a
 *manifest* of `TableSpec`s the planner hands in, hard-coding no schema — while
@@ -10,7 +10,7 @@ dashboard **owns all GUI** for viewing planner debug output, generic and
 bespoke alike.
 
 Replaces an earlier in-memory-HTML / TSV dashboard, which couldn't scale to a
-real log (~6.5M rows). MySQL is the store; the app queries it (filtered, paged)
+real log (~6.5M rows). SQL Server is the store; the app queries it (filtered, paged)
 so the app never holds a whole table in memory.
 
 Lives at top-level **`swmtplanner/dashboard/`** — a sibling of the planners, not
@@ -21,14 +21,14 @@ schema (and builds bespoke views for it), never the reverse.
 ## Boundary with the planner
 
 The **planner owns** its concrete debug schema (the actual tables, columns, FK
-graph, and the MySQL DDL) and the **write path** that persists its debug log to
+graph, and the SQL Server DDL) and the **write path** that persists its debug log to
 the store — see that planner's own DESIGN.md (for the infinite knitting planner,
 `planners/infinite/DESIGN.md`). The **dashboard owns all viewing** — the generic
 data layer + raw view (driven by the planner's manifest) *and* the planner-
 specific "pretty" views built on top of it:
 
 ```
-  planner run ──(write path, planner-owned)──▶  local MySQL  ◀──(read path, here)── PyQt6 app
+  planner run ──(write path, planner-owned)──▶  SQL Server   ◀──(read path, here)── PyQt6 app
    debug log → INSERTs                          run-tagged          paged SELECTs, per
                                                 row-sets            run_id, filtered
 ```
@@ -54,9 +54,14 @@ and pagination order. It hard-codes no schema.
 
 Per table the manifest records a `TableSpec`:
 
-- **`name`** — the table name (identical in the planner's debug log and the DB).
+- **`name`** — the **logical** table name (identical to the planner's debug-log
+  table). **`db_name`** — the **physical** table name in the store (defaults to
+  `name`); the planner sets it (the knit planner prefixes every table
+  `knit_`). Only SQL text ever uses `db_name` — see "Storage mapping" below.
 - **`columns`** — ordered `(name, type, nullable)`; `type` ∈
-  `int/float/str/datetime` drives the app's per-column filter modes.
+  `int/float/str/datetime/date` drives the app's per-column filter modes and the
+  physical storage shape (`datetime` and `date` are not stored as native
+  temporal columns — see "Storage mapping").
 - **`pk`** — the primary-key column(s) after the implicit leading `run_id`
   (empty for a key-less table).
 - **`fks`** — `(column → ref_table.ref_column)`, the full DB FK graph, for the
@@ -71,6 +76,53 @@ The dataclasses carry only *structure* — no concrete tables. The planner build
 the instance (its table set, FK graph, and FK-topological insert order) and the
 DDL it mirrors; those live in the planner's DESIGN.md.
 
+## Storage mapping — SQL Server (generic)
+
+The store is **SQL Server**, reached through **pyodbc**. Two things about the
+*physical* schema differ from the *logical* manifest, and one generic module —
+**`dashboard/storage.py`** — owns the whole translation, so nothing above SQL
+sees it: the `DebugLog`, the manifest's logical names, the GUI, and every pure
+test stay datetime-native and prefix-free.
+
+- **Table names.** SQL text (`FROM`, `INSERT INTO`, join sub-queries) uses each
+  spec's **`db_name`**; everything else keys on `name`. For the knit planner
+  `db_name = 'knit_' + name` — including `knit_runs` and the
+  `knit_committed_sched` / `knit_committed_prod` views.
+- **Temporal columns are stored as INTs.** A `datetime` column is an **INT
+  pair** — `<stem>_date` (YYYYMMDD) and `<stem>_time` (HHMMSS) — at **second
+  precision** (sub-seconds are dropped on write; the round-trip is exact to the
+  second). The **stem** is the logical name with any trailing `_date` stripped,
+  so `start` → `start_date`/`start_time`, `window_end` →
+  `window_end_date`/`window_end_time`, but `due_date` → **`due_date`/`due_time`**
+  (not `due_date_date`). A `date` column (a calendar date, e.g. the run
+  registry's `start_date`) is a **single** INT under its own name (YYYYMMDD), no
+  suffix. Hence the `date` column type.
+
+`storage.py` (pure — unit-tested without a server):
+
+- **`physical_columns(col)`** → the store's column names for a logical column:
+  `(f'{stem}_date', f'{stem}_time')` for `datetime` (stem = the name minus a
+  trailing `_date`), `(name,)` for everything else (incl. `date`).
+- **`to_storage(col, value)`** → the **cell tuple** to INSERT — always one cell
+  per `physical_columns(col)`, so a row's cells are built by extension: a
+  datetime → `(yyyymmdd, hhmmss)` (`None` → `(None, None)`); a date →
+  `(yyyymmdd,)` (`None` → `(None,)`); any other type → `(value,)` unchanged.
+  `decode_datetime` inverts `encode_datetime` for distinct values read back.
+- **`from_storage(col, *cells)`** → the logical value read back: a pair →
+  `datetime` (either cell `None` → `None`); a date INT → `datetime.date`; else
+  the single cell unchanged.
+- **`sort_expr(col, table)`** → the SQL used wherever a column is **ordered or
+  compared**. For `datetime`: `CAST([t].[x_date] AS BIGINT) * 1000000 +
+  [t].[x_time]` — a monotonic YYYYMMDDHHMMSS integer (`BIGINT`, since it
+  overflows `INT`) — so `ORDER BY`, range / selection `WHERE`s and `DISTINCT`
+  never need two-column logic. For every other type: the quoted column
+  `[t].[x]`. A datetime **filter value** is encoded with the same
+  `yyyymmdd * 1000000 + hhmmss` rule before it is inlined (`encode_datetime`),
+  and a distinct value read back is decoded with the inverse.
+- **`quote(ident)`** → `[ident]` — T-SQL bracket quoting, applied to **every**
+  identifier (reserved words such as `rank`, `desc`, `start`, `end`, `value`
+  are reserved in T-SQL as well).
+
 ## Reader configuration — `config.py`
 
 The dashboard connects **read-only**. Connection settings come from a **separate
@@ -78,35 +130,48 @@ JSON config file** pointed to by the **`SWMT_DASHBOARD_CONFIG`** environment
 variable — deliberately decoupled from any planner's run-config (the planner's
 *writer* config is the planner's concern; the dashboard only ever needs the
 reader). The file names a single connection directly — `host` / `port` / `name`
-/ `user` / `password` (the reader user) — with environment-variable fallback:
+/ `user` / `password` (the reader user, SQL authentication) plus three optional
+ODBC settings with defaults — with environment-variable fallback:
 
 ```json
 {
   "host": "127.0.0.1",
-  "port": 3306,
+  "port": 1433,
   "name": "swmtinfinite",
   "user": "swmt_reader",
-  "password": null            // null → SWMT_DASHBOARD_PASSWORD
+  "password": null,                              // null → SWMT_DASHBOARD_PASSWORD
+  "driver": "ODBC Driver 17 for SQL Server",     // optional — default shown
+  "encrypt": "no",                               // optional — default shown
+  "trust_server_certificate": "yes"              // optional — default shown
 }
 ```
 
-- **Read-only is enforced at the grant level.** The configured reader user has
+- **Read-only is enforced at the grant level.** The configured reader login has
   only `SELECT`, so a UI bug or rogue query *physically cannot* mutate the data —
-  read-only is a MySQL guarantee, not app discipline. (Run deletion or
+  read-only is a SQL Server permission, not app discipline. (Run deletion or
   `label`/`notes` edits would need a writer connection and are out of scope for
   the reader-only app; revisit if the app ever adds them.)
 - **Env fallback**: `SWMT_DASHBOARD_HOST` / `_PORT` / `_NAME` / `_USER` /
-  `_PASSWORD`. Env wins over the file (so a committed config keeps non-secret
-  defaults and leaves the password to the environment). The reader's
-  `SWMT_DASHBOARD_*` namespace is **distinct** from the writer's `SWMT_DB_*`, so
-  neither side can pick up the other's credentials.
+  `_PASSWORD` / `_DRIVER` / `_ENCRYPT` / `_TRUST_SERVER_CERTIFICATE`. Env wins
+  over the file (so a committed config keeps non-secret defaults and leaves the
+  password to the environment). The reader's `SWMT_DASHBOARD_*` namespace is
+  **distinct** from the writer's `SWMT_DB_*`, so neither side can pick up the
+  other's credentials.
 - **`read_reader_config(env)`** reads the `SWMT_DASHBOARD_CONFIG` file (when set)
   as the connection block and resolves it via
   **`resolve_conn_config(block, env, prefix='SWMT_DASHBOARD')`** (the generic
-  resolver; `ConnConfig` is defined here and reused by the planner's writer with
-  the default `SWMT_DB` prefix). Either raises `DatabaseConfigError` on an
+  resolver; `ConnConfig` — now also carrying `driver` / `encrypt` /
+  `trust_server_certificate` — is defined here and reused by the planner's writer
+  with the default `SWMT_DB` prefix). Either raises `DatabaseConfigError` on an
   unreadable file, a missing database name / user, or an unparseable port.
-- **Driver**: **PyMySQL** (pure-python). PyQt6 is the app's dependency.
+- **One connection path for both sides.** `config.py` also owns
+  **`connection_string(cfg)`** — `DRIVER={<driver>};SERVER=<host>,<port>;
+  DATABASE=<name>;UID=<user>;PWD=<password>;Encrypt=<encrypt>;
+  TrustServerCertificate=<trust>` — and **`connect(cfg, *, autocommit)`**, a thin
+  `pyodbc.connect` wrapper. The planner's writer and the dashboard's reader both
+  connect through these, so the ODBC details live in exactly one place.
+- **Driver**: **pyodbc** (needs the named ODBC driver installed on the host).
+  PyQt6 is the app's dependency.
 
 ## Read path — `sqlload/` (data layer)
 
@@ -131,9 +196,16 @@ raises `FilterError` there, not in `__init__`).
       is in / not in the set).
     - `range` — a **2-tuple `(low, high)`** of bounds; at most **one** may be
       `None` (the range is then unbounded on that end).
-    - `pattern` — a **MySQL `LIKE` pattern string** (`%` / `_` wildcards).
+    - `pattern` — a **T-SQL `LIKE` pattern string** (`%` / `_` wildcards). The
+      emitted clause carries **`ESCAPE '\'`**, so the GUI's pattern builder must
+      backslash-escape `%`, `_`, `\` **and `[`** (a T-SQL wildcard class) in the
+      user's text for it to match literally.
   - **`to_sql_str()`** → a string `s` such that `s.format(colname=<column>)`
-    yields the text that goes in the `WHERE` clause to apply the filter.
+    yields the text that goes in the `WHERE` clause to apply the filter. The
+    `Filter` is **type-agnostic**: for a `datetime` column the *`Query`* fills
+    `colname` with the column's `sort_expr` (the combined YYYYMMDDHHMMSS
+    integer) and has already encoded the rule's datetime values to the same
+    integers, so membership and range filters on datetimes compare ints.
 
 - **`FKLookup`** — a foreign-key navigation constraint (drill from one table to
   the rows of a referenced table). Constructed with:
@@ -145,7 +217,9 @@ raises `FilterError` there, not in `__init__`).
     yields an **`INNER JOIN`** statement. The join target is a **sub-query**
     selecting `(run_id, ref_col)` from the indexed reference table for the
     chosen `run_id` and `vals`; the join then matches the main table's
-    `(run_id, fcol)` against the sub-query's `(run_id, ref_col)`.
+    `(run_id, fcol)` against the sub-query's `(run_id, ref_col)`. Both table
+    names in the text are **physical** (`db_name`s) and every identifier is
+    bracket-quoted. (Key values are ids — never datetimes — so no encoding.)
 
 ### `Query`
 
@@ -156,37 +230,48 @@ own **chunks** of up to a global **`CHUNK_SIZE`** records, and advancing to the
 next chunk after a limit is handled **internally** by the class (not by building
 a new `Query`).
 
-- **`Query.build(<cursor>, <run_id>, <table name>, <col1>=<Filter or FKLookup>,
-  …)`** — the factory for a *new* query: a MySQL **cursor** (used to run the
+- **`Query.build(<cursor>, <run_id>, <spec>, <col1>=<Filter or FKLookup>,
+  …)`** — the factory for a *new* query: a pyodbc **cursor** (used to run the
   queries), the currently-targeted **`run_id`** (scopes the main query and every
   build-time count/distinct query, and fills the `{run_id}` field of each
-  `FKLookup.to_sql_str()`), a table name, plus per-column `Filter` / `FKLookup`
-  keyword args. Called whenever the query itself changes (new filters, new
-  ordering, a new FK/PK navigation, a new table). **Not** called to load the
+  `FKLookup.to_sql_str()`), the `TableSpec`, plus per-column `Filter` /
+  `FKLookup` keyword args. Called whenever the query itself changes (new filters,
+  new ordering, a new FK/PK navigation, a new table). **Not** called to load the
   next chunk of rows past the current limit — that windowing is internal to an
   existing `Query`.
 - **The held SQL string** — a `Query` instance holds the complete SQL query with
-  **placeholders for `LIMIT` and `OFFSET`**, so loading the next/previous chunk
-  only requires injecting the current offset and the global limit into the
-  string and re-executing on the cursor. Construction:
+  **placeholders for the offset and the fetch size**, so loading the
+  next/previous chunk only requires injecting the current offset and the global
+  chunk size into the string and re-executing on the cursor. Construction (all
+  identifiers bracket-quoted; the table is the spec's **`db_name`**):
 
   ```
-  SELECT <table-qualified columns, excluding run_id, comma-joined>
-  FROM <table>
+  SELECT <for each display column, its PHYSICAL column(s), table-qualified,
+          comma-joined — a datetime column contributes [t].[x_date], [t].[x_time]>
+  FROM [<db_name>]
   <one INNER JOIN per FKLookup>
-  WHERE <table>.run_id = <run_id> [AND <each Filter.to_sql_str()> …]
-  ORDER BY <spec.order_columns>                 -- stable LIMIT/OFFSET paging
-  LIMIT {limit} OFFSET {offset}
+  WHERE [<db_name>].[run_id] = <run_id> [AND <each Filter.to_sql_str()> …]
+  ORDER BY <sort_expr of each of spec.order_columns>   -- stable paging
+  OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY
   ```
 
   Columns are **table-qualified** because an `FKLookup`'s join sub-query exposes
   `run_id`/`ref_col`, which can otherwise collide with the main table's columns.
-  The `ORDER BY` is required: `LIMIT`/`OFFSET` paging is only well-defined under
-  a stable order, so the table's `order_columns` (its `order_by` if set, else its
-  PK) drives it.
+  The `ORDER BY` is required — T-SQL's `OFFSET … FETCH` paging is only legal
+  (and only well-defined) under an order — so the table's `order_columns` (its
+  `order_by` if set, else its PK) drive it, each rendered through `sort_expr` (a
+  datetime order column orders by its combined integer).
 
-  The trailing `LIMIT`/`OFFSET` are filled per chunk via
-  `query_str.format(limit=…, offset=…)`.
+  **Physical → logical.** The fetched tuple has one cell per *physical* column,
+  so it is wider than the display row whenever the table has datetime columns.
+  `Query` recombines each pair via `from_storage` as it loads a chunk, so the
+  chunks it hands out — and therefore `Table` / `Row` — are already **logical,
+  display-shaped** rows. Nothing above `Query` knows about the pair.
+
+  The trailing offset/fetch are filled per chunk via
+  `query_str.format(limit=…, offset=…)`. Each `Filter`'s `{colname}` is filled
+  with the column's `sort_expr` (for a `datetime`) or its quoted name; datetime
+  rule values are encoded to the combined integer by `build` first.
 
   At build time, `Query.build` runs **only one** query — the **total row count**
   (`nrows`). The per-column distinct work is **not** run eagerly (it can be
@@ -279,7 +364,7 @@ changes.
 
 ## Read path — the PyQt6 app
 
-A desktop app under `swmtplanner/dashboard/app/`. It connects to MySQL as the
+A desktop app under `swmtplanner/dashboard/app/`. It connects to SQL Server as the
 **reader** (`config.py`, SELECT-only) and pulls everything with `run_id`-scoped,
 **paged** SELECTs through the `sqlload` layer — **no query, filtered or not, is
 ever unbounded.** Because the reader grant lacks write privileges, the app
@@ -349,9 +434,16 @@ designed.
 
 ## Open items
 
-- **Dependencies** — `pymysql` (reader) and `PyQt6` (app); mirror into
-  `pyproject.toml` (PyQt6 ideally an optional extra for headless installs).
-- **Testing** — the `sqlload` data layer is unit-tested (pure `Filter`/`FKLookup`;
-  MySQL-gated `Query`/`Table`/`Row`); the PyQt6 UI is verified by running the app.
+- **Dependencies** — `pyodbc` (reader and writer; the named ODBC driver must be
+  installed on the host) and `PyQt6` (app); mirror into `pyproject.toml` (PyQt6
+  ideally an optional extra for headless installs).
+- **Testing** — the `sqlload` data layer is unit-tested. The **SQL Server
+  translation is covered purely, with no server**: storage-mapping round-trips
+  (`to_storage` ↔ `from_storage`, `sort_expr`, datetime encoding), the exact
+  SQL text `Query.build` emits, `Filter`/`FKLookup` literals, and the run-list
+  recombination. The server-gated `Query`/`Table`/`Row` tests target a
+  configurable SQL Server test database (`SWMT_TEST_*` env) and **skip** when it
+  is unreachable — none exists yet, so until then end-to-end is a manual run
+  against the real database. The PyQt6 UI is verified by running the app.
 - **Planner binding** — how the app entry point resolves a planner's manifest and
   its pretty-view module within the dashboard (firm up when the app is built).

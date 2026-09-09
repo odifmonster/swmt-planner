@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from .. import storage
 from .formatting import format_cell
 
 if TYPE_CHECKING:
@@ -18,16 +19,36 @@ if TYPE_CHECKING:
 
 __all__ = ['RunSelectionPage', 'RunButton', 'list_runs']
 
+_RUN_COLUMNS = ('run_id', 'created_at', 'start_date', 'total_score')
+
 
 def list_runs(cursor: Any, runs_spec: 'TableSpec') -> list[tuple]:
-    """Every run, most recent first: `(run_id, created_at, start_date,
-    total_score)`. The registry is **not** run-scoped, so this is a direct query
-    rather than a `Table`/`Query`."""
-    cursor.execute(
-        f'SELECT run_id, created_at, start_date, total_score '
-        f'FROM `{runs_spec.name}` ORDER BY run_id DESC'
+    """Every run, most recent first, as **logical** `(run_id, created_at,
+    start_date, total_score)` values. The registry is **not** run-scoped, so this
+    is a direct query rather than a `Table`/`Query`. The SELECT names the store's
+    physical columns (`created_at` is an INT `_date`/`_time` pair, `start_date` a
+    YYYYMMDD INT) from the spec's `db_name`, and recombines them through the
+    storage mapping — so the cards get a real `datetime` / `date` to format."""
+    cols = [next(c for c in runs_spec.columns if c.name == n) for n in _RUN_COLUMNS]
+    table = storage.quote(runs_spec.db_name)
+    select = ', '.join(
+        f'{table}.{storage.quote(p)}'
+        for c in cols for p in storage.physical_columns(c)
     )
-    return list(cursor.fetchall())
+    cursor.execute(
+        f'SELECT {select} FROM {table} '
+        f'ORDER BY {table}.{storage.quote("run_id")} DESC'
+    )
+    out: list[tuple] = []
+    for raw in cursor.fetchall():
+        raw = tuple(raw)                           # pyodbc.Row -> plain tuple
+        values, i = [], 0
+        for c in cols:
+            width = len(storage.physical_columns(c))
+            values.append(storage.from_storage(c, *raw[i:i + width]))
+            i += width
+        out.append(tuple(values))
+    return out
 
 
 def _fmt_score(value: Any) -> str:

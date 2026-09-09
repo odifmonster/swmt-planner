@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from typing import Any, Collection, Literal
 
-__all__ = ['Filter', 'FKLookup', 'FilterError']
+__all__ = ['Filter', 'FKLookup', 'FilterError', 'LIKE_ESCAPE']
 
 FilterKind = Literal['selection', 'exclusion', 'range', 'pattern']
+
+LIKE_ESCAPE: str
 
 
 class FilterError(ValueError): ...

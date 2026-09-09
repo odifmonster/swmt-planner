@@ -3,8 +3,8 @@
 Covers the generic dashboard (`tests/dashboard_tests.py`): **connection-config
 resolution** (`config.py`, incl. the reader's `SWMT_DASHBOARD_CONFIG`), the
 **`sqlload` read layer** — `Filter` / `FKLookup` (pure) and `Query` / `Table` /
-`Row` (MySQL-gated) — and the generic **reverse-FK map** (`manifest.py`, pure).
-The MySQL-gated tests persist a **synthetic, controlled `DebugLog`**
+`Row` (SQL Server-gated) — and the generic **reverse-FK map** (`manifest.py`,
+pure). The gated tests persist a **synthetic, controlled `DebugLog`**
 (`_dashboard_fixture_log`) as the fixture — built directly via `add_row` rather
 than by running the planner, so the row counts the paging/chunk/boundary tests
 rely on stay stable regardless of planner tuning. It populates `demand`,
@@ -18,7 +18,8 @@ verified by running it.
 
 `env` is passed explicitly (never touching the process environment). Both the
 planner's writer block and the dashboard reader file use one flat shape:
-`host` / `port` / `name` / `user` / `password`.
+`host` / `port` / `name` / `user` / `password`, plus three **optional** ODBC
+settings — `driver` / `encrypt` / `trust_server_certificate` — with defaults.
 
 `resolve_conn_config(block, env)`:
 
@@ -30,9 +31,23 @@ planner's writer block and the dashboard reader file use one flat shape:
 3. **Env-only** — `block=None` with the required vars in `env` resolves.
 4. **Password may be `None`** — a null password in the block (and no env)
    yields `password=None` without error.
-5. **Defaults** — absent host/port default to `127.0.0.1` / `3306`.
+5. **Defaults** — absent host/port default to `127.0.0.1` / `1433`.
 6. **Errors** — missing database name, missing user, and an unparseable port
    each raise `DatabaseConfigError`.
+7. **ODBC settings default** — absent, they resolve to `ODBC Driver 17 for SQL
+   Server` / `encrypt='no'` / `trust_server_certificate='yes'`.
+8. **ODBC settings from the block, env winning** — block values are honoured;
+   `SWMT_DB_DRIVER` / `_ENCRYPT` / `_TRUST_SERVER_CERTIFICATE` override them.
+9. **ODBC booleans normalised** — a JSON `true` / `false` for `encrypt` or
+   `trust_server_certificate` becomes `'yes'` / `'no'` (a `false` must not fall
+   through to the default).
+10. **`connection_string`** — renders exactly `DRIVER={<driver>};SERVER=<host>,
+    <port>;DATABASE=<name>;UID=<user>;PWD=<password>;Encrypt=<encrypt>;
+    TrustServerCertificate=<trust>`, and **omits the `PWD` segment** when the
+    password is `None`.
+11. **`connect` wiring** — with a stand-in `pyodbc` module, `connect(cfg,
+    autocommit=…)` calls `pyodbc.connect(connection_string(cfg),
+    autocommit=…)` and returns its result (proven without the driver installed).
 
 `read_reader_config(env)` (the dashboard reader, distinct `SWMT_DASHBOARD_*`
 namespace so it never shares the writer's `SWMT_DB_*` credentials):
@@ -70,24 +85,59 @@ only rejected when `to_sql_str()` is first called.
 7. **`range` — high only** — `(None, high)` → `{colname} <= <high>`.
 8. **`range` — both bounds** — `(low, high)` →
    `{colname} >= <low> AND {colname} <= <high>`.
-9. **`pattern`** — `{colname} LIKE '<pattern>'` (the LIKE pattern quoted as a
-   string literal).
+9. **`pattern`** — `{colname} LIKE '<pattern>' ESCAPE '\'` (the T-SQL LIKE with
+   the escape clause that makes the GUI's backslash escapes effective).
+10. **Backslash preserved** — a `\` in the pattern reaches the literal unchanged
+    (`a\%b` → `'a\%b'`): T-SQL string literals don't treat `\` specially, so it
+    must **not** be doubled (the MySQL rule), or the `ESCAPE` clause would be
+    defeated.
 
 ### 2.2 `FKLookup.to_sql_str`
 
 1. **Error — empty `vals`** — `to_sql_str()` on an `FKLookup` with no values
    raises `FilterError`.
-2. **Valid output** — for a concrete `(ref_table, ref_col, vals)`,
+2. **Valid output** — for a concrete `(ref_table, ref_col, vals)` where
+   `ref_table` (and the formatted `ftable`) are **physical** `db_name`s,
    `format(ftable=…, fcol=…, run_id=…)` yields the expected `INNER JOIN` against
-   a sub-query: `SELECT run_id, <ref_col> FROM <ref_table> WHERE run_id =
-   <run_id> AND <ref_col> IN (<sorted literals>)`, aliased `fk_<fcol>` and joined
-   on the main table's `(run_id, <fcol>)` matching the sub-query's
-   `(run_id, <ref_col>)` — all identifiers backticked.
+   a sub-query: `SELECT [run_id], [<ref_col>] FROM [<ref_table>] WHERE [run_id]
+   = <run_id> AND [<ref_col>] IN (<sorted literals>)`, aliased `[fk_<fcol>]` and
+   joined on the main table's `(run_id, <fcol>)` matching the sub-query's
+   `(run_id, <ref_col>)` — every identifier bracket-quoted.
 
-## 3. Read layer (`sqlload`) — `Query` (MySQL-gated)
+### 2b. `Query.build` — T-SQL text and physical → logical (no server)
 
-Gated on the same local test MySQL as the persistence suite (skips when
-unavailable). `setUpClass` persists the synthetic `_dashboard_fixture_log` via
+Proven against a **fake cursor** that records executed SQL and serves canned
+rows, over a synthetic spec with an `int` pk, two `datetime`s (one named
+`due_date`), a `date`, and a `str`, `db_name='knit_events'`.
+
+1. **SELECT shape** — `build` runs only the `COUNT(*)`; the held SQL lists each
+   display column's **physical** column(s) (`when` → `[when_date], [when_time]`;
+   `due_date` → `[due_date], [due_time]` — the stem rule; the `date` and scalars
+   as themselves), from `[knit_events]`, run-scoped, `ORDER BY` the pk, ending
+   `OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY`.
+2. **Datetime order column** — an `order_by` datetime orders by the combined
+   `CAST(… AS BIGINT) * 1000000 + …` expression.
+3. **Temporal filters encoded** — a `range` on a datetime compares the combined
+   expression to the encoded YYYYMMDDHHMMSS integer; a `selection` on a `date`
+   compares the plain column to the YYYYMMDD integer.
+4. **Already-encoded values pass through** — an integer in a temporal filter's
+   rule is inlined as-is (no double encoding).
+5. **FK lookup joins the physical table** — the `INNER JOIN` names the
+   referenced `db_name`, bracket-quoted throughout.
+6. **Chunks recombined** — `next_chunk` turns each fetched physical row into the
+   logical display row (pairs → `datetime`, a half-null pair → `None`, a date INT
+   → `date`, scalars unchanged), and the chunk fetch fills the `OFFSET`/`FETCH`
+   placeholders.
+7. **`unique` decodes** — the distinct query runs over the combined expression
+   and its values are decoded back to `datetime` (a `NULL` stays `None`).
+
+## 3. Read layer (`sqlload`) — `Query` (SQL Server-gated)
+
+Gated on a reachable SQL Server test database (`SWMT_TEST_*` env; skips when the
+driver / server is unavailable — **none is provisioned yet, so these currently
+skip**; the translation itself is proven by §2b and §7). `setUpClass` empties
+the store's tables children-first via `_clean_slate` (T-SQL has no FK-checks
+toggle), then persists the synthetic `_dashboard_fixture_log` via
 `persist_run` and connects a cursor scoped to that `run_id`; **`query.CHUNK_SIZE`
 (and `query._HALF`) are reduced** so the large `cost_summary` (200 rows) spans
 several chunks, exercising chunking, the half-chunk window, and lazy loading
@@ -139,7 +189,7 @@ ordered by its `order_columns` (the same `ORDER BY` `build` emits).
 4. **Clamp at the start** — at the first window, `prev_chunk` returns the
    **same** first chunk (no retreat before row 0).
 
-## 4. Read layer (`sqlload`) — `Table` / `Row` (MySQL-gated)
+## 4. Read layer (`sqlload`) — `Table` / `Row` (SQL Server-gated)
 
 Same gated, populated run as §3 with `CHUNK_SIZE` reduced; tests set a known
 `page_size` via `Table.set_page_size` (restoring it and `CHUNK_SIZE` afterward,
@@ -211,7 +261,7 @@ its `order_columns` (matching `build`'s `ORDER BY`); a page's expected `Row`
    column (matching a direct `SELECT DISTINCT`), and `None` for a column past the
    `CHUNK_SIZE` cutoff (the GUI filter UI's source of selection/exclusion values).
 
-## 5. Read layer (`sqlload`) — selection & filtering (MySQL-gated)
+## 5. Read layer (`sqlload`) — selection & filtering (SQL Server-gated)
 
 Same gated, populated run and ordering as §4. Filtered/looked-up expectations
 are computed from the table's contents ordered by `order_columns` with the same
@@ -284,3 +334,31 @@ only from the given specs.
 4. **Views are sources, not keys** — each committed-move view is a **source**
    (its identity column is an FK back to `sched_cost_detail`), so the views appear
    among the map's sources; nothing references a view, so none is ever a key.
+
+## 7. Storage mapping (`storage.py`, no server)
+
+`storage.py` is the single translation between the logical manifest and the SQL
+Server physical shape (`dashboard/DESIGN.md`, "Storage mapping"). All pure — this
+is where the store's INT temporal encoding is proven without a server.
+
+1. **Stem rule** — `stem` strips only a trailing `_date`: `start`→`start`,
+   `due_date`→`due`; `window_end` / `created_at` are unchanged.
+2. **Physical columns** — a `datetime` maps to `(<stem>_date, <stem>_time)`:
+   `start`→`start_date`/`start_time`, `window_end`→`window_end_date`/`_time`, and
+   `due_date`→`due_date`/`due_time` (**not** `due_date_date`); a `date` and every
+   scalar type map to the column's own name alone.
+3. **Datetime round trip** — `to_storage` yields `(YYYYMMDD, HHMMSS)`;
+   `from_storage` inverts it at **second precision** (microseconds are dropped;
+   exact when absent). `None` ↔ `(None, None)`; a half-null pair reads back
+   `None`.
+4. **Date round trip** — `to_storage` yields `(YYYYMMDD,)` and `from_storage` a
+   `date`; a `datetime` given for a `date` column keeps only its date part;
+   `None` ↔ `(None,)`.
+5. **Scalars pass through** — `int` / `float` / `str` (and `None`) are `(value,)`
+   in and the value back out.
+6. **Combined integer** — `encode_datetime` is YYYYMMDDHHMMSS: strictly
+   increasing over increasing datetimes (distinct codes) and inverted exactly by
+   `decode_datetime`.
+7. **`sort_expr`** — a `datetime` renders `CAST([t].[<stem>_date] AS BIGINT) *
+   1000000 + [t].[<stem>_time]`; every other type the quoted `[t].[col]`.
+8. **`quote`** — bracket-quotes an identifier, doubling an embedded `]`.

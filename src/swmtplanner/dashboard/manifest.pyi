@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-ColumnType = Literal['int', 'float', 'str', 'datetime']
+ColumnType = Literal['int', 'float', 'str', 'datetime', 'date']
 
 RUN_ID: str
 
@@ -29,6 +29,7 @@ class TableSpec:
     pk: tuple[str, ...]
     fks: tuple[ForeignKey, ...] = ...
     order_by: tuple[str, ...] = ...
+    db_name: str = ...
     @property
     def column_names(self) -> tuple[str, ...]: ...
     @property

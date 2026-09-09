@@ -3,7 +3,7 @@
 Covers the infinite planner's debug-log persistence (`tests/persistence_tests.py`):
 its concrete **manifest** (`planners/infinite/manifest.py`, checked against the
 live `DebugLog`) and the **`sqldump` writer** (`persistence.py` — pure helpers +
-a MySQL-gated end-to-end). The generic dashboard (config + read layer) is covered
+a SQL Server-gated end-to-end). The generic dashboard (config + read layer) is covered
 by `DASHBOARD_TEST_SPEC.md`; the PyQt6 app is verified by running it.
 
 ## 1. Manifest ↔ live `DebugLog` consistency
@@ -49,35 +49,50 @@ the source of truth).
 
 ## 3. Persistence pure helpers (`persistence.py`, no server)
 
-Driven by a real populated `DebugLog`; no MySQL.
+Driven by a real populated `DebugLog`; no server. This is where the **write-side
+SQL Server translation** is proven purely (the storage mapping itself is covered
+in `DASHBOARD_TEST_SPEC.md` §7).
 
 1. **`to_sql`** — `None` / float-NaN / numpy-NaN / `NaT` / `pd.NA` → `None`;
    python & numpy float → python `float` (non-NaN); numpy int → python `int`;
    `str` passes through unchanged; `pandas.Timestamp` (incl. a date-only one)
-   → `datetime`.
-2. **`insert_sql`** — for a spec, names `run_id` first then the spec's columns
-   in order, every identifier backticked (checked on `sched_cost_detail`, which
-   has reserved `desc`/`start`/`end`); placeholder count `== 1 + len(columns)`.
+   → `datetime`. (The storage mapping is applied *after* this, per column.)
+2. **`insert_sql`** — for a spec, `INSERT INTO [<db_name>]` (the physical
+   `knit_` name) naming `[run_id]` first then the spec's **physical** columns in
+   order — each `datetime` expanded to its `_date`/`_time` pair (checked on
+   `sched_cost_detail`: `… [start_date], [start_time], [end_date], [end_time],
+   [desc] …`), every identifier bracket-quoted; **`?` qmark placeholders**, one
+   per physical column plus `run_id`; no `%s`.
 3. **`project_rows`** — yields one tuple per `get_df` row (count matches); each
-   is `(run_id, *cells)` of width `1 + len(columns)` with `run_id` first; a
-   keyed table's PK appears as a data column (`iteration_log.move_id`); an empty
-   key-less table (`unmet_demand`) yields nothing.
+   is `(run_id, *storage_cells)` of width `1 + <physical column count>` (a
+   datetime contributes two cells) with `run_id` first; a keyed table's PK
+   appears as a data column (`iteration_log.move_id`); an empty key-less table
+   (`unmet_demand`) yields nothing.
+4. **Datetimes split** — on `production`, each row's `start` occupies two
+   consecutive INT cells equal to `encode_date` / `encode_time` of the
+   DataFrame value.
 
-## 4. `persist_run` end-to-end (MySQL-gated)
+## 4. `persist_run` end-to-end (SQL Server-gated)
 
-Gated on a reachable local test MySQL (`swmtinftest`, same schema as
-production); the class **skips** when the server / driver is unavailable.
-Connection details come from env vars with the project's test defaults
-(host `127.0.0.1:3306`; roles `knitwritetest` / `knitreadtest`, password
-`testpass`; admin `ktroot`). Each test **truncates all base tables** (via the
-admin role, FK checks off) in `setUp`, so assertions use absolute counts.
+Gated on a reachable SQL Server test database — connection details from the
+`SWMT_TEST_*` env vars (host / port / name / driver; roles `knitwritetest` /
+`knitreadtest`; admin `ktroot`); the class **skips** when the driver / server is
+unavailable. **No test database is provisioned yet, so these currently skip** —
+the translation is covered by §3 and the dashboard's pure suites, and confirmed
+by a manual run against the real database. Each test **empties every `knit_`
+table children-first** (`_clean_slate`, admin role — T-SQL has no FK-checks
+toggle and `TRUNCATE` refuses an FK-referenced table) in `setUp`, so assertions
+use absolute counts. All raw SQL is T-SQL: bracket-quoted identifiers, physical
+`db_name`s, `?` placeholders, `TOP 1` instead of `LIMIT`.
 
 1. **Round-trip** — `persist_run(debuglog, writer_conn, …)` returns an int
-   `run_id`; `runs` then holds exactly one row, whose `total_score` /
-   `n_unmet` / `start_date` match the arguments; and every manifest table's
-   `COUNT(*) WHERE run_id = <id>` equals `len(get_df(name))`. (A successful
-   insert also implicitly proves the FK-topological order, since the DB enforces
-   the foreign keys.)
+   `run_id` (server-assigned via `OUTPUT INSERTED`); `knit_runs` then holds
+   exactly one row, whose `total_score` / `n_unmet` match the arguments and
+   whose `start_date` is the **YYYYMMDD int** that `decode_date`s back to the
+   argument; and every manifest table's `COUNT(*) WHERE run_id = <id>` equals
+   `len(get_df(name))`. (A successful insert also implicitly proves the
+   FK-topological order and the physical-column expansion, since the DB
+   enforces the foreign keys and column list.)
 2. **Reconciled `role` column** — `iteration_log.role` round-trips: its distinct
    values are a subset of `{committed, rejected}`, `committed` is present, and
    the committed-row count matches the `DebugLog`'s.

@@ -4,7 +4,7 @@
 the `database`-block override resolution and the interactive `vi` notes flow.
 See `tests/spec-files/RUN_TEST_SPEC.md`. The full `run()` invocation and the
 DB-touching `_persist_debuglog` are covered elsewhere (manual CLI runs;
-`dashboard_tests.py`'s MySQL-gated wiring tests)."""
+`dashboard_tests.py`'s SQL Server-gated wiring tests)."""
 
 import json
 import os

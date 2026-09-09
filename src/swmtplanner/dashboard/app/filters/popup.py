@@ -28,9 +28,14 @@ def _kinds_for(col_type: str) -> list[tuple[str, str]]:
 
 
 def _like_escape(text: str) -> str:
-    """Escape MySQL `LIKE` metacharacters so the user's text matches literally
-    once the affix `%` is added (backslash first)."""
-    return text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    """Escape T-SQL `LIKE` metacharacters — `%`, `_`, and `[` (which opens a
+    character class) — so the user's text matches literally once the affix `%`
+    is added. The emitted clause carries `ESCAPE '\\'`, so a literal backslash
+    is written as `\\\\` (backslash first)."""
+    return (
+        text.replace('\\', '\\\\').replace('%', '\\%')
+            .replace('_', '\\_').replace('[', '\\[')
+    )
 
 
 class FilterPopup(QWidget):

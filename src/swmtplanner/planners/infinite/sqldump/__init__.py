@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""`sqldump` — the write path: persist a populated `DebugLog` to the MySQL store
+"""`sqldump` — the write path: persist a populated `DebugLog` to the SQL Server store
 (run-tagged by an auto-incremented `run_id`). Uses the planner's concrete
 `..manifest` (DB layout / insert order) and the writer `ConnConfig` from the
 top-level `swmtplanner.dashboard.config`. See `planners/infinite/DESIGN.md`."""

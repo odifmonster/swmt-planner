@@ -1,10 +1,10 @@
 # Specification of coverage of `run.py` CLI-helper tests
 
-Covers the CLI helpers added for verbose-mode MySQL persistence: the
+Covers the CLI helpers added for verbose-mode SQL Server persistence: the
 `database`-block override resolution and the interactive `vi` notes flow. The
 full `run()` invocation (which needs a complete input bundle) is exercised by
 manual CLI runs; `_persist_debuglog` is covered by `dashboard_tests.py`'s
-MySQL-gated wiring tests.
+SQL Server-gated wiring tests.
 
 ## 1. `_resolve_db_block`
 

@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Callable, Sequence
 
-from ..manifest import TableSpec
+from ..manifest import Column, TableSpec
 from .helpers import Filter, FKLookup
 
 __all__ = ['Query', 'CHUNK_SIZE']
@@ -11,7 +11,8 @@ CHUNK_SIZE: int
 class Query:
     def __init__(
         self, cursor: Any, sql: str, nrows: int,
-        distinct_queries: dict[str, tuple[str, str]],
+        distinct_queries: dict[str, tuple[str, str, Callable[[Any], Any]]],
+        columns: Sequence[Column],
     ) -> None: ...
     @classmethod
     def build(

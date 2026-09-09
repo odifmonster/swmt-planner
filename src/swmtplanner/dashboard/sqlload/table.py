@@ -10,7 +10,7 @@ over one record's value tuple that can read columns by name and (for a keyed
 table) toggle its selection in the owning `Table`.
 """
 
-from typing import Any
+from typing import Any, Mapping
 
 from ..manifest import RUN_ID, TableSpec
 from .query import Query, CHUNK_SIZE
@@ -101,10 +101,18 @@ class Table:
         """The current display page size (set via `set_page_size`)."""
         return self._page_size
 
-    def __init__(self, schema: TableSpec, cursor: Any, run_id: int) -> None:
+    def __init__(
+        self, schema: TableSpec, cursor: Any, run_id: int, *,
+        ref_specs: 'Mapping[str, TableSpec] | None' = None,
+    ) -> None:
         self._schema = schema
         self._cursor = cursor
         self._run_id = run_id
+        # Logical name -> TableSpec for tables this one's FKs reference, so an
+        # FK lookup's sub-query can name the referenced table's **physical**
+        # `db_name`. Absent, the logical name is used (the generic default where
+        # `db_name == name`). The app passes its whole manifest.
+        self._ref_specs = dict(ref_specs or {})
         self._display_cols = [
             c for c in schema.column_names if c != RUN_ID
         ]
@@ -186,9 +194,10 @@ class Table:
         self._ensure_col(fkcol)
         if fkcol not in self._fk_map:
             raise KeyError(f'column {fkcol!r} is not a foreign key')
-        self._conds[fkcol] = FKLookup(self._fk_map[fkcol].ref_table,
-                                      self._fk_map[fkcol].ref_column,
-                                      values)
+        fk = self._fk_map[fkcol]
+        ref = self._ref_specs.get(fk.ref_table)
+        ref_db_name = ref.db_name if ref is not None else fk.ref_table
+        self._conds[fkcol] = FKLookup(ref_db_name, fk.ref_column, values)
         self._rebuild_query()
     
     # ----- query re-building --------------------------------------------

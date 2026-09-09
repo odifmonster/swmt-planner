@@ -15,13 +15,16 @@ log persistence). A test (`tests/dashboard_tests.py`) checks it stays consistent
 with the live `DebugLog`.
 """
 
+from dataclasses import replace
+
 from swmtplanner.dashboard.manifest import (
     Column, ColumnType, ForeignKey, TableSpec, RUN_ID,
 )
 
 __all__ = [
     'Column', 'ColumnType', 'ForeignKey', 'TableSpec', 'RUN_ID',
-    'RUNS_TABLE', 'RUNS', 'TABLES', 'VIEWS', 'ALL_TABLES', 'spec_for_name',
+    'RUNS_TABLE', 'RUNS', 'TABLES', 'VIEWS', 'ALL_TABLES', 'DB_PREFIX',
+    'spec_for_name',
 ]
 
 # The run registry that owns the auto-incremented `run_id` (no `DebugLog`
@@ -35,7 +38,7 @@ RUNS = TableSpec(
     columns=(
         Column('run_id', 'int'),
         Column('created_at', 'datetime'),
-        Column('start_date', 'datetime', nullable=True),
+        Column('start_date', 'date', nullable=True),   # date-only: one YYYYMMDD INT
         Column('total_score', 'float', nullable=True),
         Column('n_unmet', 'int', nullable=True),
         Column('label', 'str', nullable=True),
@@ -257,6 +260,22 @@ VIEWS: tuple[TableSpec, ...] = (
         order_by=('item', 'knit_id'),
     ),
 )
+
+# Physical naming. The SQL Server database is shared with other tables, so every
+# one of this planner's tables — the registry, the detail tables, and the views —
+# is stored under a `knit_`-prefixed name. The manifest keeps each logical `name`
+# (= the DebugLog table) and records the physical one in `db_name`; only SQL text
+# ever uses it (see the dashboard's "Storage mapping").
+DB_PREFIX = 'knit_'
+
+
+def _knit(spec: TableSpec) -> TableSpec:
+    return replace(spec, db_name=DB_PREFIX + spec.name)
+
+
+RUNS = _knit(RUNS)
+TABLES = tuple(_knit(t) for t in TABLES)
+VIEWS = tuple(_knit(v) for v in VIEWS)
 
 # Lookups. `TABLES` is already the insert order; `ALL_TABLES` prepends the run
 # registry (which the writer fills first). `_BY_NAME` also resolves the views, so

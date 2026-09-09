@@ -9,10 +9,13 @@ level (rather than under `planners/infinite/`) because it is planner-agnostic.
 
 **Persistence and investigation are external.** `DebugLog` is only the in-memory
 accumulator + its read API (`tables` / `schema` / `get_df`). Turning a populated
-log into durable, browsable output — writing it to a local MySQL store and
+log into durable, browsable output — writing it to a SQL Server store and
 investigating it through a PyQt6 app — is owned by the planner's dashboard
 module (`planners/infinite/dashboard/`, see its DESIGN.md), which consumes this
-read API. This module hard-codes nothing about MySQL, files, or UIs.
+read API. This module hard-codes nothing about SQL Server, files, or UIs — in
+particular it stays **datetime-native**: the store's INT `_date`/`_time` encoding
+of temporal columns is purely the persistence layer's concern and never appears
+in a `DebugLog`.
 
 ## Purpose
 
@@ -35,7 +38,7 @@ This submodule owns:
 - the `DebugLog` object, the table / record types it holds, and its read API
   (`tables` / `schema` / `get_df`).
 
-It does **not** own output: persistence (→ MySQL) and the investigation UI
+It does **not** own output: persistence (→ SQL Server) and the investigation UI
 (→ PyQt6) live in `planners/infinite/dashboard/`.
 
 ## Phased implementation
@@ -162,7 +165,7 @@ be made a foreign key (and vice versa); a primary key cannot be redefined with
 a different counter name, nor switched from counter-backed to caller-supplied or
 back. `set_pk` / `set_fk` raise on all such attempts; re-declaring the identical
 key is a silent no-op. The PK/FK declarations double as the **inter-table link
-metadata** the `schema` property exposes — used by the MySQL persistence writer
+metadata** the `schema` property exposes — used by the SQL Server persistence writer
 (to lay out run-tagged tables) and the PyQt6 investigation app (to drive
 foreign-key navigation). See `planners/infinite/dashboard/DESIGN.md`.
 
@@ -423,7 +426,7 @@ information (per-delivery `days` / `qty` / `value`) is in `inv_cost_detail`'s
 
 Once the log is populated (phases 1–2), turning it into durable, browsable
 output is owned by `planners/infinite/dashboard/` — **not** this module. That
-work persists a run's tables to a local **MySQL** store (run-tagged by an
+work persists a run's tables to a **SQL Server** store (run-tagged by an
 auto-incremented `run_id`) and investigates them through a **PyQt6** desktop app
 (select a run → raw, run-scoped, paged grids with foreign-key navigation and
 per-column filters). Those layers consume this module's `tables` / `schema` /

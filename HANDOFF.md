@@ -17,13 +17,13 @@ the other branches do). Layout:
 - `src/swmtplanner/planners/infinite/` — the greedy planner that composes the
   two; CLI + report writer live here (`costing/`, `loop/`, `report.py`,
   `run.py`), plus its **debug schema** (`manifest.py`) and the **`sqldump/`**
-  MySQL writer (`persist_run`).
+  SQL Server writer (`persist_run`).
 - `src/swmtplanner/debuglog/` — the planner-agnostic `DebugLog` audit-log
   container (top-level, used by the planner under `--verbose`).
 - `src/swmtplanner/dashboard/` — the **planner-agnostic debug-log viewer**
   (top-level): generic `manifest` dataclasses + reader `config`, the `sqlload`
   read/pagination layer, and the PyQt6 `app/` (GUI, later). Owns all GUI.
-- `tests/` — `*_tests.py` modules (+ the shared `mysql_support.py` helper);
+- `tests/` — `*_tests.py` modules (+ the shared `sqlserver_support.py` helper);
   coverage specs in `tests/spec-files/` (`SCHEDULE_TEST_SPEC.md`,
   `DEMAND_TEST_SPEC.md`, `COORD_TEST_SPEC.md`, `INF_PLAN_TEST_SPEC.md`,
   `DEBUGLOG_TEST_SPEC.md`, `PERSISTENCE_TEST_SPEC.md`, `DASHBOARD_TEST_SPEC.md`,
@@ -35,13 +35,19 @@ convention**: every module in the dashboard / persistence subpackages has one,
 created with the code and kept in sync.
 
 **Running tests / Python:** the project virtualenv is `.dev-venv` (has
-pandas/numpy + pymysql; no pytest). Run with:
+pandas/numpy + pyodbc — reaching a server also needs the ODBC driver installed;
+no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **487 tests, all passing** (`python -m unittest discover -s
-> tests -p '*_tests.py'`; the MySQL-gated tests — `persist_run` end-to-end plus
-> the whole `sqlload` read layer — run against a local `swmtinftest`, else skip).
+> **Suite state:** **467 tests pass, 4 skip** (`python -m unittest discover -s
+> tests -p '*_tests.py'`). The 4 skips are the **SQL Server-gated** classes —
+> `persist_run` end-to-end plus the `sqlload` read layer against a live store —
+> which probe a `SWMT_TEST_*` SQL Server test database in `setUpClass` and skip
+> when the driver/server is unreachable. **No test database exists yet**, so they
+> currently always skip; the SQL Server translation is instead proven by pure
+> tests (storage mapping, `insert_sql`/`project_rows`, `Query.build` SQL text,
+> `connect` wiring) and must be smoke-checked manually against the real DB.
 > The planner prints `Total moves committed: N` (and per-table `Dumping …` lines
 > during a verbose persist) to stdout — intentional source-side prints, harmless
 > to the suite.
@@ -73,11 +79,27 @@ guard rail) and a three-way changeover split (`StyleChange` / `RunnerChange` /
 ## Debug log + investigation — data layer done; GUI through phase 4
 
 A codebase-wide **debug mode**: the planner records *why* each move was chosen
-into a `DebugLog`, persists a run to a local **MySQL** store, and investigates it
-through a planner-agnostic **PyQt6 dashboard**. The debug log, the MySQL writer,
-and the dashboard's `sqlload` read layer are done (the earlier pieces committed;
-the composite-PK + two-new-table work is in the working tree); the GUI is built
-through phase 4, with the pretty view (phase 5) remaining.
+into a `DebugLog`, persists a run to a **SQL Server** store, and investigates it
+through a planner-agnostic **PyQt6 dashboard**. The debug log, the writer, and
+the dashboard's `sqlload` read layer are done (the earlier MySQL-era pieces
+committed; the composite-PK + two-new-table work **and the SQL Server
+cut-over** are in the working tree); the GUI is built through phase 4, with the
+pretty view (phase 5) remaining.
+
+**Store cut-over (MySQL → SQL Server, pyodbc) — in the working tree, pure tests
+green, real-DB smoke pending.** Three physical differences from the logical
+manifest, all hidden by one generic module, `dashboard/storage.py`: (1) every
+table is `knit_`-prefixed (`TableSpec.db_name`; only SQL text uses it); (2) each
+`datetime` column is an INT pair `<stem>_date` (YYYYMMDD) / `<stem>_time`
+(HHMMSS) at second precision, the stem being the name minus a trailing `_date`
+(`start`→`start_date`/`start_time`, but `due_date`→`due_date`/`due_time`); (3) a
+`date` column (only `runs.start_date`) is a lone YYYYMMDD INT. The dialect is
+T-SQL: bracket quoting, `?` placeholders, `OFFSET … ROWS FETCH NEXT … ROWS ONLY`,
+`LIKE … ESCAPE '\'`, `OUTPUT INSERTED.run_id`. `Query` selects the physical
+columns and recombines pairs into logical rows, orders/compares datetimes via the
+combined `CAST(_date AS BIGINT)*1000000 + _time` integer, so `Table`/`Row`/the
+GUI are unchanged. Design: `dashboard/DESIGN.md` "Storage mapping" and
+`planners/infinite/DESIGN.md` "Debug-log persistence to SQL Server".
 
 ### The debug log — `swmtplanner.debuglog` (done)
 
@@ -103,14 +125,15 @@ keyed by composite `(kind, label)`); and post-loop copies of `demand` /
 an earlier after-the-fact reconstruction (the old `iterlog` / `cost_breakdown`
 machinery), which has been removed. Design: `swmtplanner/debuglog/DESIGN.md`.
 
-### Planner-owned: debug schema + MySQL writer (done)
+### Planner-owned: debug schema + SQL Server writer (done)
 
-The database `swmtinfinite` (test copy `swmtinftest`) is **dedicated to the
-knitting planner**, so its base tables share the `DebugLog` table names (no
-translation); it also holds a `runs` registry and two read-only views
-(`committed_sched` / `committed_prod`, the committed-move slices). The schema is
-**user-provisioned** — the tool only INSERTs. The planner owns its concrete
-schema + the write path:
+The SQL Server database is **shared with other tables**, so this planner's are
+all stored under `knit_`-prefixed physical names (`db_name`) while keeping their
+logical `DebugLog` names; it also holds the `knit_runs` registry and two
+read-only views (`knit_committed_sched` / `knit_committed_prod`, the
+committed-move slices). Temporal columns are INTs (see the store cut-over note
+above). The schema is **user-provisioned** — the tool only INSERTs. The planner
+owns its concrete schema + the write path:
 
 - **`planners/infinite/manifest.py`** — the concrete schema for **ten** tables
   (+ the `runs` registry and the two committed views): per-table column types,
@@ -122,12 +145,16 @@ schema + the write path:
   per-table `order_by` (the explicit paging order, overriding the pk when set).
   Built from the generic dataclasses in `swmtplanner.dashboard.manifest`; each
   `TableSpec` also carries a `disp_name` + `desc` for the GUI. A test guards it
-  against drift from the live `DebugLog`. The MySQL DDL is documented in
+  against drift from the live `DebugLog`. The SQL Server DDL is documented in
   `planners/infinite/DESIGN.md` (Debug-log persistence).
 - **`planners/infinite/sqldump/persistence.py`** — `persist_run(debuglog, conn,
-  …)`: connect as the writer, INSERT a `runs` row → `run_id`, then
-  bulk-`executemany` every table's run-tagged rows in FK-topological order, one
-  transaction (rollback + `PersistenceError` on failure). Driver: **PyMySQL**.
+  …)`: connect as the writer via `config.connect` (pyodbc), INSERT the
+  `knit_runs` row with `OUTPUT INSERTED.run_id` (`created_at` supplied from the
+  wall clock as its `_date`/`_time` pair, `start_date` as a YYYYMMDD int), then
+  bulk-`executemany` (`fast_executemany`) every table's run-tagged rows in
+  FK-topological order, one transaction (rollback + `PersistenceError` on
+  failure). `insert_sql`/`project_rows` expand each datetime to its INT pair via
+  `storage.to_storage`; `?` placeholders, bracket-quoted identifiers.
 - **`run.py --verbose`** — resolves the writer `ConnConfig` from the config's
   optional `database` block (`--db-conn` overrides), calls `persist_run`, echoes
   the new `run_id`. Verbose **requires `--label`** + multi-line **notes via `vi`**
@@ -142,25 +169,42 @@ layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
 
 - **`manifest.py`** — generic `TableSpec` / `Column` / `ForeignKey` dataclasses
   (shape only — the planner fills them in; `TableSpec` carries `disp_name` +
-  `desc` for the GUI) + the universal `RUN_ID`, the `order_columns` accessor
-  (`order_by` if set, else `pk`), and `referencing_fks` (the reverse-FK map).
+  `desc` for the GUI and the physical **`db_name`**, default = `name`; `Column`
+  types now include **`date`** beside `datetime`) + the universal `RUN_ID`, the
+  `order_columns` accessor (`order_by` if set, else `pk`), and `referencing_fks`
+  (the reverse-FK map).
+- **`storage.py`** — the **storage mapping** (pure): `physical_columns` (the
+  `_date`/`_time` pair for a datetime, via the stem rule), `to_storage` /
+  `from_storage` (cell tuples in, logical values out; second precision),
+  `encode_datetime` / `decode_datetime` (the combined YYYYMMDDHHMMSS integer),
+  `sort_expr` (the ORDER BY / compare expression), `quote` (`[ ]`). Both the
+  writer and the read path go through it; nothing above SQL sees the encoding.
 - **`config.py`** — `ConnConfig` / `DatabaseConfigError` /
   `resolve_conn_config(block, env, *, prefix)` over a **flat** connection block
-  (`host`/`port`/`name`/`user`/`password`). The planner's writer uses `SWMT_DB_*`;
-  the reader's `read_reader_config` reads the JSON file named by
+  (`host`/`port`/`name`/`user`/`password` + optional `driver` [default `ODBC
+  Driver 17 for SQL Server`], `encrypt` [`no`], `trust_server_certificate`
+  [`yes`] — JSON booleans accepted; port default 1433). The planner's writer uses
+  `SWMT_DB_*`; the reader's `read_reader_config` reads the JSON file named by
   **`SWMT_DASHBOARD_CONFIG`** and resolves with the distinct `SWMT_DASHBOARD_*`
-  namespace (reader/writer creds never collide). Read-only is enforced at the
-  MySQL grant level on the configured reader user.
+  namespace (reader/writer creds never collide). **`connection_string(cfg)`** /
+  **`connect(cfg, autocommit=)`** are the one pyodbc path both sides use (the
+  `pyodbc` import is lazy). Read-only is enforced by the reader login's SQL
+  Server permissions.
 - **`sqlload/`** — the read/pagination **data layer** (done, tested):
   - `helpers.py` — `Filter` (`selection`/`exclusion`/`range`/`pattern`) +
-    `FKLookup`, each compiling a column constraint to a SQL format string via
-    `to_sql_str()` (lazy validation → `FilterError`).
+    `FKLookup`, each compiling a column constraint to a T-SQL format string via
+    `to_sql_str()` (lazy validation → `FilterError`). Bracket-quoted; `pattern`
+    emits `LIKE … ESCAPE '\'`; `FKLookup.ref_table` is the referenced table's
+    **physical** name; `_sql_literal` does **not** double backslashes (T-SQL).
   - `query.py` — `Query.build(cursor, run_id, spec, **constraints)` takes a
-    `TableSpec` (so it's schema-driven), runs count + per-column distinct
-    queries, assembles one bounded SELECT (table-qualified, run-scoped,
-    `ORDER BY order_columns`, `{limit}`/`{offset}`). Exposes `nrows`,
-    `unique(col)` (→ `None` past `CHUNK_SIZE` distinct), `next_chunk`/`prev_chunk`
-    (holds a full chunk, advances by half-chunks; `row_offset`).
+    `TableSpec`, runs only the count query, and assembles one bounded T-SQL
+    SELECT: the **physical** columns of `[db_name]` (a datetime → its pair),
+    run-scoped, filters/`ORDER BY`/`DISTINCT` via `storage.sort_expr` with
+    temporal filter values pre-encoded, `OFFSET {offset} ROWS FETCH NEXT {limit}
+    ROWS ONLY`. Loaded chunks are **recombined to logical rows**, so `Table`/
+    `Row` are untouched. Exposes `nrows`, `unique(col)` (decoded; → `None` past
+    `CHUNK_SIZE` distinct), `next_chunk`/`prev_chunk` (half-chunk stepping;
+    `row_offset`).
   - `table.py` — `Table(spec, cursor, run_id)` owns the `Query`, serves
     `next_page`/`prev_page`/`reload_page` of `Row`s; `apply_filter_to` /
     `remove_filter` / `apply_fk_lookup` rebuild (reset to page 1 + clear
@@ -207,17 +251,24 @@ layer; `app/` (GUI, later). Design: `swmtplanner/dashboard/DESIGN.md`.
 - `tests/persistence_tests.py` (planner) — manifest↔DebugLog consistency +
   structure (incl. `run_configs`/`iteration_states`), persistence pure helpers
   (incl. composite-PK `project_rows`), the `plan`→`run_configs`/`iteration_states`
-  population, `persist_run` end-to-end (MySQL-gated) + `run.py` wiring. Spec:
+  population, the write-side translation (`insert_sql` brackets/qmarks/physical
+  expansion, `project_rows` datetime splitting — pure), `persist_run` end-to-end
+  (SQL Server-gated, currently skipping) + `run.py` wiring. Spec:
   `PERSISTENCE_TEST_SPEC.md`.
 - `tests/dashboard_tests.py` (generic dashboard) — config resolution + reader
   config, `Filter`/`FKLookup` (pure), the `referencing_fks` reverse-FK map (pure),
-  `Query`/`Table`/`Row` incl. `Table.unique` (MySQL-gated). The gated tests
+  the **storage mapping** (§7) and **`Query.build`'s exact T-SQL + recombination
+  against a fake cursor** (§2b) — both pure, `Query`/`Table`/`Row` incl.
+  `Table.unique` (SQL Server-gated, currently skipping). The gated tests
   persist a **synthetic, controlled `DebugLog`** (`_dashboard_fixture_log`, built
   via `add_row`) — decoupled from the planner so row counts stay stable through
   planner tuning. Spec: `DASHBOARD_TEST_SPEC.md`.
 - `tests/inf_plan_tests.py` — planner loop / coordination, incl. `eligible_orders`
   (see the precedence note below). Spec: `INF_PLAN_TEST_SPEC.md`.
-- `tests/mysql_support.py` — shared MySQL connection scaffolding (not collected).
+- `tests/sqlserver_support.py` — shared SQL Server scaffolding (not collected):
+  `SWMT_TEST_*` connection details, `_connect` (pyodbc via `config.connect`),
+  and `_clean_slate` (empties the `knit_` tables children-first — T-SQL has no
+  FK-checks toggle). Gated classes probe reachability and skip when unavailable.
 - The **`app/` GUI is verified by running it** (`knit-debug`), not unit-tested —
   per convention; the `Table`/`Query`/`Row` stack beneath it is covered.
 
@@ -234,14 +285,28 @@ the dashboard read-layer tests moved to the synthetic fixture above. Detail:
 
 ## Next concrete action
 
-Recently landed (working tree, suite green): `DebugLog` **composite PKs**, the
-two new tables (`run_configs` / `iteration_states`) end-to-end (manifest +
-`_build_debug_log` + population + persist round-trip), the `eligible_orders`
-precedence rework + its tests, and the **decoupled dashboard fixture**. The two
-new tables surface automatically in the GUI raw view (each table now also shows a
-`disp_name` + `desc`). GUI phase 4 (FK/PK navigation + back button) is also done;
-it still wants a manual run-verify pass (`knit-debug`: drill an FK cell, check PK
-rows + "Go to…", retrace with **‹ Back**, clear a nav filter via the header ✕).
+Recently landed (working tree, pure suite green): `DebugLog` **composite PKs**,
+the two new tables (`run_configs` / `iteration_states`) end-to-end, the
+`eligible_orders` precedence rework + its tests, the **decoupled dashboard
+fixture**, the `collapsed_sched` report sheet, the new greige-styles JSON loader,
+`inv_cost_detail` restricted to affected items, and the **SQL Server cut-over**
+(see the store cut-over note above; steps: manifest `db_name`/`date` →
+`storage.py` → `config.py` → `sqlload` → `persistence.py` → app → test
+scaffolding, all done). `pymysql` is gone from `requirements.txt`.
+
+**Immediate next action — smoke the cut-over against the real database** (no
+test DB exists, so the gated suites can't do it): a `--verbose` planner run with
+the `database` block pointing at the SQL Server store should persist a run
+(`knit_runs` gets `created_at_date`/`_time` + `start_date` ints; every `knit_`
+table fills; `due_date`/`due_time` etc. land as INT pairs), and `knit-debug`
+should list the run with a correctly formatted `created_at`/`start_date`, page
+every table, show datetimes as `m/d/yy h:mm`, range-filter a datetime column, and
+drill an FK (the sub-query names the `knit_` table). Anything that fails there is
+a translation gap the pure tests didn't model — fix at the storage/`Query` seam.
+Also worth a manual pass while there: GUI phase 4 (drill an FK cell, check PK rows
++ "Go to…", **‹ Back**, clear a nav filter via the header ✕). When a SQL Server
+test database is provisioned, point `SWMT_TEST_*` at it and the 4 gated classes
+run again (their raw-SQL oracles are already T-SQL / physical-name aware).
 
 Next: **phase 5 — the planner-specific pretty view**, DESIGN-first per the usual
 workflow. The elaborate, non-technical view built from custom `QtWidget`

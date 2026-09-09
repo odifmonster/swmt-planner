@@ -80,7 +80,7 @@ current page's rows**, and turns button presses into paging.
 
 1. Create the `QApplication`.
 2. Resolve the reader connection: `config.read_reader_config()` →
-   `ConnConfig`; open a PyMySQL connection (reader) and a cursor.
+   `ConnConfig`; open a pyodbc connection (reader, via `config.connect`) and a cursor.
 3. `table = Table(spec_for_name('committed_sched'), cursor, run_id=1)` (the
    knit planner's manifest supplies the view spec).
 4. `window = RawGridWindow(table); window.show(); app.exec()`.
@@ -120,7 +120,7 @@ underneath is already covered (`DASHBOARD_TEST_SPEC.md`).
 ### Dependencies
 
 `PyQt6` (already in `requirements.txt`; mirror into `pyproject.toml`, ideally an
-optional extra so headless installs skip it). `pymysql` is already present.
+optional extra so headless installs skip it). `pyodbc` (replacing `pymysql`) is the DB driver.
 
 ## Phase 2 — app shell, sidebar nav, run selection
 
@@ -194,9 +194,13 @@ is always available regardless of `selected_run_id`.
 ### Run selection page — `RunSelectionPage`
 
 Lists every run from the registry, most recent first:
-`list_runs(cursor, runs_spec)` runs a direct `SELECT run_id, created_at,
-start_date, total_score FROM runs ORDER BY run_id DESC` (the registry is **not**
-run-scoped, so it bypasses `Table`/`Query`). Each run renders as a **large
+`list_runs(cursor, runs_spec)` runs a direct SELECT against the registry's
+physical `db_name` (`knit_runs`) — the registry is **not** run-scoped, so it
+bypasses `Table`/`Query` — naming the store's **physical** columns
+(`created_at` is an INT `_date`/`_time` pair, `start_date` a YYYYMMDD INT) and
+recombining them through the storage mapping, so each row comes back as logical
+`(run_id, created_at, start_date, total_score)` with a real `datetime` / `date`
+for the card to format. Each run renders as a **large
 rounded-rectangle button** (`RunButton`) in a vertical, scrollable list. Button
 text: **`Run N`** in bold, then the **date run** (`created_at`), the **start
 date** (`start_date`), and the **total score** — laid out on following lines.
@@ -290,7 +294,7 @@ the filter. Still **no FK links** (Phase 4).
 The popup needs a column's distinct values, so add a passthrough
 **`Table.unique(colname)`** → the current `Query.unique(colname)` (lazy + cached
 as today; reflects the table's current constraints). Generic, in
-`sqlload/table.py`; unit-tested alongside the other `Table` MySQL-gated tests.
+`sqlload/table.py`; unit-tested alongside the other `Table` SQL Server-gated tests.
 
 ### `FilterHeader(QHeaderView)`
 
@@ -333,7 +337,7 @@ corners round cleanly. Layout, top to bottom:
     `(low, high)` with `None` for an unset bound; kind = `range`.
   - **Pattern body** (Starts with / Ends with / Contains — same UI, the chosen
     item fixes the affix): a single text field. **Apply enabled iff non-empty.**
-    Rule = a MySQL `LIKE` string built from the entry `v` — `f'{v}%'` (starts),
+    Rule = a T-SQL `LIKE` string built from the entry `v` — `f'{v}%'` (starts),
     `f'%{v}'` (ends), `f'%{v}%'` (contains), with `%`/`_`/`\` in `v` **escaped**
     so the user's text matches literally; kind = `pattern`.
 - **"Apply filter" button** — always present at the bottom; enabled per the

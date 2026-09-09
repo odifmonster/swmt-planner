@@ -205,7 +205,7 @@ _OutDir = Annotated[Path | None, typer.Option(
 )]
 _Verbose = Annotated[bool, typer.Option(
     '--verbose', '-v',
-    help='Persist the full per-iteration debug log to the configured MySQL '
+    help='Persist the full per-iteration debug log to the configured SQL Server '
          'database (a run-tagged row-set for the knit-debug investigation '
          'app). Requires --label and prompts for run notes in vi.',
 )]
@@ -242,7 +242,7 @@ def run(
     sd = start_date or datetime.strptime(cfg['start_date'], '%Y-%m-%d')
 
     # ---- Verbose-mode prerequisites (gathered up front) ----
-    # A verbose run is persisted to MySQL as a labelled, annotated run, so both
+    # A verbose run is persisted to SQL Server as a labelled, annotated run, so both
     # a --label and (interactively-entered) notes are required before the work
     # begins — fail fast, and collect the notes immediately via the editor.
     db_block = _resolve_db_block(dbconn, cfg.get('database'))
@@ -362,7 +362,7 @@ def run(
 def _persist_debuglog(
     db_block, debuglog, report, start_date, label, notes,
 ) -> int | None:
-    """Persist the verbose `debuglog` to the local MySQL store when a
+    """Persist the verbose `debuglog` to the SQL Server store when a
     `database` connection block is configured, returning the new `run_id` (or
     `None` when not persisted). Resolves the writer `ConnConfig` from `db_block`
     and writes the run tagged with its metadata (`start_date`, `total_score`,
@@ -386,7 +386,7 @@ def _persist_debuglog(
             label=label, notes=notes,
         )
         typer.echo(
-            f'  (--verbose) persisted debug log to MySQL as run_id {run_id}'
+            f'  (--verbose) persisted debug log to SQL Server as run_id {run_id}'
         )
         return run_id
     except (DatabaseConfigError, PersistenceError) as exc:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 """The `knit-debug` launcher: open the dashboard shell on the knitting planner's
-debug database, connecting as the reader (`SWMT_DASHBOARD_CONFIG`). See
-`swmtplanner/dashboard/app/DESIGN.md`.
+debug database (SQL Server), connecting as the reader (`SWMT_DASHBOARD_CONFIG`).
+See `swmtplanner/dashboard/app/DESIGN.md`.
 
 This is the planner-specific binding — it supplies the knit planner's manifest
 (viewable tables/views + the run registry) to the otherwise-generic dashboard.
@@ -12,14 +12,13 @@ import sys
 
 from swmtplanner.planners.infinite import manifest
 
-from ..config import DatabaseConfigError, read_reader_config
+from ..config import DatabaseConfigError, connect, read_reader_config
 
 __all__ = ['main']
 
 
 def main() -> None:
     """Entry point for the `knit-debug` console script."""
-    import pymysql
     from PyQt6.QtWidgets import QApplication
 
     from .theme import apply_theme
@@ -27,11 +26,10 @@ def main() -> None:
 
     try:
         cfg = read_reader_config()
-        conn = pymysql.connect(
-            host=cfg.host, port=cfg.port, user=cfg.user,
-            password=cfg.password, database=cfg.database,
-        )
-    except (DatabaseConfigError, pymysql.MySQLError) as exc:
+        # The reader only SELECTs; autocommit avoids holding a transaction open
+        # across the app's lifetime. pyodbc errors are plain `Exception`s.
+        conn = connect(cfg, autocommit=True)
+    except (DatabaseConfigError, Exception) as exc:
         print(
             f'knit-debug: cannot connect to the dashboard database: {exc}',
             file=sys.stderr,
