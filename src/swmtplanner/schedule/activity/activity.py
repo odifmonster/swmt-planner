@@ -82,9 +82,15 @@ class Knit(Activity):
 
     `Knit` carries no per-roll detail — roll completions live on the `Job`
     record in `schedule/job`. The demand layer reads `Job.rolls`, never
-    `Knit`s."""
+    `Knit`s.
+
+    `variant` is the plant variant the merges on the two bars identify under
+    `item` (the recipe's comma-separated names), or `None` when a bar's set has
+    no known merge, the pair matches no recipe, or the machine has no variant
+    map — the knit is then for the generic master only."""
     item: 'Greige'
     lbs: float
+    variant: str | None = None
     _count: int = field(default_factory=_KNIT_ID, init=False)
 
     @property
@@ -104,9 +110,9 @@ class Waste(Activity):
     reaches the demand layer; the cost layer charges it per-lb via the
     `waste_lbs` weight.
 
-    `beam` is the yarn SKU being discarded (the beam that was on `bar`) —
-    what gets wasted is yarn, not a greige item; carried for future
-    beam-set inventory tracking."""
+    `beam` is the physical set being discarded (the one that was on `bar`) —
+    what gets wasted is yarn, not a greige item. A discarded set does not
+    return to inventory."""
     beam: 'BeamSet'
     bar: Literal['top', 'btm']
     lbs: float
@@ -137,10 +143,10 @@ class TapeOut(Activity):
     one, since the floor can't fully parallelize the cuts. When one bar has
     already exhausted, the other is taped out as a single.
 
-    `top_beam` / `btm_beam` record the yarn SKU(s) removed, per bar (`None`
-    for a bar this tape-out doesn't touch). Taped-out yarn is preserved for
-    re-use rather than discarded; the SKUs are carried for future beam-set
-    inventory tracking."""
+    `top_beam` / `btm_beam` record the set(s) removed, per bar (`None` for a
+    bar this tape-out doesn't touch), **as they return to inventory**: the same
+    set number and merge, `lbs` the pounds left on the bar, `avail_date` this
+    activity's end."""
     bars: Literal['top', 'btm', 'both']
     top_beam: 'BeamSet | None' = None
     btm_beam: 'BeamSet | None' = None
@@ -153,17 +159,17 @@ class TapeOut(Activity):
 
 @dataclass(frozen=True)
 class Hanging(Activity):
-    """Mounting a fresh beam set on the named bar(s) — this is what loads the
-    physical set, so applying it sets each bar's `beam` and lbs (from the
-    matching `*_beam` / `*_lbs`; the fields for an untouched bar are ignored)
-    and leaves that bar **un-threaded**. It pairs with a `Threading`, which
-    routes the yarn. `'both'` is cheaper than two singles (shared setup).
-    Together, `Hanging` + `Threading` replace the old single `BeamLoad`."""
+    """Mounting a beam set on the named bar(s) — this is what loads the
+    physical set, so applying it sets each bar's `beam` and lbs (the set's own
+    `lbs`; the field for an untouched bar is ignored) and leaves that bar
+    **un-threaded**. It pairs with a `Threading`, which routes the yarn.
+    `'both'` is cheaper than two singles (shared setup). Together, `Hanging` +
+    `Threading` replace the old single `BeamLoad`. The set comes from the
+    inventory the plan was given, or is invented (`BeamSet.new`) when nothing
+    suitable is in stock."""
     bars: Literal['top', 'btm', 'both']
     top_beam: 'BeamSet | None' = None
-    top_lbs: float = 0.0
     btm_beam: 'BeamSet | None' = None
-    btm_lbs: float = 0.0
     _count: int = field(default_factory=_HANGING_ID, init=False)
 
     @property

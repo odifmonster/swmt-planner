@@ -31,7 +31,13 @@ class WorkCal:
             day_start (int): The start of the work day in 24-hour time.
             day_end (int): The end of the work day in 24-hour time.
             holidays (list[FlexDate | FixedDate]): The days of the year to be skipped as holidays.
-            cal_shift (int, default 0): Set this parameter to offset day boundaries by a number of hours.
+            cal_shift (int, default 0): Hours by which the calendar day is
+                offset from local midnight — where the plant's day, and so
+                its weekend, begins. -1 for a first shift that starts at
+                11 pm the evening before (the weekend then begins 11 pm
+                Friday); 8 for a plant running 8 am–4 pm (the weekend begins
+                8 am Saturday). Timestamps stay in local time; only the day
+                boundaries move.
         """
         ...
     @property
@@ -52,6 +58,7 @@ class WorkCal:
         ...
     @property
     def cal_shift(self) -> timedelta:
+        """Offset of the calendar day from local midnight (see `__init__`)."""
         ...
     @property
     def holidays(self) -> tuple[FlexDate | FixedDate]: ...

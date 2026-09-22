@@ -1,5 +1,5 @@
 #!/usr/bin/env python
 
-from .beamset import BeamSet
+from .beamset import BeamSetDesc, BeamSet
 
-__all__ = ['BeamSet']
+__all__ = ['BeamSetDesc', 'BeamSet']

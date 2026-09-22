@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from typing import Literal
 
-from swmtplanner.products import Greige, BeamSet
+from swmtplanner.products import Greige, BeamSet, BeamSetDesc
 from swmtplanner.schedule import Machine
 from swmtplanner.support import WorkCal
 from swmtplanner.demand.rlsitem import RlsItem
@@ -28,8 +28,9 @@ _START = datetime(2026, 5, 18, 0, 0)
 # operational details don't matter — they just need to be valid.
 _24_7 = WorkCal(work_days=(0, 1, 2, 3, 4, 5, 6),
                 day_start=0, day_end=24, holidays=())
-_TOP_BEAM = BeamSet('40D BLACK 1000X4')
-_BTM_BEAM = BeamSet('60D WHITE 1000X4')
+_FIXTURE_DATE = datetime(2026, 1, 1)
+_TOP_BEAM = BeamSet.new(BeamSetDesc('40D BLACK 1000X4'), 1e6, _FIXTURE_DATE)
+_BTM_BEAM = BeamSet.new(BeamSetDesc('60D WHITE 1000X4'), 1e6, _FIXTURE_DATE)
 
 
 def _greige(item_id: str, safety: float) -> Greige:

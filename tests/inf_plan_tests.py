@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta
 
-from swmtplanner.products import Greige, BeamSet
+from swmtplanner.products import Greige, BeamSet, BeamSetDesc
 from swmtplanner.schedule import (
     Machine, Knit, Job, Roll, ProductionPlan,
     Waste, Doff, TapeOut, Hanging, Threading,
@@ -43,8 +43,14 @@ _ITEM_B = Greige(
     safety=300.0, machines={'M1': 100.0, 'M2': 100.0},
 )
 
-_TOP_BEAM = BeamSet('40D BLACK 1000X4')
-_BTM_BEAM = BeamSet('60D WHITE 1000X4')
+_FIXTURE_DATE = datetime(2026, 1, 1)
+_TOP_BEAM = BeamSet.new(BeamSetDesc('40D BLACK 1000X4'), 2800.0, _FIXTURE_DATE)
+_BTM_BEAM = BeamSet.new(BeamSetDesc('60D WHITE 1000X4'), 1800.0, _FIXTURE_DATE)
+
+
+def _with_lbs(beam: BeamSet, lbs: float) -> BeamSet:
+    """The fixture set carrying `lbs` — what a `Hanging` loads onto a bar."""
+    return beam.returned(lbs, beam.avail_date)
 
 _START = datetime(2026, 5, 18, 0, 0)
 
@@ -345,7 +351,7 @@ class StateTests(unittest.TestCase):
         rls = state.rls_items['AU0001']
         h = Hanging(
             start=_START, end=_START + timedelta(hours=1),
-            bars='top', top_beam=_TOP_BEAM, top_lbs=2800.0,
+            bars='top', top_beam=_with_lbs(_TOP_BEAM, 2800.0),
         )
         state.commit_move(_move_with_plan([h]))
         self.assertEqual(state.machines['M1'].activities, (h,))
@@ -357,7 +363,7 @@ class StateTests(unittest.TestCase):
         rls = state.rls_items['AU0001']
         h = Hanging(
             start=_START, end=_START + timedelta(hours=1),
-            bars='btm', btm_beam=_BTM_BEAM, btm_lbs=1800.0,
+            bars='btm', btm_beam=_with_lbs(_BTM_BEAM, 1800.0),
         )
         t = Threading(
             start=h.end, end=h.end + timedelta(hours=2), bars='btm',
@@ -583,7 +589,7 @@ class CostingTests(unittest.TestCase):
             activities=[
                 TapeOut(start=t0, end=t1, bars='top'),
                 Hanging(start=t1, end=t2, bars='top',
-                        top_beam=_TOP_BEAM, top_lbs=2800.0),
+                        top_beam=_with_lbs(_TOP_BEAM, 2800.0)),
                 Threading(start=t2, end=t3, bars='top'),
                 Idle(start=t3, end=t4),
                 Knit(start=t4, end=t5, item=_ITEM_A, lbs=100.0),
@@ -639,8 +645,8 @@ class CostingTests(unittest.TestCase):
         state = self._commit_changeover_plan([
             TapeOut(start=t0, end=t1, bars='both'),
             Hanging(start=t1, end=t2, bars='both',
-                    top_beam=_TOP_BEAM, top_lbs=2800.0,
-                    btm_beam=_BTM_BEAM, btm_lbs=1800.0),
+                    top_beam=_with_lbs(_TOP_BEAM, 2800.0),
+                    btm_beam=_with_lbs(_BTM_BEAM, 1800.0)),
             Threading(start=t2, end=t3, bars='both'),
             PatternChange(start=t3, end=t4,
                           from_item=_ITEM_A, to_item=_ITEM_B),
@@ -1595,8 +1601,8 @@ class CandidateEnumerationTests(unittest.TestCase):
         # no in-stream reloads).
         machine = Machine(
             'M1', _TD, _START,
-            BeamSet('30D RED 1000X4'), 1e6,
-            BeamSet('90D GREEN 1000X4'), 1e6,
+            BeamSet.new(BeamSetDesc('30D RED 1000X4'), 1e6, _FIXTURE_DATE), 1e6,
+            BeamSet.new(BeamSetDesc('90D GREEN 1000X4'), 1e6, _FIXTURE_DATE), 1e6,
             _24_7,
         )
         rls = RlsItem(

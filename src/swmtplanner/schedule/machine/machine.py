@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 
 import math
-from dataclasses import dataclass, replace
+from collections import deque
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
-from typing import Iterable, Literal, TYPE_CHECKING
+from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING
 
 from swmtplanner.support import HasID
-from swmtplanner.products import BeamSet
+from swmtplanner.products import BeamSet, BeamSetDesc
 from swmtplanner.schedule.activity import (
     Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
@@ -22,22 +23,102 @@ from .status import Status
 
 if TYPE_CHECKING:
     from swmtplanner.support import WorkCal
-    from swmtplanner.products import Greige
+    from swmtplanner.products import Greige, VariantMapFile
+    from swmtplanner.schedule.inventory import InventoryView
 
 
 # Plant convention: fresh-beam yarn quantity depends on yarn denier. Low-
 # denier yarn (≤ 45D) holds more lbs per beam; high-denier yarn holds less.
 # Lives at module level because the rule is plant-wide rather than per-
-# machine, and not a property of `BeamSet` (which stays plant-agnostic).
+# machine, and not a property of `BeamSetDesc` (which stays plant-agnostic).
 _LOW_DENIER_FRESH_LBS = 2800.0
 _HIGH_DENIER_FRESH_LBS = 1800.0
 _LOW_DENIER_THRESHOLD = 45
 
 
-def fresh_beam_lbs(beam: BeamSet) -> float:
-    """How much yarn is on a freshly loaded beam, by denier convention."""
+def fresh_beam_lbs(beam: BeamSetDesc) -> float:
+    """How much yarn is on a freshly loaded beam, by denier convention. Sizes
+    the sets the planner **invents** when nothing suitable is in stock."""
     return (_LOW_DENIER_FRESH_LBS if beam.denier <= _LOW_DENIER_THRESHOLD
             else _HIGH_DENIER_FRESH_LBS)
+
+
+@dataclass
+class _PlanCtx:
+    """Per-`plan_production` scratch: the (read-only) inventory the plan
+    draws on, per-bar queues of manually assigned set numbers, the stock
+    sets it has hung so far (so one set is not hung twice in a plan) and
+    the sets it has taped out for return."""
+    inventory: 'InventoryView'
+    assigned: dict[str, deque['str | None']] = field(default_factory=dict)
+    taken: list[BeamSet] = field(default_factory=list)
+    returned: list[BeamSet] = field(default_factory=list)
+    taken_ids: set[str] = field(default_factory=set)
+
+    def pick(self, desc: BeamSetDesc, at: datetime, bar: str,
+             working: 'Status | None' = None) -> BeamSet:
+        """The set to hang on `bar` for `desc` at `at`, in order of
+        precedence: (1) the front of the bar's **queue** on `working` — the
+        set the plant has already assigned to that bar and not yet threaded
+        — when it fits `desc` and has been received by `at`; it is locked
+        in, so a caller assignment for this hang must be None or that set's
+        number (else `ValueError`); (2) a set number the caller assigned for
+        `bar` (`plan_production(assign=)`; must be in stock under `desc`,
+        available and not already taken — else `ValueError`); (3) the stock
+        set that is available, not already taken in this plan and has the
+        most lbs; (4) an invented set. See "Beam-set inventory" in
+        DESIGN.md."""
+        queue = self.assigned.get(bar)
+        set_no = queue.popleft() if queue else None   # None = "not this hang"
+        if working is not None:
+            staged = working.queue(bar)
+            if staged and staged[0].fits(desc) and staged[0].available_at(at):
+                front = staged[0]
+                if set_no is not None and set_no != front.set_no:
+                    raise ValueError(
+                        f'set {front.set_no!r} is assigned to the {bar} bar by '
+                        f'the plant and hangs at {at.isoformat()}; it cannot be '
+                        f'replaced by {set_no!r}'
+                    )
+                return front                     # popped by Status on hang
+        if set_no is not None:
+            return self._take_assigned(set_no, desc, at, bar)
+        cands = [b for b in self.inventory.get(desc.physical, ())
+                 if b.available_at(at) and b.id not in self.taken_ids]
+        if cands:
+            return self._take(max(cands, key=lambda b: b.lbs))
+        return BeamSet.new(desc, fresh_beam_lbs(desc), at)
+
+    def _take(self, beam_set: BeamSet) -> BeamSet:
+        self.taken.append(beam_set)
+        self.taken_ids.add(beam_set.id)
+        return beam_set
+
+    def _take_assigned(self, set_no: str, desc: BeamSetDesc, at: datetime,
+                       bar: str) -> BeamSet:
+        for b in self.inventory.get(desc.physical, ()):
+            if b.id == set_no:
+                if b.id in self.taken_ids:
+                    raise ValueError(
+                        f'assigned set {set_no!r} ({bar}) is already hung '
+                        f'earlier in this plan'
+                    )
+                if not b.available_at(at):
+                    raise ValueError(
+                        f'assigned set {set_no!r} ({bar}) is not available '
+                        f'until {b.avail_date.isoformat()} (needed {at.isoformat()})'
+                    )
+                return self._take(b)
+        raise ValueError(
+            f'assigned set {set_no!r} ({bar}) is not in stock as '
+            f'{desc.physical.id!r}'
+        )
+
+    def unused_assignments(self) -> dict[str, list[str]]:
+        """Assigned set numbers the plan never got to hang (placeholders
+        don't count)."""
+        out = {bar: [s for s in q if s is not None] for bar, q in self.assigned.items()}
+        return {bar: q for bar, q in out.items() if q}
 
 
 # The runout-model constants `BEAM_FLOOR_LBS` / `MAX_BEAM_WASTE_LBS` live in
@@ -57,11 +138,25 @@ _ROLL_TOLERANCE = 1e-2
 @dataclass(frozen=True)
 class ProductionPlan:
     """Return value of `plan_production`: the activity-schedule and
-    production-schedule additions for one planning call. Committed
-    together via `add_activities(plan.activities)` +
-    `add_jobs(plan.jobs)`. A basic data record — no behavior."""
+    production-schedule additions for one planning call, plus its effect on
+    the beam-set inventory. Committed together via
+    `add_activities(plan.activities)` + `add_jobs(plan.jobs)`, and by
+    removing `beam_sets_taken` from / adding `beam_sets_returned` to the
+    inventory. A basic data record — no behavior."""
     activities: tuple[Activity, ...]
     jobs: tuple[Job, ...]
+    # Stock sets the plan hung (invented sets are not listed — they were
+    # never in inventory).
+    beam_sets_taken: tuple[BeamSet, ...] = ()
+    # Sets the plan taped out that are still worth stocking, each carrying
+    # its remaining lbs and the tape-out's end as `avail_date`.
+    beam_sets_returned: tuple[BeamSet, ...] = ()
+    # The machine's last committed job recreated (same id) with this plan's
+    # changeover `TapeOut` appended to its activities — set when the plan
+    # tapes out the previous item's sets and that item's job is already on
+    # the schedule (see "Job activities" in DESIGN.md). Committing the plan
+    # swaps it in for the original (`Machine.replace_last_job`).
+    replaced_job: Job | None = None
 
 
 class Machine(HasID[str]):
@@ -84,11 +179,22 @@ class Machine(HasID[str]):
         init_btm_lbs: float,
         workcal: 'WorkCal',
         is_new: bool = False,
+        init_variant: 'str | None' = None,
+        variant_map: 'VariantMapFile | None' = None,
+        init_roll_lbs_remaining: float = 0.0,
+        init_top_queue: Sequence[BeamSet] = (),
+        init_btm_queue: Sequence[BeamSet] = (),
     ) -> None:
+        if init_roll_lbs_remaining < 0:
+            raise ValueError('init_roll_lbs_remaining must be non-negative')
         self._id = id
         self._workcal = workcal
         self._is_new = is_new
-        # A machine begins threaded and running the init item on both bars.
+        self._init_variant = init_variant
+        self._variant_map = variant_map
+        # A machine begins threaded and running the init item on both bars,
+        # possibly part-way through a roll (`init_roll_lbs_remaining` still
+        # to knit on it; 0 = between rolls).
         self._initial_status = Status.create(
             as_of=start,
             current_item=init_item,
@@ -99,6 +205,8 @@ class Machine(HasID[str]):
             btm_beam=init_btm_beam,
             btm_lbs_remaining=init_btm_lbs,
             btm_threaded=True,
+            roll_lbs_remaining=min(init_roll_lbs_remaining, init_item.tgt_wt),
+            top_queue=init_top_queue, btm_queue=init_btm_queue,
         )
         self._activities: list[Activity] = []
         self._jobs: list[Job] = []
@@ -121,6 +229,13 @@ class Machine(HasID[str]):
         `PatternChange` (cross-family). See "Beam-swap decision" in
         `schedule/DESIGN.md`."""
         return self._is_new
+
+    @property
+    def init_variant(self) -> 'str | None':
+        """The plant's variant name for what the machine was running at
+        `start`, when the machines file named one (else `None` — the machine
+        is known only by its master item)."""
+        return self._init_variant
 
     @property
     def initial_status(self) -> Status:
@@ -160,23 +275,86 @@ class Machine(HasID[str]):
         this is always well-defined. When fewer than one whole roll fits
         above the floor (including a bar already at or below it),
         `next_runout == current_status.as_of` — the changeover is
-        immediately due."""
+        immediately due. A roll in progress at the initial status is
+        finished first (see `_emit_run_up`): when the current beams can
+        finish it, its knit and doff precede the whole rolls; when they
+        can't, finishing it forces a mid-roll re-thread, which *is* the
+        runout, and the prediction is that roll's `Doff.end` — obtained by
+        running the run-up walk itself (rare, and cheap: one roll)."""
         s = self._current_status
-        cfg = s.current_item.configuration
+        _n_rolls, hours, walked = self._run_up_outline()
+        if walked is not None:
+            return walked
+        if hours <= 0.0:
+            return s.as_of
+        # Offset in two steps — everything up to the last Doff, then the Doff
+        # — rather than one sum: a single offset can land on a work-day's end
+        # where the walk's final Doff lands on the next day's start (the same
+        # work moment, a different datetime), and this must equal the run-up's
+        # last `Doff.end` exactly.
+        t = self._workcal.offset_work_hours(s.as_of, hours - DOFF_DURATION)
+        return self._workcal.offset_work_hours(t, DOFF_DURATION)
+
+    @property
+    def whole_rolls_before_runout(self) -> int:
+        """How many rolls the machine doffs running `current_status.current_item`
+        from `current_status.as_of` until the changeover at `next_runout` —
+        the roll in progress (if the current beams can finish it) plus the
+        whole rolls that fit above the floor; 0 when the changeover is
+        immediately due. Same model as `next_runout`."""
+        return self._run_up_outline()[0]
+
+    def _run_up_outline(self) -> tuple[int, float, datetime | None]:
+        """`(rolls, hours, walked)` for running the current item from the
+        current status to its runout: `rolls` doffed (a finishable roll in
+        progress counts), `hours` of work they take (knits + doffs). When
+        finishing the roll in progress needs beam work (the pre-roll
+        max-waste gate, or a mid-roll re-thread because the beams can't
+        supply the rest) the run-up walk is simulated instead: `walked` is
+        then its end (`next_runout`), `rolls` the doffs it emitted, and
+        `hours` is not meaningful (0)."""
+        s = self._current_status
         item = s.current_item
-        n_rolls = _whole_rolls_before_floor(
-            s.lbs_remaining('top'), cfg.top_pct,
-            s.lbs_remaining('btm'), cfg.btm_pct, item.tgt_wt,
-        )
-        # Each whole roll costs its knit time plus a Doff; folding in the
-        # doffs keeps this equal to the run-up's last Doff.end.
+        cfg = item.configuration
         rate = item.get_rate_on_mchn(self._id)
-        per_roll = item.tgt_wt / rate + DOFF_DURATION
-        return self._workcal.offset_work_hours(s.as_of, n_rolls * per_roll)
+        top_lbs, btm_lbs = s.lbs_remaining('top'), s.lbs_remaining('btm')
+        hours = 0.0
+        n_rolls = 0
+
+        remaining = s.roll_lbs_remaining
+        if remaining > _FLOAT_EPS:
+            top_u = top_lbs - BEAM_FLOOR_LBS
+            btm_u = btm_lbs - BEAM_FLOOR_LBS
+            producible = min(top_u / cfg.top_pct, btm_u / cfg.btm_pct)
+            # A roll with nothing wound yet passes the pre-roll max-waste
+            # gate like any fresh roll (see `_wind_rolls`).
+            gated = (remaining >= item.tgt_wt - _FLOAT_EPS
+                     and min(top_u, btm_u) < MAX_BEAM_WASTE_LBS)
+            if gated or producible < remaining - _FLOAT_EPS:
+                # Finishing needs beam work (a gate swap, or a mid-roll
+                # re-thread because the beams can't supply the rest): the
+                # walk decides what follows — simulate it exactly.
+                scratch: list[Activity] = []
+                working = self._emit_run_up(
+                    scratch, s, [], _PlanCtx({}), whole_rolls=True,
+                )
+                return sum(isinstance(a, Doff) for a in scratch), 0.0, working.as_of
+            hours += remaining / rate + DOFF_DURATION
+            n_rolls += 1
+            top_lbs -= remaining * cfg.top_pct
+            btm_lbs -= remaining * cfg.btm_pct
+
+        whole = _whole_rolls_before_floor(
+            top_lbs, cfg.top_pct, btm_lbs, cfg.btm_pct, item.tgt_wt,
+        )
+        # Each whole roll costs its knit time plus a Doff.
+        hours += whole * (item.tgt_wt / rate + DOFF_DURATION)
+        return n_rolls + whole, hours, None
 
     def producible_lbs_through(
         self, item: 'Greige', end: datetime,
         start: datetime | None = None,
+        inventory: 'InventoryView | None' = None,
     ) -> float:
         """Returns the lbs of `item` the machine could produce in the
         window `[start, end)`.
@@ -233,7 +411,7 @@ class Machine(HasID[str]):
         idle_for = timedelta(hours=bridge_hours)
         plan = self.plan_production(
             item, upper_lbs_bound, start_at='schedule_tail',
-            idle_for=idle_for,
+            idle_for=idle_for, inventory=inventory,
         )
 
         # Tally lbs of `Knit`s for `item` that overlap
@@ -272,6 +450,7 @@ class Machine(HasID[str]):
     def producible_lbs_in_week(
         self, item: 'Greige', year: int, week: int,
         start: datetime | None = None,
+        inventory: 'InventoryView | None' = None,
     ) -> float:
         """Returns the lbs of `item` the machine could produce within
         the given ISO week (Monday 00:00 to next Monday 00:00).
@@ -297,7 +476,7 @@ class Machine(HasID[str]):
         # Snap to week_start if effective_start falls before the week.
         effective_start = max(effective_start, week_start)
         return self.producible_lbs_through(
-            item, end=week_end, start=effective_start,
+            item, end=week_end, start=effective_start, inventory=inventory,
         )
 
     def status_at(self, t: datetime) -> Status:
@@ -337,6 +516,27 @@ class Machine(HasID[str]):
         touch `current_status` — it only records what was produced."""
         self._jobs.extend(jobs)
 
+    def replace_last_job(self, job: Job) -> None:
+        """Swap the last job on the production schedule for `job`, a recreated
+        copy with the same id (see `ProductionPlan.replaced_job`). Raises if
+        there is no last job or the ids differ."""
+        if not self._jobs or self._jobs[-1].id != job.id:
+            have = self._jobs[-1].id if self._jobs else None
+            raise ValueError(
+                f'replace_last_job: {job.id!r} is not the last job ({have!r})'
+            )
+        self._jobs[-1] = job
+
+    def commit_plan(self, plan: 'ProductionPlan') -> None:
+        """Apply a `ProductionPlan` to this machine: append its activities,
+        swap in its `replaced_job` (if any), then append its jobs. The
+        inventory and demand-side effects are the caller's (see the
+        planner's `State.commit_move`)."""
+        self.add_activities(plan.activities)
+        if plan.replaced_job is not None:
+            self.replace_last_job(plan.replaced_job)
+        self.add_jobs(plan.jobs)
+
     # ----- plan_production --------------------------------------------
 
     def plan_production(
@@ -346,9 +546,30 @@ class Machine(HasID[str]):
         start_at: Literal['schedule_tail', 'next_runout'],
         idle_for: timedelta = timedelta(0),
         tgt_order: str | None = None,
+        inventory: 'InventoryView | None' = None,
+        assign: 'Mapping[str, Sequence[str | None]] | None' = None,
     ) -> 'ProductionPlan':
         """Plan production of `lbs` of `item` on this machine. Pure — does
-        not mutate state.
+        not mutate state, nor the `inventory` it reads.
+
+        `assign` (manual scheduling) queues set numbers per bar (`'top'` /
+        `'btm'`): each hang on that bar takes the next queued set from the
+        inventory instead of the automatic pick. A `None` in the list leaves
+        that hang to the normal choice (the machine's own queue, then stock),
+        so `[None, 'X']` assigns only the bar's second hang. A queued set
+        that is not in stock under the bar's requirement, not yet available,
+        or already hung in this plan raises `ValueError`, as does a queued
+        set the plan never gets to hang — a manual assignment is never
+        silently dropped.
+
+        `inventory` is the beam-set stock (`schedule.inventory`) a `Hanging`
+        may draw on: for each bar it needs, the available, not-yet-taken set
+        with the most lbs under the bar's physical description is hung;
+        with none (or no inventory at all) a set is invented
+        (`BeamSet.new`, sized by `fresh_beam_lbs`). The stock sets hung and
+        the sets taped out for return are reported on the plan as
+        `beam_sets_taken` / `beam_sets_returned` for the caller to apply
+        when it commits.
 
         `idle_for` schedules an explicit `Idle` activity as the **first**
         emitted activity, used to model staff-constrained gaps where the
@@ -399,61 +620,122 @@ class Machine(HasID[str]):
                 f'{item.id!r} is already the machine\'s current item'
             )
 
+        if assign:
+            bad = set(assign) - {'top', 'btm'}
+            if bad:
+                raise ValueError(f"assign keys must be 'top' / 'btm', got {sorted(bad)}")
         emitted: list[Activity] = []
         jobs: list[Job] = []
         working = self._current_status
+        ctx = _PlanCtx(
+            inventory if inventory is not None else {},
+            assigned={bar: deque(sets) for bar, sets in (assign or {}).items()},
+        )
 
-        # 0. Optional idle gap at the head of the plan.
+        # 0. Optional idle gap at the head of the plan (belongs to no job).
         if idle_for > timedelta(0):
             working = self._emit_idle(emitted, working, idle_for)
 
-        # 1. Run-up (only in 'next_runout' mode).
-        if start_at == 'next_runout':
-            working = self._emit_run_up(emitted, working, jobs)
+        # 1. Run-up: always finish a roll in progress; in 'next_runout' mode
+        #    also run whole rolls of the current item to the runout.
+        working = self._emit_run_up(
+            emitted, working, jobs, ctx, whole_rolls=(start_at == 'next_runout'),
+        )
 
-        # 2. Changeover preamble.
-        working = self._emit_preamble(emitted, working, item)
+        # 2. Changeover preamble. Its TapeOut (if any) ends the *previous*
+        #    item's job; the re-thread and changeover open the new item's.
+        pre_start = len(emitted)
+        working = self._emit_preamble(emitted, working, item, ctx)
+        preamble = emitted[pre_start:]
+        tape_outs = [a for a in preamble if isinstance(a, TapeOut)]
+        setup = [a for a in preamble if not isinstance(a, (TapeOut, Waste))]
+
+        replaced_job = None
+        if tape_outs:
+            if jobs:                        # the run-up job is the previous job
+                jobs[0] = jobs[0].with_activities(tape_outs)
+            elif self._jobs:                # previous job is already committed
+                replaced_job = self._jobs[-1].with_activities(tape_outs)
+            # else: nothing produced the previous item's sets — orphaned.
 
         # 3. Production loop for the new item.
-        self._emit_production_loop(emitted, working, item, lbs, jobs, tgt_order)
-        return ProductionPlan(activities=tuple(emitted), jobs=tuple(jobs))
+        self._emit_production_loop(
+            emitted, working, item, lbs, jobs, ctx, tgt_order, setup=setup,
+        )
+        leftover = ctx.unused_assignments()
+        if leftover:
+            raise ValueError(
+                f'assigned sets never hung by this plan: {leftover}'
+            )
+        return ProductionPlan(
+            activities=tuple(emitted), jobs=tuple(jobs),
+            beam_sets_taken=tuple(ctx.taken),
+            beam_sets_returned=tuple(ctx.returned),
+            replaced_job=replaced_job,
+        )
 
     # ----- private plan_production helpers -----
 
     def _emit_run_up(
         self, emitted: list[Activity], working: Status, jobs: list[Job],
+        ctx: _PlanCtx, whole_rolls: bool,
     ) -> Status:
-        """Produce `working.current_item` toward a beam runout in **whole
-        rolls only** — never starting a roll the current beams can't finish
-        above `BEAM_FLOOR_LBS`, so the machine is never stranded mid-roll at
-        the changeover. Each roll is a `Knit(tgt_wt)` followed by a `Doff`;
-        the roll's `completion_time` is that `Doff`'s end. Emits no `Waste`
-        and no beam work of its own (each bar keeps its leftover usable yarn
-        for the preamble). Appends one run-up `Job` (omitted when no whole
-        roll fits) and returns the working status with `current_item`
-        unchanged."""
+        """Production of `working.current_item` before any changeover, as one
+        current-item `Job` (omitted when nothing is produced):
+
+        1. **Finish the roll in progress** (`working.roll_lbs_remaining > 0`,
+           only ever true at a machine's initial status) — always, in both
+           modes: the plant never doffs a roll short. It is wound with the
+           production loop's roll mechanics pre-filled to `tgt_wt - remaining`,
+           so a bar that runs out mid-roll gets the normal mid-roll re-thread
+           (a fresh set of the *current* item's yarn just to complete the
+           roll — expensive, and meant to be).
+        2. **Whole rolls to the runout** — only when `whole_rolls`
+           (`'next_runout'` mode) and only if finishing needed no re-thread
+           (a re-thread *is* the runout): `Knit(tgt_wt)` + `Doff` per roll
+           for as many whole rolls as the beams finish above
+           `BEAM_FLOOR_LBS`, never starting a roll they can't finish. No
+           `Waste`, no beam work of its own — each bar keeps its leftover
+           usable yarn for the preamble.
+
+        `next_runout` predicts this walk by running it, so the two agree
+        exactly. Returns the working status with `current_item` unchanged."""
         cur = working.current_item
         cfg = cur.configuration
-        # Whole rolls only — the same stopping point next_runout predicts.
-        n_rolls = _whole_rolls_before_floor(
-            working.lbs_remaining('top'), cfg.top_pct,
-            working.lbs_remaining('btm'), cfg.btm_pct, cur.tgt_wt,
-        )
-        if n_rolls <= 0:
-            return working
-
+        first = len(emitted)
         rolls: list[Roll] = []
-        for _ in range(n_rolls):
-            working = self._emit_knit(emitted, working, cur, cur.tgt_wt)
-            knit = emitted[-1]                # the Knit just emitted
-            working = self._emit_doff(emitted, working)
-            rolls.append(Roll(lbs=cur.tgt_wt, completion_time=working.as_of,
-                              knits=(knit,)))
-        jobs.append(Job(item=cur, rolls=tuple(rolls)))
+
+        remaining = working.roll_lbs_remaining
+        rethreaded = False
+        if remaining > _FLOAT_EPS:
+            working, finished = self._wind_rolls(
+                emitted, working, cur, 1, ctx,
+                roll_filled=max(0.0, cur.tgt_wt - remaining),
+            )
+            rolls.extend(finished)
+            rethreaded = any(isinstance(a, Hanging) for a in emitted[first:])
+
+        if whole_rolls and not rethreaded:
+            n_rolls = _whole_rolls_before_floor(
+                working.lbs_remaining('top'), cfg.top_pct,
+                working.lbs_remaining('btm'), cfg.btm_pct, cur.tgt_wt,
+            )
+            for _ in range(n_rolls):
+                working = self._emit_knit(emitted, working, cur, cur.tgt_wt)
+                knit = emitted[-1]                # the Knit just emitted
+                working = self._emit_doff(emitted, working)
+                rolls.append(Roll(lbs=cur.tgt_wt, completion_time=working.as_of,
+                                  knits=(knit,)))
+
+        if rolls:
+            jobs.append(Job(item=cur, rolls=tuple(rolls),
+                            activities=tuple(a for a in emitted[first:]
+                                             if not isinstance(a, Waste))))
         return working
 
     def _emit_preamble(
         self, emitted: list[Activity], working: Status, item: 'Greige',
+        ctx: _PlanCtx,
     ) -> Status:
         """Changeover preamble. Each bar arrives in one of four states,
         resolved against the new `item`'s yarn and the bar's
@@ -478,12 +760,13 @@ class Machine(HasID[str]):
 
         def bar_action(bar: Literal['top', 'btm'], want_beam: str) -> str:
             """One of 'load' (empty), 'keep' (matching yarn), 'tape'
-            (mismatch worth preserving), or 'waste' (mismatch to discard)."""
+            (mismatch worth preserving), or 'waste' (mismatch to discard).
+            "Matching" is the physical set — split lease aside."""
             usable = working.lbs_remaining(bar) - BEAM_FLOOR_LBS
             if usable <= _FLOAT_EPS:
                 return 'load'
             beam = working.beam(bar)
-            if beam is not None and beam.id == want_beam:
+            if beam is not None and beam.fits(BeamSetDesc(want_beam)):
                 return 'keep'
             return 'tape' if usable > MAX_BEAM_WASTE_LBS else 'waste'
 
@@ -492,11 +775,11 @@ class Machine(HasID[str]):
 
         # Tape-out phase — batch into one 'both' when both bars tape out.
         if top_action == 'tape' and btm_action == 'tape':
-            working = self._emit_tape_out(emitted, working, 'both')
+            working = self._emit_tape_out(emitted, working, 'both', ctx)
         elif top_action == 'tape':
-            working = self._emit_tape_out(emitted, working, 'top')
+            working = self._emit_tape_out(emitted, working, 'top', ctx)
         elif btm_action == 'tape':
-            working = self._emit_tape_out(emitted, working, 'btm')
+            working = self._emit_tape_out(emitted, working, 'btm', ctx)
 
         # Waste phase — discard near-empty mismatched residue (the beam
         # currently on the bar). Zero duration; empties the bar.
@@ -516,11 +799,11 @@ class Machine(HasID[str]):
         rethread_top = top_action != 'keep'
         rethread_btm = btm_action != 'keep'
         if rethread_top and rethread_btm:
-            working = self._emit_rethread(emitted, working, 'both', item)
+            working = self._emit_rethread(emitted, working, 'both', item, ctx)
         elif rethread_top:
-            working = self._emit_rethread(emitted, working, 'top', item)
+            working = self._emit_rethread(emitted, working, 'top', item, ctx)
         elif rethread_btm:
-            working = self._emit_rethread(emitted, working, 'btm', item)
+            working = self._emit_rethread(emitted, working, 'btm', item, ctx)
 
         # Changeover phase — the right changeover type when the item changes.
         if item != working.current_item:
@@ -529,22 +812,45 @@ class Machine(HasID[str]):
 
     def _emit_production_loop(
         self, emitted: list[Activity], working: Status,
-        item: 'Greige', lbs: float, jobs: list[Job],
-        tgt_order: str | None = None,
+        item: 'Greige', lbs: float, jobs: list[Job], ctx: _PlanCtx,
+        tgt_order: str | None = None, setup: Iterable[Activity] = (),
     ) -> None:
-        """Wind `lbs` of `item` (a whole multiple of `tgt_wt`) one roll at a
-        time, recording each completed `Roll` on one straddle-aware `Job`.
-        Every roll ends in a `Doff`, so its `completion_time` is the `Doff`'s
-        end; a `Knit` is one uninterrupted run that ends at a doff or a beam
-        swap, so `0 < Knit.lbs <= tgt_wt`. A roll that hits a beam floor
-        mid-wind continues on the fresh beam (a `Hanging` + `Threading`), so
-        it can span two `Knit`s. See the production-loop walk in DESIGN.md."""
+        """Wind `lbs` of `item` (a whole multiple of `tgt_wt`) as whole rolls
+        (`_wind_rolls`) and record them on one straddle-aware `Job` whose
+        activities are `setup` (the preamble's re-thread and changeover, which
+        prepared this item) followed by everything the loop emits except
+        `Waste`, through the last roll's `Doff`."""
+        loop_start = len(emitted)
+        _, rolls = self._wind_rolls(
+            emitted, working, item, round(lbs / item.tgt_wt), ctx,
+        )
+        if rolls:
+            acts = tuple(setup) + tuple(
+                a for a in emitted[loop_start:] if not isinstance(a, Waste)
+            )
+            jobs.append(Job(item=item, rolls=tuple(rolls), tgt_order=tgt_order,
+                            activities=acts))
+
+    def _wind_rolls(
+        self, emitted: list[Activity], working: Status, item: 'Greige',
+        n_rolls: int, ctx: _PlanCtx, roll_filled: float = 0.0,
+    ) -> tuple[Status, list[Roll]]:
+        """Wind `n_rolls` rolls of `item` one roll at a time, the first one
+        already holding `roll_filled` lbs (a roll in progress at the machine's
+        initial status). Every roll ends in a `Doff`, so its `completion_time`
+        is the `Doff`'s end; a `Knit` is one uninterrupted run that ends at a
+        doff or a beam swap, so `0 < Knit.lbs <= tgt_wt`. A roll that hits a
+        beam floor mid-wind continues on the fresh beam (a `Hanging` +
+        `Threading`), so it can span two `Knit`s; a roll starting from empty
+        first passes the max-waste gate. A pre-filled roll's knits sum to
+        `tgt_wt - roll_filled`, not to the roll's weight. See the
+        production-loop walk in DESIGN.md. Returns the working status after the
+        last `Doff` and the rolls wound."""
         cfg = item.configuration
         tgt = item.tgt_wt
         rolls: list[Roll] = []
 
-        rolls_left = round(lbs / tgt)   # whole rolls owed (lbs is a multiple)
-        roll_filled = 0.0               # lbs wound on the in-progress roll
+        rolls_left = n_rolls            # whole rolls owed
         knit = 0.0                      # lbs in the current (unflushed) Knit
         roll_knits: list[Knit] = []     # Knits wound onto the in-progress roll
 
@@ -583,7 +889,7 @@ class Machine(HasID[str]):
                         working = self._emit_waste(emitted, working, bar, u)
                     swapped.append(bar)
             bars = 'both' if len(swapped) == 2 else swapped[0]
-            working = self._emit_rethread(emitted, working, bars, item)
+            working = self._emit_rethread(emitted, working, bars, item, ctx)
 
         while rolls_left > 0:
             if roll_filled == 0.0:
@@ -605,9 +911,7 @@ class Machine(HasID[str]):
                 roll_knits.clear()
             else:                                # a bar hit the floor mid-roll
                 resolve()                        # re-thread it; co-swap other
-
-        if rolls:
-            jobs.append(Job(item=item, rolls=tuple(rolls), tgt_order=tgt_order))
+        return working, rolls
 
     # ----- single-activity emission helpers -----
 
@@ -616,14 +920,40 @@ class Machine(HasID[str]):
         item: 'Greige', lbs: float,
     ) -> Status:
         """Emit one `Knit` activity for `lbs` of `item` — one uninterrupted
-        run (it ends at a doff or a beam swap). Roll tracking is the caller's
-        job: the run-up and production loop record each `Roll` after its
-        `Doff`. See DESIGN.md."""
+        run (it ends at a doff or a beam swap), stamped with the variant the
+        bars' merges identify (see `_variant_for`). Roll tracking is the
+        caller's job: the run-up and production loop record each `Roll`
+        after its `Doff`. See DESIGN.md."""
         rate = item.get_rate_on_mchn(self._id)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
-        emitted.append(Knit(start=start, end=end, item=item, lbs=lbs))
+        emitted.append(Knit(start=start, end=end, item=item, lbs=lbs,
+                            variant=self._variant_for(working, item)))
         return working.apply_activity(emitted[-1])
+
+    def _variant_for(self, working: Status, item: 'Greige') -> 'str | None':
+        """The plant variant (recipe names, comma-separated) that the merges
+        on the two bars identify under `item`'s master — `None` without a
+        variant map, when either set has no known merge, or when the pair
+        matches no recipe. Among recipes for the same merge pair, one at the
+        bars' construction is preferred."""
+        if self._variant_map is None:
+            return None
+        top, btm = working.beam('top'), working.beam('btm')
+        if (top is None or btm is None or not top.known_merge
+                or not btm.known_merge):
+            return None
+        master = self._variant_map.masters.get(item.id)
+        if master is None:
+            return None
+        recipes = master.lookup(top.merge, btm.merge)
+        if not recipes:
+            return None
+        for r in recipes:
+            if (r.n_beams == top.desc.spools and r.top.ends == top.desc.ends
+                    and r.btm.ends == btm.desc.ends):
+                return r.names
+        return recipes[0].names
 
     def _emit_doff(
         self, emitted: list[Activity], working: Status,
@@ -654,40 +984,53 @@ class Machine(HasID[str]):
 
     def _emit_tape_out(
         self, emitted: list[Activity], working: Status,
-        bars: Literal['top', 'btm', 'both'],
+        bars: Literal['top', 'btm', 'both'], ctx: _PlanCtx,
     ) -> Status:
-        """Emit a `TapeOut` of `bars`, recording the beam SKU(s) removed from
-        each affected bar (read from `working`) for inventory tracking."""
+        """Emit a `TapeOut` of `bars`, recording the set removed from each
+        affected bar **as returned to inventory** (its remaining lbs, available
+        from this activity's end). A returned set that is no longer worth
+        stocking is recorded on the activity but not returned to stock."""
         duration = (TAPE_OUT_BOTH_DURATION if bars == 'both'
                     else TAPE_OUT_SINGLE_DURATION)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, duration)
-        top_beam = working.beam('top') if bars in ('top', 'both') else None
-        btm_beam = working.beam('btm') if bars in ('btm', 'both') else None
+
+        def off(bar: Literal['top', 'btm']) -> 'BeamSet | None':
+            beam = working.beam(bar)
+            if beam is None:
+                return None
+            lbs = working.lbs_remaining(bar)
+            back = beam.returned(lbs, end)
+            if lbs - BEAM_FLOOR_LBS >= MAX_BEAM_WASTE_LBS:
+                ctx.returned.append(back)
+            return back
+
+        top_beam = off('top') if bars in ('top', 'both') else None
+        btm_beam = off('btm') if bars in ('btm', 'both') else None
         emitted.append(TapeOut(start=start, end=end, bars=bars,
                                top_beam=top_beam, btm_beam=btm_beam))
         return working.apply_activity(emitted[-1])
 
     def _emit_hanging(
         self, emitted: list[Activity], working: Status,
-        bars: Literal['top', 'btm', 'both'], item: 'Greige',
+        bars: Literal['top', 'btm', 'both'], item: 'Greige', ctx: _PlanCtx,
     ) -> Status:
-        """Mount a fresh beam set on the named bar(s), loading each bar's beam
-        (from `item`'s yarn) and lbs (`fresh_beam_lbs`) and leaving it
+        """Mount a beam set on the named bar(s) — for each, the stock set
+        `ctx.pick` chooses for `item`'s beam-set requirement, or an invented
+        one — loading the bar with the set and its lbs and leaving it
         un-threaded. Pairs with a `_emit_threading`."""
         cfg = item.configuration
         start = working.as_of
         duration = (HANGING_BOTH_DURATION if bars == 'both'
                     else HANGING_SINGLE_DURATION)
         end = self._workcal.offset_work_hours(start, duration)
-        top_beam = BeamSet(cfg.top_beam) if bars in ('top', 'both') else None
-        btm_beam = BeamSet(cfg.btm_beam) if bars in ('btm', 'both') else None
-        top_lbs = fresh_beam_lbs(top_beam) if top_beam is not None else 0.0
-        btm_lbs = fresh_beam_lbs(btm_beam) if btm_beam is not None else 0.0
+        top_beam = (ctx.pick(BeamSetDesc(cfg.top_beam), start, 'top', working)
+                    if bars in ('top', 'both') else None)
+        btm_beam = (ctx.pick(BeamSetDesc(cfg.btm_beam), start, 'btm', working)
+                    if bars in ('btm', 'both') else None)
         emitted.append(Hanging(
             start=start, end=end, bars=bars,
-            top_beam=top_beam, top_lbs=top_lbs,
-            btm_beam=btm_beam, btm_lbs=btm_lbs,
+            top_beam=top_beam, btm_beam=btm_beam,
         ))
         return working.apply_activity(emitted[-1])
 
@@ -707,12 +1050,12 @@ class Machine(HasID[str]):
 
     def _emit_rethread(
         self, emitted: list[Activity], working: Status,
-        bars: Literal['top', 'btm', 'both'], item: 'Greige',
+        bars: Literal['top', 'btm', 'both'], item: 'Greige', ctx: _PlanCtx,
     ) -> Status:
-        """Re-thread the named bar(s): a `Hanging` (mount the fresh set) then
-        a `Threading` (route the yarn). Together these replace the old single
+        """Re-thread the named bar(s): a `Hanging` (mount the set) then a
+        `Threading` (route the yarn). Together these replace the old single
         `BeamLoad`; the bar(s) must already be removed."""
-        working = self._emit_hanging(emitted, working, bars, item)
+        working = self._emit_hanging(emitted, working, bars, item, ctx)
         return self._emit_threading(emitted, working, bars)
 
     def _emit_idle(

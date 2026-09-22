@@ -14,15 +14,19 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from dataclasses import dataclass
+from typing import Annotated, Any, Callable, Mapping
 
 import typer
 
 from swmtplanner.products import (
-    read_greige_styles, greige_styles_from_list,
+    read_greige_styles, greige_styles_from_list, read_variant_masters,
+    read_variant_map, read_beam_sets, beam_sets_from_list,
 )
 from swmtplanner.demand import read_rls_items, rls_items_from_list
-from swmtplanner.schedule import read_machines, machines_from_list
+from swmtplanner.schedule import (
+    read_machines, machines_from_list, build_inventory,
+)
 from swmtplanner.support import load_workcal, workcal_from_dict
 from swmtplanner.debuglog import DebugLog
 
@@ -33,6 +37,7 @@ from swmtplanner.dashboard import DatabaseConfigError, resolve_conn_config
 from .sqldump import PersistenceError, persist_run
 from .loop import plan
 from .report import write_plan_report_xlsx
+from .schedule_json import write_schedule_json
 from .state import State
 
 
@@ -239,7 +244,7 @@ def run(
     _validate_config(cfg, config)
     config_dir = config.parent
 
-    sd = start_date or datetime.strptime(cfg['start_date'], '%Y-%m-%d')
+    sd = start_date or _parse_start_date(cfg['start_date'])
 
     # ---- Verbose-mode prerequisites (gathered up front) ----
     # A verbose run is persisted to SQL Server as a labelled, annotated run, so both
@@ -256,58 +261,16 @@ def run(
         notes = _gather_notes()
 
     # ---- Resolve inputs ----
-    greige_by_id = _resolve(
-        cli_value=products, config_value=cfg['products'],
-        config_dir=config_dir,
-        file_loader=read_greige_styles,
-        inline_loader=lambda d, source: greige_styles_from_list(
-            d, source=source,
-        ),
-        label='products',
+    inputs = load_inputs(
+        cfg, config_dir, start_date=sd,
+        overrides={'products': products, 'workcal': workcal, 'demand': demand,
+                   'machines': machines, 'weights': weights},
     )
-    typer.echo(f'  loaded {len(greige_by_id)} greige(s)')
-
-    wc = _resolve_workcal(
-        cli_value=workcal, config_value=cfg['workcal'],
-        config_dir=config_dir,
-    )
-
-    rls_items = _resolve(
-        cli_value=demand, config_value=cfg['demand'],
-        config_dir=config_dir,
-        file_loader=lambda p: read_rls_items(
-            p, start_date=sd, greige_by_id=greige_by_id,
-        ),
-        inline_loader=lambda d, source: rls_items_from_list(
-            d, start_date=sd, greige_by_id=greige_by_id, source=source,
-        ),
-        label='demand',
-    )
-    typer.echo(f'  loaded {len(rls_items)} rls item(s)')
-
-    machine_dict = _resolve(
-        cli_value=machines, config_value=cfg['machines'],
-        config_dir=config_dir,
-        file_loader=lambda p: read_machines(
-            p, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
-        ),
-        inline_loader=lambda d, source: machines_from_list(
-            d, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
-            source=source,
-        ),
-        label='machines',
-    )
-    typer.echo(f'  loaded {len(machine_dict)} machine(s)')
-
-    cost_weights = _resolve(
-        cli_value=weights, config_value=cfg['weights'],
-        config_dir=config_dir,
-        file_loader=load_weights,
-        inline_loader=lambda d, source: weights_from_dict(
-            d, source=source,
-        ),
-        label='weights',
-    )
+    greige_by_id = inputs.greige_by_id
+    rls_items = inputs.rls_items
+    machine_dict = inputs.machines
+    inventory = inputs.inventory
+    cost_weights = inputs.weights
 
     # ---- Plan ----
     def _read_json_file(fpath: str | None) -> dict:
@@ -328,6 +291,7 @@ def run(
         rls_items=rls_items,
         start_date=sd,
         window_end=sd,
+        inventory=inventory,
         **statecfg
     )
     costing = Costing(cost_weights)
@@ -352,6 +316,9 @@ def run(
         output_path = output_dir / f'knit_plan_{sd.strftime('%Y%m%d')}_{idx}.xlsx'
     typer.echo(f'Writing report to {output_path}')
     write_plan_report_xlsx(report, output_path)
+    json_path = output_path.with_suffix('.json')
+    typer.echo(f'Writing schedule JSON to {json_path}')
+    write_schedule_json(report, json_path)
 
     if verbose:
         _persist_debuglog(db_block, debuglog, report, sd, label, notes)
@@ -394,6 +361,205 @@ def _persist_debuglog(
             f'  (--verbose) WARNING: debug log not persisted: {exc}', err=True,
         )
         return None
+
+
+@dataclass
+class Inputs:
+    """Everything a run-config resolves to (see "Run-config JSON" in
+    DESIGN.md) — shared by `plan infinite` and the manual scheduler
+    (`planners/manual`), so both load a config identically."""
+    start_date: datetime
+    greige_by_id: dict[str, Any]
+    variant_masters: dict[str, str] | None
+    variant_map: Any
+    inventory: dict
+    workcal: Any
+    rls_items: dict[str, Any]
+    machines: dict[str, Any]
+    weights: Any
+
+
+def load_config(config: Path, *, start_date: datetime | None = None,
+                echo: Callable[[str], Any] = typer.echo) -> tuple[dict, Inputs]:
+    """Read + validate a run-config JSON and resolve every input in it. Returns
+    the raw config (for its `state` / `database` blocks) and the `Inputs`."""
+    with open(config) as f:
+        cfg = json.load(f)
+    _validate_config(cfg, config)
+    sd = start_date or _parse_start_date(cfg['start_date'])
+    return cfg, load_inputs(cfg, config.parent, start_date=sd, echo=echo)
+
+
+def _parse_start_date(value: str) -> datetime:
+    """The config's `start_date`: a date (`YYYY-MM-DD`, midnight) or a
+    date-time (`YYYY-MM-DD HH:MM[:SS]` / ISO 8601), in plant local time
+    like every timestamp the planner handles."""
+    try:
+        return datetime.fromisoformat(str(value).strip())
+    except ValueError as e:
+        raise typer.BadParameter(
+            f"config['start_date'] must be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, "
+            f'got {value!r}'
+        ) from e
+
+
+def load_inputs(
+    cfg: dict, config_dir: Path, *, start_date: datetime,
+    overrides: Mapping[str, str | None] | None = None,
+    echo: Callable[[str], Any] = typer.echo,
+) -> Inputs:
+    """Resolve a run-config's inputs (products, the optional variant files and
+    beam-set inventory, workcal, demand, machines, weights). `overrides` maps
+    an input key to a CLI override (path or inline JSON) — see `_resolve`."""
+    overrides = overrides or {}
+    sd = start_date
+    greige_by_id = _resolve(
+        cli_value=overrides.get('products'), config_value=cfg['products'],
+        config_dir=config_dir,
+        file_loader=read_greige_styles,
+        inline_loader=lambda d, source: greige_styles_from_list(
+            d, source=source,
+        ),
+        label='products', echo=echo,
+    )
+    echo(f'  loaded {len(greige_by_id)} greige(s)')
+
+    # Optional: the variant-name -> master translation, so a machines file may
+    # name the plant's variants in `init_item` (see `schedule/DESIGN.md`).
+    variant_masters = None
+    if cfg.get('variant_masters') is not None:
+        variant_masters = _resolve(
+            cli_value=None, config_value=cfg['variant_masters'],
+            config_dir=config_dir,
+            file_loader=read_variant_masters,
+            inline_loader=lambda d, source: dict(d),
+            label='variant_masters', echo=echo,
+        )
+        echo(f'  loaded {len(variant_masters)} variant name(s)')
+
+    # Optional: the per-master merge-combination -> variant map. Supplies the
+    # merges on each machine's initial bars and lets knits name their variant;
+    # also labels the beam-set inventory (path only — it is a generated file).
+    variant_map = None
+    if cfg.get('variant_masters') is not None and cfg.get('variant_map') is not None:
+        vm_path = Path(cfg['variant_map'])
+        if not vm_path.is_absolute():
+            vm_path = config_dir / vm_path
+        echo('Resolving variant_map')
+        variant_map = read_variant_map(vm_path)
+        echo(f'  loaded {len(variant_map.masters)} master(s), '
+                   f'{len(variant_map.merges)} merge(s)')
+
+    # Optional: the plant's beam-set export, available from the start date.
+    # Becomes the stock inventory below, once the machines say which sets
+    # are mounted (and so not in stock).
+    beam_sets = None
+    if cfg.get('beam_sets') is not None:
+        if variant_map is None:
+            raise ValueError(
+                "config['beam_sets'] requires config['variant_map'] (and "
+                "'variant_masters') to label the sets",
+            )
+        beam_sets = _resolve(
+            cli_value=None, config_value=cfg['beam_sets'],
+            config_dir=config_dir,
+            file_loader=lambda p: read_beam_sets(p, variant_map, sd),
+            inline_loader=lambda d, source: beam_sets_from_list(
+                d, variant_map, sd, source=source,
+            ),
+            label='beam_sets', echo=echo,
+        )
+        echo(f'  loaded {len(beam_sets)} beam set(s)')
+
+    # Optional: sets the plant has assigned to a machine bar but not yet
+    # threaded — each machine bar's queue (schedule/DESIGN.md, "Beam-set
+    # inventory"). Also flagged `assigned` in the export, which keeps them
+    # out of free stock.
+    assigned_sets = None
+    if cfg.get('assigned_sets') is not None:
+        assigned_sets = _resolve(
+            cli_value=None, config_value=cfg['assigned_sets'],
+            config_dir=config_dir,
+            file_loader=lambda p: json.load(open(p)),
+            inline_loader=lambda d, source: d,
+            label='assigned_sets', echo=echo,
+        )
+        echo(f'  loaded {len(assigned_sets)} assigned set(s)')
+
+    wc = _resolve_workcal(
+        cli_value=overrides.get('workcal'), config_value=cfg['workcal'],
+        config_dir=config_dir, echo=echo,
+    )
+
+    rls_items = _resolve(
+        cli_value=overrides.get('demand'), config_value=cfg['demand'],
+        config_dir=config_dir,
+        file_loader=lambda p: read_rls_items(
+            p, start_date=sd, greige_by_id=greige_by_id,
+        ),
+        inline_loader=lambda d, source: rls_items_from_list(
+            d, start_date=sd, greige_by_id=greige_by_id, source=source,
+        ),
+        label='demand', echo=echo,
+    )
+    echo(f'  loaded {len(rls_items)} rls item(s)')
+
+    machine_dict = _resolve(
+        cli_value=overrides.get('machines'), config_value=cfg['machines'],
+        config_dir=config_dir,
+        file_loader=lambda p: read_machines(
+            p, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
+            variant_masters=variant_masters, variant_map=variant_map,
+            beam_sets=beam_sets, assigned_sets=assigned_sets,
+        ),
+        inline_loader=lambda d, source: machines_from_list(
+            d, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
+            variant_masters=variant_masters, variant_map=variant_map,
+            beam_sets=beam_sets, assigned_sets=assigned_sets, source=source,
+        ),
+        label='machines', echo=echo,
+    )
+    echo(f'  loaded {len(machine_dict)} machine(s)')
+
+    # Stock = the export minus the sets the machines report as mounted.
+    inventory = {}
+    if beam_sets is not None:
+        mounted = {
+            m.initial_status.beam(bar).id
+            for m in machine_dict.values() for bar in ('top', 'btm')
+            if m.initial_status.beam(bar) is not None
+        }
+        inventory = build_inventory(
+            b for b in beam_sets.values() if b.id not in mounted
+        )
+        n_stock = sum(len(v) for v in inventory.values())
+        n_mounted = len(mounted & set(beam_sets))
+        n_assigned = sum(1 for b in beam_sets.values() if b.assigned)
+        n_queued = sum(len(m.initial_status.queue(bar))
+                       for m in machine_dict.values() for bar in ('top', 'btm'))
+        n_later = sum(1 for v in inventory.values() for b in v
+                      if not b.available_at(sd))
+        echo(f'  {n_stock} beam set(s) stocked under {len(inventory)} '
+             f'description(s), {n_later} received after the start date; '
+             f'{n_mounted} on machines; {n_assigned} assigned '
+             f'({n_queued} queued on these machines)')
+
+    cost_weights = _resolve(
+        cli_value=overrides.get('weights'), config_value=cfg['weights'],
+        config_dir=config_dir,
+        file_loader=load_weights,
+        inline_loader=lambda d, source: weights_from_dict(
+            d, source=source,
+        ),
+        label='weights', echo=echo,
+    )
+
+    return Inputs(
+        start_date=sd, greige_by_id=greige_by_id,
+        variant_masters=variant_masters, variant_map=variant_map,
+        inventory=inventory, workcal=wc, rls_items=rls_items,
+        machines=machine_dict, weights=cost_weights,
+    )
 
 
 def _resolve_db_block(cli_value: str | None, config_value: Any) -> Any:
@@ -476,6 +642,7 @@ def _resolve(
     file_loader: Callable[[Path], Any],
     inline_loader: Callable[[Any, str], Any],
     label: str,
+    echo: Callable[[str], Any] = typer.echo,
 ) -> Any:
     """Resolve one input value from CLI override or config field.
 
@@ -491,7 +658,7 @@ def _resolve(
 
     Workcal has a sibling helper (`_resolve_workcal`) because its
     inline loader takes an extra `holidays_base_dir` argument."""
-    typer.echo(f'Resolving {label}')
+    echo(f'Resolving {label}')
     if cli_value is not None:
         if _looks_like_inline_json(cli_value):
             return inline_loader(
@@ -513,13 +680,14 @@ def _resolve_workcal(
     cli_value: str | None,
     config_value: Any,
     config_dir: Path,
+    echo: Callable[[str], Any] = typer.echo,
 ):
     """Workcal resolution. Adds the `holidays_base_dir` argument used
     by `workcal_from_dict` to resolve a nested string `holidays` path
     relative to the right directory: the config's directory for a
     config-inlined workcal, or `None` (forces fully-inlined holidays)
     for a CLI-inlined workcal."""
-    typer.echo('Resolving workcal')
+    echo('Resolving workcal')
     if cli_value is not None:
         if _looks_like_inline_json(cli_value):
             return workcal_from_dict(

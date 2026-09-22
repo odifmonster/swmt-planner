@@ -41,6 +41,9 @@ class Activity(HasID[str]):
 class Knit(Activity):
     item: Greige
     lbs: float
+    variant: str | None = ...
+    """The plant variant the two bars' merges identify under `item` (the
+    recipe's comma-separated names), or None when unknown."""
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,8 @@ class Doff(Activity):
 class TapeOut(Activity):
     bars: Literal['top', 'btm', 'both']
     top_beam: BeamSet | None = ...
+    """The set removed from top, as returned to inventory (remaining lbs,
+    avail_date = this activity's end); None if top untouched."""
     btm_beam: BeamSet | None = ...
 
 
@@ -66,9 +71,8 @@ class TapeOut(Activity):
 class Hanging(Activity):
     bars: Literal['top', 'btm', 'both']
     top_beam: BeamSet | None = ...
-    top_lbs: float = ...
+    """The set now on top — its `lbs` is what the bar holds; None if untouched."""
     btm_beam: BeamSet | None = ...
-    btm_lbs: float = ...
 
 
 @dataclass(frozen=True)

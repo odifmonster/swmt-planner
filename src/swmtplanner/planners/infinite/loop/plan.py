@@ -38,6 +38,11 @@ class PlanReport:
     plan snapshot."""
     schedules: dict[str, tuple['Activity', ...]]
     jobs_by_item: dict[str, tuple['Job', ...]]
+    # Each machine's production schedule (`Machine.jobs`), in commit order —
+    # the jobs whose `activities` partition that machine's `schedules` entry
+    # (bar the orphaned `Idle` / `Waste` / first tape-out; see the schedule
+    # JSON output).
+    jobs_by_machine: dict[str, tuple['Job', ...]]
     total_score: float
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
@@ -321,6 +326,9 @@ def _build_report(state: State, costing: Costing) -> PlanReport:
         },
         jobs_by_item={
             item_id: r.jobs for item_id, r in state.rls_items.items()
+        },
+        jobs_by_machine={
+            m_id: m.jobs for m_id, m in state.machines.items()
         },
         total_score=costing.score(state),
         cost_components_by_item={

@@ -12,6 +12,7 @@ from swmtplanner.schedule import (
 )
 
 if TYPE_CHECKING:
+    from swmtplanner.products import BeamSet
     from swmtplanner.schedule import Activity
     from .loop import PlanReport
 
@@ -258,8 +259,9 @@ def xref_dataframe(report: 'PlanReport') -> pd.DataFrame:
     Columns: `item`, `job_id`, `roll_idx` (the roll's 0-based index within
     its job — a `Roll` has no id of its own), `roll_completion`,
     `knit_id`, `knit_lbs` (a roll straddling a beam swap has two knit rows
-    summing to the roll's lbs), and `order_id` — the order the roll
-    actually fills, looked up by roll identity from the item's
+    summing to the roll's lbs), `variant` (the plant variant the knit's bar
+    merges identify — `Knit.variant`; blank when unknown), and `order_id` —
+    the order the roll actually fills, looked up by roll identity from the item's
     `roll_order_links`; `pd.NA`/blank when the roll reached no order (its
     lbs went entirely to excess). `order_id` is the *resolved* fill,
     distinct from the job's `tgt_order` on the `production` sheet (what the
@@ -285,11 +287,12 @@ def xref_dataframe(report: 'PlanReport') -> pd.DataFrame:
                         'roll_completion': roll.completion_time,
                         'knit_id': knit.id,
                         'knit_lbs': knit.lbs,
+                        'variant': pd.NA if knit.variant is None else knit.variant,
                         'order_id': order_id,
                     })
     df = pd.DataFrame(rows, columns=[
         'item', 'job_id', 'roll_idx', 'roll_completion', 'knit_id',
-        'knit_lbs', 'order_id',
+        'knit_lbs', 'variant', 'order_id',
     ])
     df['knit_lbs'] = _round_int(df['knit_lbs'])
     return df
@@ -350,23 +353,38 @@ def _activity_lbs(a: 'Activity') -> float:
     return math.nan
 
 
+def _beam_set_desc(bs: 'BeamSet') -> str:
+    """`<planner label> #<set no> <merge>` for a physical set; an invented
+    set has no merge and reads `… #NEW000001`."""
+    text = f'{bs.desc.id} #{bs.set_no}'
+    return text if bs.merge is None else f'{text} {bs.merge}'
+
+
 def _activity_desc(a: 'Activity') -> str:
-    """Short text description for `a`'s `desc` cell."""
+    """Short text description for `a`'s `desc` cell. Activities that touch a
+    physical beam set name it (label, set number, merge); a `Hanging` adds
+    the lbs hung and a `TapeOut` the lbs returned to stock; a `Knit` adds
+    its variant when known."""
     if isinstance(a, Knit):
-        return a.item.id
+        return a.item.id if a.variant is None else f'{a.item.id} [{a.variant}]'
     if isinstance(a, Waste):
-        return f'{a.beam.id} on {a.bar}'
+        return f'{_beam_set_desc(a.beam)} on {a.bar}'
     if isinstance(a, Hanging):
         parts = []
         if a.bars in ('top', 'both'):
-            parts.append(f'top {a.top_beam.id} ({a.top_lbs:g} lbs)')
+            parts.append(f'top {_beam_set_desc(a.top_beam)} ({a.top_beam.lbs:g} lbs)')
         if a.bars in ('btm', 'both'):
-            parts.append(f'btm {a.btm_beam.id} ({a.btm_lbs:g} lbs)')
+            parts.append(f'btm {_beam_set_desc(a.btm_beam)} ({a.btm_beam.lbs:g} lbs)')
         return ', '.join(parts)
     if isinstance(a, Threading):
         return a.bars
     if isinstance(a, TapeOut):
-        return a.bars
+        parts = []
+        if a.top_beam is not None:
+            parts.append(f'top {_beam_set_desc(a.top_beam)} ({a.top_beam.lbs:g} lbs back)')
+        if a.btm_beam is not None:
+            parts.append(f'btm {_beam_set_desc(a.btm_beam)} ({a.btm_beam.lbs:g} lbs back)')
+        return ', '.join(parts) if parts else a.bars
     if isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         return f'from {a.from_item.id} to {a.to_item.id}'
     if isinstance(a, (Doff, Idle)):

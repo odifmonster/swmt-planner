@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from swmtplanner.products import Greige
-from swmtplanner.schedule import Machine, ProductionPlan
+from swmtplanner.schedule import Machine, ProductionPlan, Inventory
 from swmtplanner.demand.rlsitem import RlsItem
 
 __all__ = ['Move', 'State']
@@ -27,6 +27,9 @@ class State:
     rls_items: dict[str, RlsItem]
     start_date: datetime
     window_end: datetime
+    inventory: Inventory = ...
+    """Beam-set stock keyed by physical description; read by candidate plans,
+    mutated only by `commit_move`."""
     window_advance_amount: timedelta = ...
     carrying_avoidance_margin: timedelta = ...
     candidate_threshold: int = ...

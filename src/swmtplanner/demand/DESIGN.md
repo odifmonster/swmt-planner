@@ -120,6 +120,7 @@ RlsItem (HasID)
   safety_view: SafetyAwareView
   raw_view: RawView
   register_jobs(jobs)
+  unregister_jobs(jobs)              # remove by id + recompute; for job replacement
   cost_if(jobs) -> CostComponents    # pure, no mutation
   excess_lbs, replenishment_need_lbs, ...
 
@@ -131,8 +132,12 @@ CostComponents                       # plain named record returned by cost_if
 final `roll.completion_time`) then re-runs both views' `recompute` once after the batch.
 `cost_if(jobs)` runs both views with `self.jobs + jobs` against fresh order
 arrays without binding the results — gives a price-out without state change.
-This is the supported way to "test" a placement; we do not expose
-`unregister`.
+This is the supported way to "test" a placement. `unregister_jobs(jobs)`
+removes jobs by id and recomputes; it is not for undoing placements but for
+**replacing** a committed job with a recreated copy that carries more
+activities (the schedule layer's `Job.with_activities` — a later plan
+appends the tape-out that ends a job), so the demand item and the machine
+keep referring to the same `Job` object.
 
 Both methods accept a list; a single-job decision is just `[job]`. An
 empty list is a no-op for `register_jobs` and yields current state's cost

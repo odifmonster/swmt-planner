@@ -34,6 +34,7 @@ def enumerate_candidates(state: State) -> list[Move]: ...
 class PlanReport:
     schedules: dict[str, tuple[Activity, ...]]
     jobs_by_item: dict[str, tuple[Job, ...]]
+    jobs_by_machine: dict[str, tuple[Job, ...]]
     total_score: float
     cost_components_by_item: dict[str, CostComponents]
     unmet_lbs_by_item_week: dict[tuple[str, int], float]

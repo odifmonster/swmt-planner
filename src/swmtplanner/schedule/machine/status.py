@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, Sequence, TYPE_CHECKING
 
 from swmtplanner.schedule.activity import (
     Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
@@ -47,11 +47,23 @@ class Status:
 
     `is_idle` reports whether an activity is in progress at `as_of`. It is
     informational only — the planner does not consult it when deciding on
-    changeovers, since yarn stays threaded across idle gaps."""
+    changeovers, since yarn stays threaded across idle gaps.
+
+    `roll_lbs_remaining` is the yarn still to knit on the roll in progress
+    (`current_item`'s), `0.0` between rolls. A `Knit` draws it down, a `Doff`
+    ends the roll. Since every plan ends at a `Doff`, only a machine's
+    *initial* status ever carries a nonzero value — it is how the planner
+    learns a machine is part-way through a roll at the start date."""
     as_of: datetime
     _bars: 'dict[str, _BarState]'
     current_item: 'Greige'
     is_idle: bool
+    roll_lbs_remaining: float = 0.0
+    # Per bar, the sets the plant has assigned to it and not yet threaded —
+    # next up, in order. A `Hanging` of the front set pops it; a machine's
+    # initial status carries the assigned-sets file's queues.
+    _queues: 'dict[str, tuple[BeamSet, ...]]' = field(
+        default_factory=lambda: {'top': (), 'btm': ()})
 
     # ----- construction -------------------------------------------------
 
@@ -60,6 +72,8 @@ class Status:
         cls, *, as_of: datetime, current_item: 'Greige', is_idle: bool,
         top_beam: 'BeamSet | None', top_lbs_remaining: float, top_threaded: bool,
         btm_beam: 'BeamSet | None', btm_lbs_remaining: float, btm_threaded: bool,
+        roll_lbs_remaining: float = 0.0,
+        top_queue: 'Sequence[BeamSet]' = (), btm_queue: 'Sequence[BeamSet]' = (),
     ) -> 'Status':
         """Build a `Status` from per-bar primitives, without callers having to
         know the private per-bar storage. The accessors (`beam`, etc.) are the
@@ -71,21 +85,28 @@ class Status:
                 'btm': _BarState(btm_beam, btm_lbs_remaining, btm_threaded),
             },
             current_item=current_item, is_idle=is_idle,
+            roll_lbs_remaining=roll_lbs_remaining,
+            _queues={'top': tuple(top_queue), 'btm': tuple(btm_queue)},
         )
 
     # ----- per-bar accessors --------------------------------------------
 
     def beam(self, bar: Bar) -> 'BeamSet | None':
-        """Mounted beam SKU on `bar` (None after a remove, before re-thread)."""
+        """Physical set on `bar` (None after a remove, before re-thread)."""
         return self._bars[bar].beam
 
     def lbs_remaining(self, bar: Bar) -> float:
-        """Yarn remaining on `bar`'s beam."""
+        """Yarn remaining on `bar`'s set (the set's own `lbs` is what it held
+        when hung)."""
         return self._bars[bar].lbs_remaining
 
     def threaded(self, bar: Bar) -> bool:
         """Whether `bar`'s set is threaded (routed) and ready to knit."""
         return self._bars[bar].threaded
+
+    def queue(self, bar: Bar) -> 'tuple[BeamSet, ...]':
+        """Sets assigned to `bar` and not yet threaded, next up first."""
+        return self._queues[bar]
 
     @property
     def current_family(self) -> str:
@@ -113,10 +134,13 @@ class Status:
         self, as_of: datetime, *,
         current_item: 'Greige | None' = None, is_idle: bool = True,
         top: 'dict | None' = None, btm: 'dict | None' = None,
+        roll_lbs_remaining: 'float | None' = None,
+        queues: 'dict[str, tuple[BeamSet, ...]] | None' = None,
     ) -> 'Status':
         """Build the next Status at `as_of`. `top` / `btm`, when given, are
         dicts of `_BarState` field overrides for that bar (an omitted bar
-        carries over unchanged). Pure — `self` is untouched."""
+        carries over unchanged); `roll_lbs_remaining` and `queues` likewise
+        carry over unless given. Pure — `self` is untouched."""
         bars = dict(self._bars)
         if top is not None:
             bars['top'] = replace(self._bars['top'], **top)
@@ -126,7 +150,23 @@ class Status:
             as_of=as_of, _bars=bars, is_idle=is_idle,
             current_item=(self.current_item if current_item is None
                           else current_item),
+            roll_lbs_remaining=(self.roll_lbs_remaining if roll_lbs_remaining is None
+                                else roll_lbs_remaining),
+            _queues=self._queues if queues is None else queues,
         )
+
+    def _popped(self, activity: Hanging) -> 'dict[str, tuple[BeamSet, ...]]':
+        """The queues after `activity`: a bar that hangs the front set of its
+        queue consumes it; hanging any other set leaves the queue alone."""
+        queues = dict(self._queues)
+        for bar in ('top', 'btm'):
+            if activity.bars not in (bar, 'both'):
+                continue
+            hung = getattr(activity, f'{bar}_beam')
+            q = queues[bar]
+            if q and hung is not None and hung.id == q[0].id:
+                queues[bar] = q[1:]
+        return queues
 
     def apply_activity(self, activity: Activity) -> 'Status':
         """Return the Status that results from completing `activity` against
@@ -148,6 +188,7 @@ class Status:
                      self.lbs_remaining('top') - activity.lbs * cfg.top_pct},
                 btm={'lbs_remaining':
                      self.lbs_remaining('btm') - activity.lbs * cfg.btm_pct},
+                roll_lbs_remaining=max(0.0, self.roll_lbs_remaining - activity.lbs),
             )
         if isinstance(activity, Waste):
             # Discards a beam's usable residue unknit, emptying the named bar;
@@ -157,8 +198,9 @@ class Status:
                                'threaded': False},
             })
         if isinstance(activity, Doff):
-            # Takes one completed roll off the machine: machine time only.
-            return self._evolve(activity.end)
+            # Takes one completed roll off the machine: machine time only,
+            # and no roll is in progress afterwards.
+            return self._evolve(activity.end, roll_lbs_remaining=0.0)
         if isinstance(activity, TapeOut):
             # Removes the set on the named bar(s).
             gone = {'beam': None, 'lbs_remaining': 0.0, 'threaded': False}
@@ -168,8 +210,9 @@ class Status:
                 btm=gone if activity.bars in ('btm', 'both') else None,
             )
         if isinstance(activity, Hanging):
-            # Loads a fresh set onto the named bar(s): sets beam + lbs and
-            # leaves the bar un-threaded. Requires the bar already removed.
+            # Loads a set onto the named bar(s): sets beam + lbs (the set's
+            # own lbs) and leaves the bar un-threaded. Requires the bar
+            # already removed.
             top = btm = None
             if activity.bars in ('top', 'both'):
                 if not self._removed('top'):
@@ -178,7 +221,7 @@ class Status:
                         'remove the old set first'
                     )
                 top = {'beam': activity.top_beam,
-                       'lbs_remaining': activity.top_lbs, 'threaded': False}
+                       'lbs_remaining': activity.top_beam.lbs, 'threaded': False}
             if activity.bars in ('btm', 'both'):
                 if not self._removed('btm'):
                     raise ValueError(
@@ -186,8 +229,9 @@ class Status:
                         'remove the old set first'
                     )
                 btm = {'beam': activity.btm_beam,
-                       'lbs_remaining': activity.btm_lbs, 'threaded': False}
-            return self._evolve(activity.end, top=top, btm=btm)
+                       'lbs_remaining': activity.btm_beam.lbs, 'threaded': False}
+            return self._evolve(activity.end, top=top, btm=btm,
+                                queues=self._popped(activity))
         if isinstance(activity, Threading):
             # Routes the loaded yarn: flips the named bar(s) to threaded and
             # nothing else. Requires the bar already hung (loaded, unthreaded).

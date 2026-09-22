@@ -62,6 +62,11 @@ State
   machines: dict[str, Machine]
   rls_items: dict[str, RlsItem]
   start_date: datetime
+  inventory: dict[BeamSetDesc, list[BeamSet]]
+                                    # the plant's beam-set stock, keyed by
+                                    # physical description (see
+                                    # schedule/DESIGN.md "Beam-set inventory");
+                                    # empty when no beam_sets input was given
   window_end: datetime              # right edge of the decision window
   reference_week_idx: int           # right edge of the priority "urgent" bucket
   # tuneable thresholds and step sizes (window_advance_amount,
@@ -78,7 +83,16 @@ take `state` as a single argument rather than threading a half-dozen
 dicts through call signatures. It owns three mutation operations:
 
 - `commit_move` applies a chosen `Move` by calling the underlying
-  `Machine` and `RlsItem` methods in lockstep.
+  `Machine` (`commit_plan`) and `RlsItem` methods in lockstep — when the
+  plan carries a `replaced_job` (the machine's last job recreated with the
+  changeover tape-out appended, see `schedule/DESIGN.md` "Job activities"),
+  the demand item unregisters the old copy and registers the new one so both
+  sides hold the same `Job` — then applies the plan's inventory effect: the sets in `plan.beam_sets_taken` leave `inventory`
+  (matched by set id under their physical description) and those in
+  `plan.beam_sets_returned` — taped-out sets carrying their remaining lbs
+  and the tape-out's end as `avail_date` — are added back. Candidate plans
+  are enumerated against the same `inventory` and never mutate it, so only
+  the committed move changes the stock.
 - `advance_window` extends `window_end` forward so additional decisions
   become eligible (see "Decision window" below).
 - `advance_reference_week` extends `reference_week_idx` forward so
@@ -698,7 +712,9 @@ machines even when they're the right answer.
 ## End-to-end workflow
 
 ```
-state = State(machines, rls_items, start_date)
+state = State(machines, rls_items, start_date, inventory)
+# `inventory` = the loaded beam sets grouped by `desc.physical`, every set
+# available at start_date (empty dict when the config has no `beam_sets`)
 costing = Costing(weights)
 report = plan(state, costing)
 # state has been mutated; report summarizes the result
@@ -709,12 +725,13 @@ committed activities, rls_items now carry the registered jobs.
 
 ## CLI entry point
 
-A `typer` app in `planners/infinite/run.py` runs the planner end-to-
-end. The CLI takes one required positional argument — a path to a
+The `plan` console script (`planners/cli.py`) is a `typer` app with two
+subcommands. `plan infinite` (`planners/infinite/run.py`) runs the planner
+end-to-end; it takes one required positional argument — a path to a
 **run-config JSON** — plus a set of optional override flags:
 
 ```
-swmt-infinite-plan <config.json>
+plan infinite <config.json>
     [--start-date YYYY-MM-DD]
     [--products PATH] [--workcal PATH] [--machines PATH]
     [--demand PATH]   [--weights PATH]
@@ -722,22 +739,128 @@ swmt-infinite-plan <config.json>
     [--verbose]
 ```
 
+`plan variants` (`planners/variants_cmd.py`) builds the two variant files
+the run-config's `variant_map` / `variant_masters` keys point at, from the
+plant's variant table (see `products/variants.py`):
+
+```
+plan variants <input-dir>            # holds greige-styles.json + greige-variants.tsv
+    [--styles PATH] [--variants PATH]
+    [--out-dir DIR]                  # default: <input-dir>
+    [--rl-tolerance N] [--skip-master ID ...]
+    [--quiet]
+```
+
+It writes `greige-variant-map.json`, `greige-variant-masters.json` and the
+audit report `greige-variants-report.txt`, and prints the report unless
+`--quiet`. Re-run it whenever the styles file or the variant table changes —
+the planner reads the generated files as they are, and a machines entry
+whose variant maps to a master no longer in the styles falls to `NONE`.
+
+`plan manual <config.json> <steps.json> [--output-dir DIR]`
+(`planners/manual_cmd.py`) rebuilds a hand-made schedule from a step file
+on the same run-config and writes `manual_schedule_<start date>.json` in the
+schedule-JSON format — see `planners/manual/DESIGN.md`.
+
+`plan machines <runtime-export.json> <input-dir> [--out PATH] [--base PATH]`
+(`planners/machines_cmd.py`) converts the plant's runtime export — per
+machine `HH:MM` of running time left on each bar's set (excluding stops),
+racks left on the roll in progress, and optionally the variant running and
+the mounted set numbers — into a machines JSON (default
+`<input-dir>/machines-new.json`). What the export leaves out comes from a
+**base** machines file (`--base`, defaulting to the output file when it
+exists): its `init_item` and its `init_top_set` / `init_btm_set` objects
+are carried over verbatim, so refreshing the runtime numbers never loses
+the plant's merge and vendor for the mounted sets; base machines the export
+omits are kept unchanged.
+Pounds come from the variant table and the knit-machine master: racks/hour
+= rpm × 60 / 480; lbs/rack = `rack_wt` / 100; a bar's lbs = hours × racks/hour
+× lbs/rack × that bar's share of the weight (bars grouped by merge, the
+group holding bar 1 being the bottom); roll lbs = racks-to-doff × lbs/rack.
+Re-run it whenever the floor data is refreshed; it is the source of the
+`init_*` fields the machines loader reads. It writes the mounted sets in the
+bare set-number form; a machines file produced by the plant's own tooling
+may instead give `{"set_no", "merge", "vendor"}` objects, which the loader
+also accepts (see `schedule/DESIGN.md`, File I/O).
+
+The input resolution is shared: `run.load_config(config)` /
+`run.load_inputs(cfg, config_dir, start_date=…, overrides=…)` return an
+`Inputs` record (greiges, variant files, inventory, workcal, demand,
+machines, weights), used by `plan infinite` and by the manual scheduler so a
+config loads identically in both.
+
 ### Run-config JSON
 
-A top-level object with six required keys, plus an optional `database`
-block:
+A top-level object with six required keys, plus optional `variant_masters`,
+`variant_map`, `beam_sets` and `database` entries:
 
 ```
 {
-    "start_date": "YYYY-MM-DD",                # always inline
+    "start_date": "YYYY-MM-DD[ HH:MM:SS]",     # always inline; local time; a
+                                               # bare date means midnight
     "products":   <path-string | list of greige objects>,
     "workcal":    <path-string | workcal object>,
     "machines":   <path-string | list of machine objects>,
+    "variant_masters": <path-string | {variant name: master id}>,
+                                               # optional; lets `machines`
+                                               # name plant variants in
+                                               # `init_item` (see
+                                               # schedule/DESIGN.md, File I/O)
+    "variant_map": <path-string>,              # optional; the per-master
+                                               # merge-combination -> variant
+                                               # file (products.variants)
+    "beam_sets":  <path-string | list of beam-set objects>,
+                                               # optional; the plant's beam-set
+                                               # inventory (products.read_beam_sets):
+                                               # set_no, merge, vendor, received,
+                                               # lbs, beams, ends, denier, luster,
+                                               # desc, assigned
+    "assigned_sets": <path-string | list of {set_no, merge, vendor, machine, bar}>,
+                                               # optional; sets staged at a
+                                               # machine bar, not yet threaded —
+                                               # that bar's queue (see
+                                               # schedule/DESIGN.md)
     "demand":     <path-string | list of demand objects>,
     "weights":    <path-string | weights object>,
     "database":   <db-config object>           # optional; only used with --verbose
 }
 ```
+
+**Clock.** The planner's clock is the plant's **local time**: `start_date`,
+the export's `received` dates, every activity time and the xlsx report are
+all local wall-clock time, and the working calendar's days, weekends and
+holidays are local days (its `cal_shift` is not a time-zone offset but
+where the plant's day begins relative to midnight — see `support.workcal`).
+The plant's systems store timestamps in **UTC**: an export's timestamps
+must be converted to local time before the planner reads them (for now on
+the input files themselves; doing it in the loaders is the intended next
+step), and the schedule JSON converts back to UTC on the way out (see
+"Schedule JSON").
+
+A greige object's `machine_rates` are lbs per hour of *running* time and
+already include the plant's **85% running efficiency**: `rate = rpm × 60 /
+480 revs per rack × rack_wt / 100 × 0.85`, with the machine's rpm from the
+knit-machine master (its `wide` rpm for styles 200" or wider). Unplanned
+stops — a defect, waiting for a fixer — are what the 0.85 stands for;
+planned stops (doffs, threading, changeovers) are separate activities.
+
+`variant_masters` is the variant -> master translation written by
+`products.variants.write_variant_masters` (built from the plant's variant
+table). Without it, an `init_item` that is not a master id resolves to
+the `NONE` greige.
+
+`variant_map` (written by `products.variants.write_variant_map`) is what
+lets the schedule name the exact variant a knit produces: it supplies the
+merges on each machine's initial bars (from the `init_item` variant) and is
+handed to every `Machine`, which stamps `Knit.variant` from the merges on
+its bars. `beam_sets` is the inventory export; each set is labelled through
+the `variant_map`'s merge table (`products.read_beam_sets`), keeps its
+`vendor`, and enters the planner's stock available from its `received`
+timestamp (`YYYY-MM-DD HH:MM:SS[.fff]`, local time — see "Clock") — so an export
+newer than `start_date` puts sets received in between into stock at the
+moment they arrived, and a record without `received` is on hand from
+`start_date`. Both are optional: without them the planner invents every
+beam set it hangs (as before) and no knit carries a variant.
 
 Every required key except `start_date` can hold **either** a string (a path
 to a JSON file with the same shape that the per-input loader would
@@ -880,7 +1003,11 @@ resolved `start_date`. Seven sheets:
   - `remaining` — `demand - covered_on_hand`, the demand production must
     still place after initial inventory
 - `schedule` — multi-indexed by `(machine, activity_id)`, every
-  activity across all machines.
+  activity across all machines. The `desc` cell names physical beam sets
+  where an activity touches one: a `Hanging` / `TapeOut` / `Waste` shows,
+  per bar, the set's planner label, set number and merge (an invented set
+  reads `NEW…` with no merge), a `Hanging` also the lbs hung and a `TapeOut`
+  the lbs returned; a `Knit` shows the item and, when known, its variant.
 - `collapsed_sched` — a higher-level, operator-facing view of the same
   per-machine activity schedule, with consecutive activities folded into
   coarse steps (see "Collapsed schedule" below).
@@ -902,6 +1029,10 @@ resolved `start_date`. Seven sheets:
   - `knit_id` — the `Knit` activity's id
   - `knit_lbs` — the lbs that `Knit` wound (a roll straddling a beam swap
     has two knit rows whose `knit_lbs` sum to the roll's lbs)
+  - `variant` — `Knit.variant`: the plant variant the merges on the two
+    bars identify (comma-separated names when several share the recipe);
+    **blank** when a bar's set has no known merge or the pair matches no
+    recipe — the knit is then for the generic master only
   - `order_id` — the order this roll **actually fills**, looked up from the
     item's `safety_view.roll_order_links` by roll identity; **blank** when
     the roll reached no order (its lbs went entirely to excess). Distinct
@@ -927,6 +1058,47 @@ an in-memory `DebugLog` audit trail during the run — see "Verbose
 audit log" below.
 
 See `report.py` for the per-sheet layouts.
+
+#### Schedule JSON
+
+Alongside the xlsx, the CLI writes the schedule as JSON (same stem,
+`.json`; `schedule_json.py`, `write_schedule_json(report, path)`) — the
+machine-readable hand-off of the plan. A list of machine objects:
+
+```
+[{"id": "<machine>", "schedule": [<job | orphaned activity>, ...]}, ...]
+```
+
+`schedule` is chronological and every entry carries `kind` and `id`. A
+**job** (`kind: "job"`) is placed at its first activity's start and holds
+`item`, `tgt_order`, `start`, `end`, `total_lbs`, `rolls` and `activities`
+(its `Job.activities` — see `schedule/DESIGN.md` "Job activities"). A roll
+has a derived `id` `<job id>-R<n>` (1-based within the job; `Roll` has no id
+of its own), `item`, `variants` (the distinct `Knit.variant` values of its
+knits, in order, empty when none is known — a roll straddling a beam swap
+can be wound by knits of different variants), `lbs`, `completion_time` and
+`knits` (ids of the knits that wound it, which appear in the job's
+`activities`). An **orphaned activity** — one no job claims: `Idle`,
+`Waste`, a first tape-out with no prior job — appears as a schedule entry
+in its own right.
+
+An activity object is `kind` (the class name), `id`, `start`, `end`, then
+the type's own fields: `Knit` → `item`, `lbs`, `variant`; `Waste` → `beam`,
+`bar`, `lbs`; `TapeOut` / `Hanging` → `bars`, `top_beam`, `btm_beam` (null
+for an untouched bar); `Threading` → `bars`; the changeovers → `from_item`,
+`to_item`; `Doff` / `Idle` nothing more. A `Greige` reduces to its id; a
+`BeamSet` to `{"set_no", "merge", "vendor", "desc", "lbs"}` (`merge` and
+`vendor` null for an invented set; `lbs` is the set's pounds at that moment
+— hung on a `Hanging`, returned to stock on a `TapeOut`). Datetimes are
+written the way the plant's systems store them: **UTC**, `YYYY-MM-DD
+HH:MM:SS`, whole seconds. The planner's clock is plant local time (see
+"Clock"), so the writer converts every timestamp through the plant's zone
+(`schedule_json.PLANT_TZ`, America/New_York — daylight saving handled
+per timestamp) and truncates the microseconds that rate arithmetic leaves
+behind, so a job's `end` and the next activity's `start` still agree.
+
+`PlanReport.jobs_by_machine` (each machine's `Machine.jobs`, in commit
+order) is what pairs the jobs with the machine's activity schedule.
 
 #### Collapsed schedule (`collapsed_sched`)
 

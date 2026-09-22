@@ -172,11 +172,26 @@ class WorkCal:
         else:
             if h > self._day_end:
                 return midnight + timedelta(hours=self._day_end)
-            if h < self._day_start:
+            if h < self._day_start or (h == 0 and self._day_end >= 24):
+                # Below the day's window — or, on a round-the-clock calendar,
+                # exactly at midnight, which going backward is the end of the
+                # previous working day (see `_day_of`).
                 prev_d = self.snap_to_work_date(d - timedelta(days=1), direction=-1)
                 md = datetime(prev_d.year, prev_d.month, prev_d.day)
                 return md + timedelta(hours=self._day_end)
         return dt
+
+    def _day_of(self, current: datetime, direction: int) -> date:
+        """The calendar day whose working window `current` belongs to. Going
+        backward, a time exactly at midnight on a calendar whose day ends at
+        24:00 is the *end of the previous day* (that is where a backward
+        step lands when it crosses a day boundary); taking it as hour 0 of
+        the new day would find no hours available and never advance."""
+        d = current.date()
+        if (direction == -1 and self._day_end >= 24
+                and current == datetime(d.year, d.month, d.day)):
+            d -= timedelta(days=1)
+        return d
 
     def get_work_hours_between(self, start: datetime, end: datetime) -> float:
         start -= self._cal_shift
@@ -198,9 +213,11 @@ class WorkCal:
         return total
     
     def work_hours_before_weekend(self, start: datetime) -> float:
-        start -= self._cal_shift
-        end = start.date() + timedelta(days=7 - start.weekday())
-        end = datetime(end.year, end.month, end.day)
+        # Find the coming Monday in local time, then hand both ends back in
+        # the caller's clock (get_work_hours_between shifts them itself).
+        local = start - self._cal_shift
+        end = local.date() + timedelta(days=7 - local.weekday())
+        end = datetime(end.year, end.month, end.day) + self._cal_shift
         return self.get_work_hours_between(start, end)
 
     def offset_work_hours(self, start: datetime, hours: float):
@@ -209,13 +226,13 @@ class WorkCal:
         current = self._snap_to_work_datetime(start, direction)
         remaining = abs(hours)
         while remaining > 0:
-            d = current.date()
+            d = self._day_of(current, direction)
             midnight = datetime(d.year, d.month, d.day)
             h = (current - midnight).total_seconds() / 3600
             if direction == 1:
                 available = self._day_end - h
                 if remaining <= available:
-                    return current + timedelta(hours=remaining) - self._cal_shift
+                    return current + timedelta(hours=remaining) + self._cal_shift
                 remaining -= available
                 next_d = self.snap_to_work_date(d + timedelta(days=1), direction=1)
                 current = datetime(next_d.year, next_d.month, next_d.day) \
@@ -223,7 +240,7 @@ class WorkCal:
             else:
                 available = h - self._day_start
                 if remaining <= available:
-                    return current - timedelta(hours=remaining) - self._cal_shift
+                    return current - timedelta(hours=remaining) + self._cal_shift
                 remaining -= available
                 prev_d = self.snap_to_work_date(d - timedelta(days=1), direction=-1)
                 current = datetime(prev_d.year, prev_d.month, prev_d.day) \

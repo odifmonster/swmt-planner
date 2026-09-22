@@ -11,6 +11,7 @@ from .activity import (
 )
 from .job import Roll, Job
 from .machine import Status, Machine, ProductionPlan, fresh_beam_lbs
+from .inventory import Inventory, InventoryView, build_inventory, worth_stocking
 from .io import read_machines, machines_from_list
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     'DOFF_DURATION',
     'STYLE_CHANGE_DURATION', 'RUNNER_CHANGE_DURATION', 'PATTERN_CHANGE_DURATION',
     'Status', 'Machine', 'ProductionPlan', 'fresh_beam_lbs',
+    'Inventory', 'InventoryView', 'build_inventory', 'worth_stocking',
     'read_machines', 'machines_from_list',
 ]

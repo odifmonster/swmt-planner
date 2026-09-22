@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Iterable, TYPE_CHECKING
 
 from swmtplanner.support import HasID
 
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
-    from swmtplanner.schedule.activity import Knit
+    from swmtplanner.schedule.activity import Activity, Knit
 
 
 def _make_id_counter():
@@ -55,15 +55,31 @@ class Job(HasID[str]):
     `Job` not raised against any particular order (e.g. a `'next_runout'`
     run-up `Job`). It is the caller's intent at planning time, *not* the
     order the `Job` actually fills — that is resolved by priority in the
-    demand layer's `SafetyAwareView`, never stored here."""
+    demand layer's `SafetyAwareView`, never stored here.
+
+    `activities` is the machine time the job accounts for, in schedule
+    order: the setup that prepared its item (re-threads, the changeover),
+    its knits and doffs, and — appended later, when the *next* plan changes
+    item — the `TapeOut` that took its sets off. `Idle` and `Waste` belong
+    to no job. See "Job activities" in `schedule/DESIGN.md`. Since a `Job`
+    is immutable, a later plan that adds to a committed job's activities
+    recreates it with `with_activities` (same id) and the commit swaps the
+    copies."""
     item: 'Greige'
     rolls: tuple[Roll, ...] = ()
     tgt_order: str | None = None
-    _count: int = field(default_factory=_JOB_ID, init=False)
+    activities: tuple['Activity', ...] = ()
+    # init=True (with a default) so `dataclasses.replace` preserves the id.
+    _count: int = field(default_factory=_JOB_ID, repr=False)
 
     @property
     def id(self) -> str:
         return f'JOB{self._count:08}'
+
+    def with_activities(self, extra: Iterable['Activity']) -> 'Job':
+        """This job (same id, rolls, target) with `extra` appended to its
+        activities — how a later plan attaches the tape-out that ends it."""
+        return replace(self, activities=self.activities + tuple(extra))
 
     @property
     def total_rolls(self) -> int:

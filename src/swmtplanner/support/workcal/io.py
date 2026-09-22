@@ -28,8 +28,11 @@ def workcal_from_dict(
       without a base directory is an error.
 
     Other fields: `work_days` (list of weekday ints, Mon=0), `day_start`
-    / `day_end` (hour-of-day ints), `cal_shift` (optional, defaults to
-    0). `source` is woven into error messages for context."""
+    / `day_end` (hour-of-day ints), `cal_shift` (optional, defaults to 0:
+    hours the calendar day is offset from local midnight — -1 when the
+    first shift starts 11 pm the evening before, 8 for an 8 am–4 pm day —
+    which is where the weekend begins). `source` is woven into error
+    messages for context."""
     if not isinstance(cfg, dict):
         raise TypeError(f'{source} must be an object')
 

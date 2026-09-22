@@ -80,6 +80,8 @@ def enumerate_candidates(state: State) -> list[Move]:
     out: list[Move] = []
     for dp in decision_points:
         machine = state.machines[dp.machine_id]
+        if dp.machine_id == 'E7':
+            print('checking an E7 dp')
         for order in orders:
             if not order.item.can_run_on_mchn(dp.machine_id):
                 continue
@@ -127,7 +129,7 @@ def enumerate_candidates(state: State) -> list[Move]:
             # artificially excluded from contention. The decision-
             # window mechanism still spreads work across machines.
             producible_cap = _producible_cap_with_bumpup(
-                machine, order.item, effective_start,
+                machine, order.item, effective_start, state.inventory,
             )
 
             # Round min(order_lbs, producible_cap) down to whole rolls.
@@ -149,6 +151,7 @@ def enumerate_candidates(state: State) -> list[Move]:
                 start_at=dp.start_at,
                 idle_for=idle_for,
                 tgt_order=order.order_id,
+                inventory=state.inventory,
             )
 
             out.append(Move(
@@ -180,7 +183,7 @@ def _end_of_iso_week(t: datetime) -> datetime:
 
 
 def _producible_cap_with_bumpup(
-    machine, item, effective_start: datetime,
+    machine, item, effective_start: datetime, inventory=None,
 ) -> float:
     """Producible lbs from `effective_start` through the end of its
     ISO week, with one-week bump-up when that window can't fit a
@@ -199,10 +202,12 @@ def _producible_cap_with_bumpup(
     current_week_end = _end_of_iso_week(effective_start)
     cap = machine.producible_lbs_through(
         item, end=current_week_end, start=effective_start,
+        inventory=inventory,
     )
     if cap > 0:
         return cap
     next_week_end = current_week_end + timedelta(days=7)
     return machine.producible_lbs_through(
         item, end=next_week_end, start=effective_start,
+        inventory=inventory,
     )

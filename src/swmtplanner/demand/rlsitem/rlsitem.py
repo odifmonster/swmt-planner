@@ -150,6 +150,16 @@ class RlsItem(HasID[str]):
             self._jobs.insert(idx, job)
         self._recompute_views()
 
+    def unregister_jobs(self, jobs: list['Job']):
+        """Remove each of `jobs` (matched by id) from the internal job list,
+        then re-run both views' `recompute` once. Exists so a committed job
+        can be *replaced* by a recreated copy carrying more activities (see
+        `Job.with_activities`): unregister the old, register the new. A job
+        not present is ignored."""
+        ids = {job.id for job in jobs}
+        self._jobs = [j for j in self._jobs if j.id not in ids]
+        self._recompute_views()
+
     def cost_if(self, jobs: list['Job'], detail_sink=None):
         """Return the `CostComponents` that would result if `jobs` were
         registered, without mutating any state. Empty `jobs` returns the

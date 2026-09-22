@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta
 
-from swmtplanner.products import Greige, BeamSet
+from swmtplanner.products import Greige, BeamSet, BeamSetDesc
 from swmtplanner.schedule import (
     Machine, Status, Knit, Job, Roll, Waste, Doff, TapeOut,
     Hanging, Threading, StyleChange, RunnerChange, PatternChange, Idle,
@@ -52,10 +52,24 @@ _ITEM_C = Greige(
     safety=900.0, machines={'M1': 50.0},
 )
 
-_TOP_BEAM = BeamSet('40D BLACK 1000X4')
-_BTM_BEAM = BeamSet('60D WHITE 1000X4')
-_ALT_TOP_BEAM = BeamSet('30D RED 1000X4')
-_ALT_BTM_BEAM = BeamSet('90D GREEN 1000X4')
+# Physical sets for the initial bars and the manual beam-swap tests. Their
+# `lbs` only matter where a `Hanging` loads them (see `_with_lbs`); the
+# machine's initial lbs come from the constructor's `init_*_lbs`.
+_FIXTURE_DATE = datetime(2026, 1, 1)
+_TOP_BEAM = BeamSet.new(BeamSetDesc('40D BLACK 1000X4'), 200.0, _FIXTURE_DATE)
+_BTM_BEAM = BeamSet.new(BeamSetDesc('60D WHITE 1000X4'), 300.0, _FIXTURE_DATE)
+_ALT_TOP_BEAM = BeamSet.new(BeamSetDesc('30D RED 1000X4'), 500.0, _FIXTURE_DATE)
+_ALT_BTM_BEAM = BeamSet.new(BeamSetDesc('90D GREEN 1000X4'), 400.0, _FIXTURE_DATE)
+
+
+def _with_lbs(beam: BeamSet, lbs: float) -> BeamSet:
+    """The fixture set carrying `lbs` — what a `Hanging` loads onto a bar."""
+    return beam.returned(lbs, beam.avail_date)
+
+
+def _hung_lbs(beam: BeamSet | None) -> float:
+    """Lbs a `Hanging` puts on a bar (0.0 for a bar it doesn't touch)."""
+    return beam.lbs if beam is not None else 0.0
 
 # 2026-05-18 is a Monday — keeps the weekday-workcal test simple.
 _START = datetime(2026, 5, 18, 9, 0)
@@ -269,7 +283,7 @@ class ActivityStatusUpdateTests(unittest.TestCase):
         end = _START + timedelta(hours=1)
         s = pre.apply_activity(Hanging(
             start=_START, end=end, bars='top',
-            top_beam=_ALT_TOP_BEAM, top_lbs=500.0,
+            top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0),
         ))
         self._expect(
             s, as_of=end, current_item=_ITEM_A, is_idle=True,
@@ -286,7 +300,7 @@ class ActivityStatusUpdateTests(unittest.TestCase):
         end = _START + timedelta(hours=1)
         s = pre.apply_activity(Hanging(
             start=_START, end=end, bars='btm',
-            btm_beam=_ALT_BTM_BEAM, btm_lbs=400.0,
+            btm_beam=_with_lbs(_ALT_BTM_BEAM, 400.0),
         ))
         self._expect(
             s, as_of=end, current_item=_ITEM_A, is_idle=True,
@@ -303,8 +317,8 @@ class ActivityStatusUpdateTests(unittest.TestCase):
         end = _START + timedelta(hours=1)
         s = pre.apply_activity(Hanging(
             start=_START, end=end, bars='both',
-            top_beam=_ALT_TOP_BEAM, top_lbs=500.0,
-            btm_beam=_ALT_BTM_BEAM, btm_lbs=400.0,
+            top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0),
+            btm_beam=_with_lbs(_ALT_BTM_BEAM, 400.0),
         ))
         self._expect(
             s, as_of=end, current_item=_ITEM_A, is_idle=True,
@@ -461,8 +475,8 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         m.add_activities([
             TapeOut(start=t0, end=t1, bars='both'),
             Hanging(start=t1, end=t2, bars='both',
-                    top_beam=_ALT_TOP_BEAM, top_lbs=400.0,
-                    btm_beam=_ALT_BTM_BEAM, btm_lbs=600.0),
+                    top_beam=_with_lbs(_ALT_TOP_BEAM, 400.0),
+                    btm_beam=_with_lbs(_ALT_BTM_BEAM, 600.0)),
             Threading(start=t2, end=t3, bars='both'),
             StyleChange(start=t3, end=t4,
                         from_item=_ITEM_A, to_item=_ITEM_C),
@@ -518,7 +532,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
     def test_hanging_allowed_when_beam_is_none(self):
         pre = _status((None, 0.0, False), (_BTM_BEAM, 300.0, True))
         s = pre.apply_activity(Hanging(start=_START, end=self._end(), bars='top',
-                                       top_beam=_ALT_TOP_BEAM, top_lbs=500.0))
+                                       top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)))
         self.assertEqual(s.beam('top'), _ALT_TOP_BEAM)
         self.assertEqual(s.lbs_remaining('top'), 500.0)
         self.assertFalse(s.threaded('top'))
@@ -527,7 +541,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         # Beam still mounted but knit down to the floor -> removed.
         pre = _status((_TOP_BEAM, BEAM_FLOOR_LBS, True), (_BTM_BEAM, 300.0, True))
         s = pre.apply_activity(Hanging(start=_START, end=self._end(), bars='top',
-                                       top_beam=_ALT_TOP_BEAM, top_lbs=500.0))
+                                       top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)))
         self.assertEqual(s.beam('top'), _ALT_TOP_BEAM)
         self.assertFalse(s.threaded('top'))
 
@@ -537,16 +551,14 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         pre = _status((_TOP_BEAM, 200.0, True), (_BTM_BEAM, 300.0, True))
         with self.assertRaises(ValueError):
             pre.apply_activity(Hanging(start=_START, end=self._end(),
-                                       bars='top', top_beam=_ALT_TOP_BEAM,
-                                       top_lbs=500.0))
+                                       bars='top', top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)))
 
     def test_hanging_raises_when_bar_already_hung(self):
         # A second Hanging before the Threading: the bar is hung, not removed.
         pre = _status((_ALT_TOP_BEAM, 500.0, False), (_BTM_BEAM, 300.0, True))
         with self.assertRaises(ValueError):
             pre.apply_activity(Hanging(start=_START, end=self._end(),
-                                       bars='top', top_beam=_ALT_TOP_BEAM,
-                                       top_lbs=500.0))
+                                       bars='top', top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)))
 
     # Hanging('both') checks both bars.
 
@@ -554,8 +566,8 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         pre = _status((None, 0.0, False), (None, 0.0, False))
         s = pre.apply_activity(Hanging(start=_START, end=self._end(),
                                        bars='both',
-                                       top_beam=_ALT_TOP_BEAM, top_lbs=500.0,
-                                       btm_beam=_ALT_BTM_BEAM, btm_lbs=400.0))
+                                       top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0),
+                                       btm_beam=_with_lbs(_ALT_BTM_BEAM, 400.0)))
         self.assertEqual(s.beam('top'), _ALT_TOP_BEAM)
         self.assertEqual(s.beam('btm'), _ALT_BTM_BEAM)
         self.assertFalse(s.threaded('top'))
@@ -563,8 +575,8 @@ class AddActivitiesSequencingTests(unittest.TestCase):
 
     def _hang_both(self):
         return Hanging(start=_START, end=self._end(), bars='both',
-                       top_beam=_ALT_TOP_BEAM, top_lbs=500.0,
-                       btm_beam=_ALT_BTM_BEAM, btm_lbs=400.0)
+                       top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0),
+                       btm_beam=_with_lbs(_ALT_BTM_BEAM, 400.0))
 
     def test_hanging_both_raises_when_one_bar_has_usable_set(self):
         # Both arrangements: the guard fails on whichever bar is not removed.
@@ -638,7 +650,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         m.add_activities([
             TapeOut(start=t0, end=t1, bars='top'),
             Hanging(start=t1, end=t2, bars='top',
-                    top_beam=_ALT_TOP_BEAM, top_lbs=500.0),
+                    top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)),
             Threading(start=t2, end=t3, bars='top'),
         ])
         s = m.current_status
@@ -667,9 +679,9 @@ class AddActivitiesSequencingTests(unittest.TestCase):
             m.add_activities([
                 TapeOut(start=t0, end=t1, bars='top'),
                 Hanging(start=t1, end=t2, bars='top',
-                        top_beam=_ALT_TOP_BEAM, top_lbs=500.0),
+                        top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)),
                 Hanging(start=t2, end=t3, bars='top',
-                        top_beam=_ALT_TOP_BEAM, top_lbs=500.0),
+                        top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)),
             ])
 
     def test_sequence_post_waste_succeeds(self):
@@ -682,7 +694,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         m.add_activities([
             Waste(start=t0, end=t0, beam=_TOP_BEAM, bar='top', lbs=195.0),
             Hanging(start=t0, end=t1, bars='top',
-                    top_beam=_ALT_TOP_BEAM, top_lbs=500.0),
+                    top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)),
             Threading(start=t1, end=t2, bars='top'),
         ])
         s = m.current_status
@@ -711,7 +723,7 @@ class AddActivitiesSequencingTests(unittest.TestCase):
         m.add_activities([
             Knit(start=t0, end=t1, item=_ITEM_A, lbs=487.5),
             Hanging(start=t1, end=t2, bars='top',
-                    top_beam=_ALT_TOP_BEAM, top_lbs=500.0),
+                    top_beam=_with_lbs(_ALT_TOP_BEAM, 500.0)),
             Threading(start=t2, end=t3, bars='top'),
         ])
         s = m.current_status
@@ -856,7 +868,7 @@ class NextRunoutTests(unittest.TestCase):
         m.add_activities([
             TapeOut(start=t0, end=t1, bars='top'),
             Hanging(start=t1, end=t2, bars='top',
-                    top_beam=_TOP_BEAM, top_lbs=500.0),
+                    top_beam=_with_lbs(_TOP_BEAM, 500.0)),
             Threading(start=t2, end=t3, bars='top'),
         ])
         self.assertEqual(m.next_runout,
@@ -979,11 +991,11 @@ def _shape(plan):
         elif isinstance(a, Doff):
             out.append(('Doff',))
         elif isinstance(a, Waste):
-            out.append(('Waste', a.bar, a.lbs, a.beam.id))
+            out.append(('Waste', a.bar, a.lbs, a.beam.desc.id))
         elif isinstance(a, TapeOut):
             out.append(('TapeOut', a.bars))
         elif isinstance(a, Hanging):
-            out.append(('Hanging', a.bars, a.top_lbs, a.btm_lbs))
+            out.append(('Hanging', a.bars, _hung_lbs(a.top_beam), _hung_lbs(a.btm_beam)))
         elif isinstance(a, Threading):
             out.append(('Threading', a.bars))
         elif isinstance(a, _CHANGEOVERS):

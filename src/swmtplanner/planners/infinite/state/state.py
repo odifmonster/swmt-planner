@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, TYPE_CHECKING
 
-from swmtplanner.schedule import Job, ProductionPlan
+from swmtplanner.schedule import Job, ProductionPlan, Inventory
 
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
@@ -54,7 +54,8 @@ class State:
 
     - `commit_move` applies a chosen `Move` by updating the underlying
       `Machine` (via `add_activities`) and the relevant `RlsItem`(s)
-      (via `register_jobs`) in lockstep.
+      (via `register_jobs`) in lockstep, then the beam-set `inventory`
+      (the plan's sets taken leave it, its sets returned re-enter it).
     - `advance_window` extends `window_end` forward by
       `window_advance_amount`, admitting additional decisions into the
       candidate pool.
@@ -64,6 +65,12 @@ class State:
     rls_items: dict[str, 'RlsItem']
     start_date: datetime
     window_end: datetime
+    # The plant's beam-set stock, keyed by physical description (see
+    # `schedule/DESIGN.md`, "Beam-set inventory"). Candidate plans read it
+    # (`Machine.plan_production(..., inventory=)`) and never mutate it; only
+    # `commit_move` changes it. Empty when the run has no `beam_sets` input,
+    # in which case every hang invents a set.
+    inventory: Inventory = field(default_factory=dict)
     # Tuneable: the right value depends on plant size + planning load.
     # 24h is a placeholder; refined after testing per DESIGN.md.
     window_advance_amount: timedelta = field(
@@ -113,10 +120,25 @@ class State:
         same `Job` records are grouped by `job.item.id` and submitted to
         each `RlsItem` as a batch via `register_jobs` — matching the
         contract documented in `demand/DESIGN.md` and
-        `schedule/DESIGN.md`."""
+        `schedule/DESIGN.md`. Finally the plan's inventory effect is
+        applied: each set in `beam_sets_taken` is removed from its physical
+        description's stock (matched by set id) and each in
+        `beam_sets_returned` — a taped-out set with its remaining lbs and
+        new `avail_date` — is added back.
+
+        When the plan carries a `replaced_job` (the machine's last job
+        recreated with this plan's tape-out appended), the machine swaps it
+        in and the job's demand item unregisters the old copy and registers
+        the new one, so both sides keep referring to the same `Job`."""
         machine = self.machines[move.machine_id]
-        machine.add_activities(move.plan.activities)
-        machine.add_jobs(move.plan.jobs)
+        replaced = move.plan.replaced_job
+        old = machine.jobs[-1] if replaced is not None else None
+        machine.commit_plan(move.plan)
+
+        if replaced is not None and replaced.item.id in self.rls_items:
+            rls = self.rls_items[replaced.item.id]
+            rls.unregister_jobs([old])
+            rls.register_jobs([replaced])
 
         jobs_by_item: dict[str, list[Job]] = {}
         for job in move.plan.jobs:
@@ -125,6 +147,15 @@ class State:
         for item_id, jobs in jobs_by_item.items():
             if item_id not in self.rls_items: continue
             self.rls_items[item_id].register_jobs(jobs)
+
+        for bs in move.plan.beam_sets_taken:
+            stock = self.inventory.get(bs.desc.physical, [])
+            for i, held in enumerate(stock):
+                if held.id == bs.id:
+                    del stock[i]
+                    break
+        for bs in move.plan.beam_sets_returned:
+            self.inventory.setdefault(bs.desc.physical, []).append(bs)
 
     def advance_window(self) -> None:
         """Extend `window_end` forward by `window_advance_amount`. Called
