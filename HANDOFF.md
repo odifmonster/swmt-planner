@@ -22,30 +22,85 @@ all four.
 Progress by module:
 
 - **`support/workcal/`** — complete. `holiday` submodule + the `WorkCal` class.
-- **`core/product/`** — complete. `greige` + `fabric` submodules.
+- **`core/product/`** — `fabric` complete. **Mid-refactor** of the greige side to
+  match how styles are actually defined in the company database (see "Greige
+  restructure" below): now three submodules, `yarn` + `greige` + `fabric`.
+  - `yarn` (new) — **designed and implemented** (code + stubs): `Yarn` and
+    `BeamSetItem`, both `HasID[str]` with ids built from their other properties,
+    plus the `LUSTER_CODES` / `MATERIAL_CODES` / `ATTR_CODES` maps that the ids
+    are coded from. Coverage + tests pending.
+  - `greige` — **designed, not yet implemented.** `BarConfig` replaces
+    `BeamConfig` in `greige.py` (`bset` / `pct` / `stitch` / `thread`), and
+    `Greige` swaps `top` / `bottom` for `n_bars` + 1-based `bar(i)`, keeping
+    `id` / `tgt_wt` / `safety` / `pattern` / `alt_names`. `translation.py` is
+    unaffected. Coverage + tests pending.
+  - `Product` now includes `BeamSetItem` (the warping plant plans against beam
+    sets); `Yarn` is deliberately excluded as an ingredient rather than a
+    planned product.
 - **`core/materials/`** — complete. `rawmat` + `inventory` submodules (`inventory`
-  has its own `DESIGN.md`).
+  has its own `DESIGN.md`). `DyeLot.freeze()` added (through all four phases):
+  once frozen, `add` / `remove` / setting `fabric` raise `RuntimeError`.
 - **`core/demand/`** — complete. `requirement` + `view` submodules, plus
   module-level `Chunk` and the top-level `RlsItem`. All generic on `Product`.
-- **`core/schedule/`** and **`core/debuglog/`** — not started (undesigned).
+  Now also pushes priorities back onto the schedule: `Chunk` implements
+  `HasID[int]`, `RlsItem` keeps a chunk → source-`Job` map
+  (`register_chunk(chunk, job=None)`), and each `recompute` clears every
+  mapped job's `priority` and rewrites it from the `(chunk, priority)` pairs
+  `SafetyView.recompute` now returns (covered in 2.2.3 / 2.2.4 / 3.3).
+- **`core/schedule/`** — fully **designed**: the `activity` submodule in
+  `schedule/DESIGN.md`, the `machine` submodule in its own
+  `machine/DESIGN.md` (`State` / `Machine` bases, `JetState`, `JetUpdate`,
+  `ShadeSeq`, `Jet`). The `activity` submodule is **implemented** (code +
+  stubs: `Priority`, `Activity`, `Idle`, `DyeCycle` / `EmptyCycle` /
+  `StripCycle`, `Job` / `DyeJob`, cycle-time constant/function) — it was
+  implemented early so `demand` could use `Job` / `Priority`; its own
+  coverage + tests are deliberately still pending. `machine` is not
+  implemented.
+- **`core/debuglog/`** — not started (undesigned).
 
 Cross-cutting notes:
 
-- **Deferred types.** `JetState` (read by `Color.get_needed_strip`) and `Job`
-  (converted by `RlsItem.register_job`) both belong to `core/schedule`; `product`
-  and `demand` reference only their documented interfaces until it is designed.
-- **`__init__` curation.** `core/__init__` now surfaces `product` + `materials`
-  + `demand`; `swmtplanner/__init__` still exposes only `support`, left for the
-  user to curate as modules finish.
-- Full suite passes (**184 tests**). Test-method docstrings cite their
+- **Deferred types, updated.** `Job` now exists (`schedule.activity`) and
+  `demand` uses it; `RlsItem.register_job` remains the abstract job → `Chunk`
+  hook (a test-only conversion lives on the tests' `FabRlsItem`). `JetState`
+  is designed (`machine/DESIGN.md`) but not implemented;
+  `Color.get_needed_strip` still references only its documented interface.
+- **`__init__` curation.** `core/__init__` surfaces `product` + `materials` +
+  `demand`; `product/__init__` now surfaces `yarn` + `Yarn` + `BeamSetItem`
+  alongside `greige` / `fabric`; `schedule/__init__` re-exports `activity`, but
+  `schedule` is not yet surfaced in `core/__init__`; `swmtplanner/__init__`
+  still exposes only `support`. Left for the user to curate as modules finish.
+- **Greige restructure — source data.** The greige styles are now derived from a
+  SQL export of the company database (`greige_variants.tsv` in
+  `../plan-input-files/`, one row per style *variant*) plus `greige-targets.json`
+  (the master style list, with `alt_names` / `tgt_wt` / `safety`) and
+  `knit-machine-master.json`. The old `greige-styles.json` is **superseded and no
+  longer used** — it was not derived from the database, and where the two
+  disagree the TSV wins. Deriving one master style from its many variants needs a
+  specific set of normalisation and resolution rules (yarn-spec normalisation,
+  construction matching, dominant-stitch filtering, averaging of measured
+  values); those rules are settled but **not yet written into any design
+  document** — they belong with the loader at the `app` layer, which is
+  undesigned. A working reference implementation lives outside the repo in the
+  session scratchpad, so this needs writing up before the loader is built.
+  Unresolvable styles should warn and be skipped, not abort the run.
+- **Parked design question.** `Priority.value` is currently
+  `int | str | None` (`None` = cleared / entirely-excess). The user started
+  to refine this (restrict `value` to `int | str`, with `Job.priority` itself
+  becoming `None`-able) and set it aside — revisit before implementing
+  `machine`'s priority comparisons.
+- Full suite passes (**213 tests**). Test-method docstrings cite their
   `COVERAGE.md` numbers.
 
 Run the full suite:
 `PYTHONPATH=src python3 -m unittest $(find src -name '*_tests.py' | sort)`
 
-Next up: design `core/schedule` (machines + job placement), which brings in the
-deferred `JetState` (read by `Color.get_needed_strip`) and `Job` (converted by
-`RlsItem.register_job`); later `core/debuglog`.
+Next up: finish the greige restructure — implement `greige.py` / `.pyi`
+(`BarConfig` + the new `Greige`), update the `greige` `__init__` pair, then write
+coverage + tests for the new `yarn` submodule and the reworked `greige`. After
+that: implement `core/schedule`'s `machine` submodule (design complete), write
+the `activity` submodule's coverage + tests, and write up the greige loader rules
+noted above; later `core/debuglog`.
 
 ## Development Workflow
 
