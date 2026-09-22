@@ -186,10 +186,12 @@ class ManualSchedule:
         requirement), the set coming off the bar (`prev_set`, `prev_merge`,
         `prev_vendor`; None when the bar held nothing), the set going on
         (`auto`: a stock set number or an invented `NEW…`, with `lbs` and
-        `vendor`), `assigned` (whether this step named it), `source`
-        (`assigned` by this step, `queued` at the machine by the plant,
-        `stock`, or `new`), `locked` (a plant-assigned set that a manual
-        assignment cannot displace), `queue_idx` (the set's position in that
+        `vendor`), `assigned` (whether this step named it in `assign` —
+        also True for a plant-queued set the step confirmed by name),
+        `source` (where the set came from: `queued` at the machine by the
+        plant, `assigned` from stock by name, `stock` automatically, or
+        `new`), `locked` (a plant-assigned set that a manual assignment
+        cannot displace), `queue_idx` (the set's position in that
         bar's queue, for `assign`) and `options` — `(set_no, lbs, merge,
         vendor)` of the stock sets that fit and are available at that
         moment, oldest received first then by set number (the warehouse's
@@ -235,12 +237,13 @@ class ManualSchedule:
                     i = idx[bar]
                     idx[bar] += 1
                     prev = last_beam[bar]
-                    if i < len(queue) and queue[i] is not None and not bs.assigned:
-                        source = 'assigned'          # this step named it
+                    named = i < len(queue) and queue[i] is not None   # this step named it
+                    if bs.assigned:
+                        source = 'queued'            # staged at the machine by the plant
+                    elif named:
+                        source = 'assigned'          # pulled from stock by name
                     elif bs.is_new:
                         source = 'new'               # invented placeholder
-                    elif bs.assigned:
-                        source = 'queued'            # staged at the machine by the plant
                     else:
                         source = 'stock'
                     locked = source == 'queued'
@@ -258,7 +261,7 @@ class ManualSchedule:
                         'prev_merge': None if prev is None else prev.merge,
                         'prev_vendor': None if prev is None else prev.vendor,
                         'auto': bs.set_no, 'lbs': round(bs.lbs, 1), 'vendor': bs.vendor,
-                        'assigned': source == 'assigned', 'source': source,
+                        'assigned': named, 'source': source,
                         'locked': locked, 'queue_idx': i,
                         'options': [(b.set_no, round(b.lbs, 1), b.merge, b.vendor)
                                     for b in options],

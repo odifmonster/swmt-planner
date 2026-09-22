@@ -99,9 +99,11 @@ those hang points — for each, the machine, the bar, the time, the
 requirement, the set **coming off** that bar (`prev_set` / `prev_merge` /
 `prev_vendor`: what was on the bar just before the hang, so the operator
 can see what merge and vendor the bar is changing *from*), the set going on
-(`auto`, with its `lbs`, `vendor` and `source`: `assigned` by this step,
-`queued` at the machine by the plant, `stock`, or `new` when stock had
-nothing), whether that hang is `locked`, its position in the bar's queue
+(`auto`, with its `lbs`, `vendor` and `source`: `queued` at the machine by
+the plant, `assigned` from stock by name, `stock` picked automatically, or
+`new` when stock had nothing), `assigned` — whether this step named the set
+in `assign`, which is also True for a plant-queued set the step confirmed
+by its own number — whether that hang is `locked`, its position in the bar's queue
 (`queue_idx`), and the stock sets that fit and are available at that moment
 (less anything a staged plan hangs earlier), each as `(set_no, lbs, merge,
 vendor)`. `assign(top=[...], btm=[...])` then re-stages the same step with

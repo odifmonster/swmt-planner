@@ -49,7 +49,7 @@ def _dt(t: datetime, tz: tzinfo) -> str:
     is converted as is."""
     if t.tzinfo is None:
         t = t.replace(tzinfo=tz)
-    return t.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    return t.astimezone(timezone.utc).isoformat(timespec='seconds')
 
 
 def _beam_set(bs: 'BeamSet | None') -> dict | None:

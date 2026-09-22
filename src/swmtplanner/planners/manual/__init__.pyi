@@ -73,8 +73,9 @@ class ManualSchedule:
         """Hang points of one staged plan (in hang order) or of all
         (chronological across machines): machine, bar, at, desc, the set
         coming off (prev_set / prev_merge / prev_vendor), the set going on
-        (auto, lbs, vendor) with its `source` (assigned / queued / stock /
-        new) and whether it is `locked`, its queue position, the stock
+        (auto, lbs, vendor) with its `source` (queued / assigned / stock /
+        new), `assigned` (this step named it, even a queued set confirmed
+        by name) and whether it is `locked`, its queue position, the stock
         options available then as `(set_no, lbs, merge, vendor)`, oldest
         received first like `stock()`, and `held_elsewhere` — which of those
         options another staging currently picks automatically."""
