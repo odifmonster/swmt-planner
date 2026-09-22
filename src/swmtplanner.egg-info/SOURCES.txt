@@ -12,6 +12,7 @@ src/swmtplanner/excel/__init__.py
 src/swmtplanner/excel/__init__.pyi
 src/swmtplanner/excel/_audit_report.py
 src/swmtplanner/excel/_fab_reports.py
+src/swmtplanner/excel/_sqlserver.py
 src/swmtplanner/excel/_updates.py
 src/swmtplanner/excel/cli.py
 src/swmtplanner/excel/excel.py

@@ -11,6 +11,7 @@ from ._updates import _grg_trans_file, _grg_style_file, _dyes_file, _pa_items_fi
 from ._fab_reports import _load_pa_floor_mos, _pa_dmnd_report, _pa_process_report, \
     _pa_priority_mos_report, _pa_rework_report, _load_dye_orders1, _load_dye_orders2
 from ._audit_report import _audit_summary
+from ._sqlserver import fetch_sql_data
 
 _INFO_OUT_HELP = 'Path to the new file to generate'
 _InfoOutAnno = Annotated[Path, typer.Option(help=_INFO_OUT_HELP,
@@ -156,6 +157,13 @@ def gen_info_template(outpath: _InfoOutAnno = 'excel-info.txt'):
     
     outfile.truncate()
     outfile.close()
+
+_SQL_HELP = 'Date to run the SQL queries for.'
+_SQLDateAnno = Annotated[dt.datetime,
+                         typer.Option(help=_SQL_HELP)]
+
+def make_sql_files(date: _SQLDateAnno = dt.datetime.today()):
+    fetch_sql_data(date.date())
 
 class _DataName(str, Enum):
     dye_formulae = 'dye_formulae'

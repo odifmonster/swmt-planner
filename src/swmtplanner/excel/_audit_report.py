@@ -37,6 +37,7 @@ class _RollData(TypedDict):
     lot: str
     source: str
     item: str
+    init_qty: float
     create_date: dt.datetime | None
     movements: dict[str, _RollMoves]
 
@@ -51,7 +52,7 @@ def _load_audit_file(fpath: str):
         fpath,
         sep='\t',
         dtype={ c: 'string' for c in audit_cols if c not in _NON_STR_COLS }
-    )
+    ).set_index('Trans ID')
 
 
 def _decode_dt(val):
@@ -159,6 +160,8 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
     for roll, grp in audit.groupby('Roll ID'):
         lots = grp[~pd.isna(grp['Lot'])]['Lot']
         lot = max(lots) if len(lots) > 0 else 'NONE'
+        init_qty_row = min(grp.index)
+        init_qty = audit.loc[init_qty_row, 'AddQty']
         
         wip_ids = grp[~pd.isna(grp['WIP Roll'])]['WIP Roll']
         wip_id = ''
@@ -201,6 +204,7 @@ def _get_roll_data(audit: pd.DataFrame) -> list[_RollData]:
             'lot': lot,
             'source': source,
             'item': item,
+            'init_qty': init_qty,
             'create_date': _creation_date(audit, roll, kind),
             'movements': {}
         })
@@ -239,7 +243,7 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
         'id', 'kind', 'lot', 'source',
         'item', 'mkt_segment', 'created',
         'first_transact', 'last_transact',
-        'loc', 'qual', 'qty',
+        'loc', 'qual', 'qty', 'init_qty',
         'grade_code', 'grade_desc',
         'defect_code', 'defect_desc'
     ]
@@ -256,7 +260,7 @@ def _get_upgrade_trail(data: list[_RollData]) -> pd.DataFrame:
             for qual in x[loc].keys():
                 copies = [
                     'id', 'kind', 'lot', 'source',
-                    'item', 'mkt_segment',
+                    'item', 'mkt_segment', 'init_qty',
                     'grade_code', 'grade_desc',
                     'defect_code', 'defect_desc'
                 ]
@@ -291,7 +295,8 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         ]
 
         max_qty = max(grp['qty'])
-        if round(max_qty) <= 0 : continue
+        init_qty = max(grp['init_qty'])
+        if round(max_qty) <= 0 and (max(grp['kind']) != 'FIN' or init_qty <= 0): continue
         created = min(grp[~grp['created'].isna()]['created'], default=np.nan)
         if pd.isna(created): continue
 
@@ -307,6 +312,9 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         cur['last_transact'] = max(grp['last_transact'])
         cur['loc'] = max(max_qty_rows['loc'])
         cur['qual'] = max(max_qty_rows['qual'])
+
+        if round(max_qty) <= 0:
+            max_qty = max(grp['init_qty'])
         cur['yards'] = max_qty
 
     return pd.DataFrame(data=status_rows, columns=status_cols).set_index('id')

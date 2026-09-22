@@ -80,10 +80,13 @@ def _load_dye_orders1():
         if pd.isna(adaptive.loc[i, 'EndTime']): continue
         
         job_id = adaptive.loc[i, 'JobID']
+        sep = '/'
         if ', ' in job_id:
-            lots = job_id.split('@')[0].split(', ')
-        else:
-            lots = job_id.split('@')[0].split('/')
+            sep = ', '
+        elif ' + ' in job_id:
+            sep = ' + '
+
+        lots = job_id.split('@')[0].split(sep)
         
         for lot in lots:
             if re.match('[0-9]{9}0', lot):
@@ -128,11 +131,11 @@ def _pa_dmnd_report(writer):
     dmnd_path, dmnd_args = INFO_MAP['lam_release']
 
     try:
-        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, dtype={'Lam Item': 'string'}, **dmnd_args)
     except ValueError as e:
         dmnd_args['usecols'].remove('Plant')
         dmnd_args['usecols'].insert(0, 'Unnamed: 0')
-        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, **dmnd_args)
+        rls_df: pd.DataFrame = pd.read_excel(dmnd_path, dtype={'Lam Item': 'string'}, **dmnd_args)
         rls_df.rename(columns={'Unnamed: 0': 'Plant'})
 
     to_drop = rls_df[rls_df['PA Item'].isna() | rls_df['Active?'].isna() | (rls_df['PA Item'] == 0)]
@@ -220,6 +223,7 @@ def _pa_dmnd_report(writer):
         lam_data['sched_day'].append(min(grp['sched_day']))
 
     lam_df = pd.DataFrame(data=lam_data, index=lam_items)
+    print(len(lam_df))
     ply1_data1 = {
         'ply1_item': [], 'plant': [], 'pa_item': [], 'past_due': []
     }
