@@ -1,8 +1,0 @@
-tests/misc*.py
-__pycache__/
-temp*.txt
-ast.txt
-tokenized.txt
-tokens.txt
-.ipynb_checkpoints/
-*.ipynb

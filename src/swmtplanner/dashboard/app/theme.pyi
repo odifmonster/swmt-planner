@@ -1,3 +1,0 @@
-from typing import Any
-
-def apply_theme(app: Any) -> None: ...
