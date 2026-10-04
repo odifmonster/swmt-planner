@@ -24,10 +24,6 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 
-[project.scripts]
-plan = "swmtplanner.planners.cli:app"
-knit-debug = "swmtplanner.dashboard.app.knit_debug:main"
-
 [tool]
 [tool.pyside6-project]
 files = []
