@@ -37,15 +37,34 @@ each roll lands, demand says *how expensive that when is*.
   **local time**.
 - `init_top_beam`, `init_top_lbs` — the physical beam set (`BeamSet`)
   currently on the top bar and lbs of yarn remaining on it.
-- `init_btm_beam`, `init_btm_lbs` — same for the bottom bar.
+- `init_btm_beam`, `init_btm_lbs` — same for the bottom bar. The sets are
+  what the plant **reports** mounted, not what the item implies: a bar
+  whose set does not fit `init_item`'s requirement for it (`BeamSet.fits`)
+  is a **foreign bar** — the plant reported the machine mid-change, its
+  item already switched but the bar not yet re-threaded; or the set's
+  merge is blacklisted, which fits nothing (see "Blacklisted merges").
+  The planner does not pretend otherwise: see "Foreign bars" under "1.
+  Run-up".
 - `init_roll_lbs_remaining` — lbs still to knit on the roll in progress at
   `start` (`0.0`, the default, means the machine is between rolls). The
   planner always finishes that roll first — the plant never doffs short —
-  see "1. Run-up".
+  see "1. Run-up". Taken as `0.0` when either bar is foreign: a roll cannot
+  be in progress across yarn the item does not use.
+- `init_top_threaded`, `init_btm_threaded` — whether the set on that bar
+  is threaded (default True, a machine running). False for a bar whose
+  set the plant has **hung but not threaded** (the assigned-sets file's
+  `"status": "hung"`, see File I/O): the bar starts in the model's *hung*
+  state, so no roll can be in progress across it
+  (`init_roll_lbs_remaining` is taken as `0.0`), the run-up knits nothing
+  from it, and the machine's first plan threads it — a `Threading` with
+  no `Hanging`, the set being already on the bar — when its yarn fits the
+  item, or takes it straight off again (an `Unhang`, no tape-out: nothing
+  was threaded) when it does not. See "Hung bars" under "2. Changeover
+  preamble".
 - `init_top_queue`, `init_btm_queue` — the physical sets the plant has
   **assigned** to that bar and not yet threaded, next up first (default
-  empty). They are hung before anything is drawn from stock — see "Beam-set
-  inventory".
+  empty). They are hung before anything is drawn from stock, when they fit
+  the bar's requirement at the hang — see "Beam-set inventory".
 - `workcal` — working-hours calendar; all activity start/end times respect it.
 - `variant_map` — optional `VariantMapFile` (see `products.variants`). When
   given, every `Knit` the machine emits is stamped with the plant variant that
@@ -112,6 +131,14 @@ Inventory = dict[BeamSetDesc, list[BeamSet]]   # keyed by desc.physical
   False. The schedule therefore runs past the real inventory rather than
   stalling; the report shows which knits ran on real sets and which on
   invented ones.
+- `blacklisted` is a bool: the set's merge is on the run's blacklist of
+  merges flagged for quality, so the planner must not put it on a machine
+  (see "Blacklisted merges" below). False for an invented set.
+- `location` is a str: for a plant-assigned set, where the plant says it
+  is — `'staged'` at the machine or `'inventory'` still in the warehouse
+  (the assigned-sets record's `status`, see File I/O); empty for any
+  other set. Informational: it is carried to the outputs and plays no
+  part in planning.
 - `vendor` is `str | None`: the supplier the plant records for the yarn on
   the set (`Hyosung Holdings USA, Inc.`, `Unifi Manufacturing, Inc`, …),
   carried through to the schedule output so the floor can find the set;
@@ -127,7 +154,8 @@ The inventory is built by a `schedule`-level helper:
 
 ```
 build_inventory(beam_sets: Iterable[BeamSet]) -> dict[BeamSetDesc, list[BeamSet]]
-worth_stocking(beam_set: BeamSet) -> bool     # usable >= MAX_BEAM_WASTE_LBS
+worth_stocking(beam_set: BeamSet) -> bool     # usable >= MAX_BEAM_WASTE_LBS, and
+                                              # not blacklisted
 ```
 
 It groups the loaded sets (already stamped with their receipt date as
@@ -138,6 +166,43 @@ swapped straight back out by the max-waste gate, so it is not usable stock.
 The same threshold applies when a taped-out set is returned: a set that comes
 back with too little usable yarn is not put back into the inventory.
 
+**Blacklisted merges.** The plant flags yarn merges for quality problems,
+and a set carrying such a merge must not go on a machine even though its
+description matches a bar's requirement. The run names them (the config's
+`blacklist`, a list of merge codes — see `planners/infinite/DESIGN.md`)
+and the loaders stamp every set they build from an export or an
+assigned-sets record with `BeamSet.blacklisted` when its merge is on the
+list (`products.beam_sets_from_list` / `read_beam_sets` /
+`beam_set_from_record` and `machines_from_list` / `read_machines`, all
+taking `blacklist=`; an invented set is never blacklisted). The flag
+follows the set: `returned` keeps it, `relabelled` takes it from `like`.
+Then two rules, which between them reach every place a set is chosen or
+kept:
+
+- a blacklisted set **fits nothing**: `BeamSet.fits` is False for it
+  whatever the requirement. So a blacklisted set **mounted** on a bar at
+  the start is a **foreign bar** (see Inputs and "Foreign bars" under
+  "1. Run-up"): the roll in progress is not finished, the run-up knits
+  nothing from it, and the machine's first plan — whatever item it is
+  for, the current item included — **tapes the set out** (a `Waste` when
+  too little is left) and re-threads the bar, taking a tape-out slot and
+  a change unit like any tape-out. A blacklisted set at the front of a
+  bar's **queue** is **passed over** at the hang like a set that does not
+  fit (below), recorded with the `PassedOver.reason` `'blacklisted'`; it
+  stays at the machine for the floor to deal with. And a machine holding
+  a blacklisted set is not a cheap holder of that yarn's items
+  (`holds_yarn`, planners/infinite);
+- a blacklisted set is never **stock**: `worth_stocking` is False for it,
+  so `build_inventory` leaves it out, a tape-out does not return it
+  (the set taped off a machine goes nowhere — the floor's to quarantine),
+  and `assign_sets` never hands it to a placeholder. A **manual
+  assignment** of a blacklisted set number is therefore refused like any
+  set not in stock (`ValueError`).
+
+The merge list is applied at load, so the greedy planner, the manual
+scheduler and the retimer all see the same stock and the same foreign
+bars.
+
 **Assigned sets and bar queues.** The plant stages sets at machines ahead of
 need: the inventory export flags such a set `assigned`, and the assigned-sets
 list says which machine and bar (bar 1 the bottom, any higher bar the top).
@@ -146,19 +211,45 @@ becomes an entry in that machine bar's **queue** (`Status.queue(bar)`, from
 the constructor's `init_*_queue`): the next set that bar hangs. Applying a
 `Hanging` of the queue's front set pops it, so the queue advances with the
 schedule like every other piece of status; hanging some other set (a manual
-assignment) leaves it in place.
+assignment) leaves it in place. A queued set is described by what the plant
+says is on it — its merge's yarn per the variant map, else its recorded
+denier / luster / type — never by what the bar happens to need (see File
+I/O), so a set staged at the wrong machine does not fit and is **passed
+over**: at the first hang on that bar that it does not fit, the set is
+dropped from the queue (`Status.drop_queued(bar)` on the plan's working
+status), the next queued set is considered in its place, the `Hanging`
+carries the dropped sets (`Hanging.passed_over`, so applying it drops them
+from any status the activity is replayed against — a commit, `status_at`)
+and the plan records the pass-over (`ProductionPlan.queue_passed_over`:
+bar, set, the requirement it failed, the hang time, and the `reason` —
+`'does not fit'`, or `'blacklisted'` for a set whose merge the run has
+blacklisted, which is passed over the same way whether or not it fits)
+for the machine to keep (`Machine.queue_passed_over`) and the planners to
+report. The set is still at the machine physically, so it never re-enters
+free stock; the floor decides what to do with it.
 
 Selecting a set for a `Hanging` (see the walk), in order of precedence:
 
 1. the front of the bar's queue — the set the plant assigned to that bar —
-   when it fits the requirement and has been received by then. It is
-   **locked in**: a caller assignment for that hang (`assign=`, below) must
-   be `None` or that set's own number, else `ValueError`. (A set the plant
-   assigned before it arrived waits at the front of the queue until a hang
-   at or after its receipt.)
+   when it fits the requirement, is not blacklisted and has been received
+   by then. It is **locked in**: a caller assignment for that hang
+   (`assign=`, below) must be `None` or that set's own number, else
+   `ValueError`. (A set the plant assigned before it arrived waits at the
+   front of the queue until a hang at or after its receipt; one that does
+   not fit, or is blacklisted, is passed over, above, before the rule is
+   applied to whatever is behind it.)
 2. a set number the caller assigned for the bar (`assign=`);
-3. among `inventory[key]`, the set available at the working `as_of`, not
-   already taken earlier in the same plan, with the **most lbs**;
+3. among `inventory[key]`, the sets available at the working `as_of` and
+   not already taken earlier in the same plan, chosen for **continuity
+   with the set coming off the bar** (the set a changeover tapes out, or
+   the set that ran out before a reload): first a set with the **same
+   merge**, then one from the **same vendor**, then any set — a tier is
+   skipped when the outgoing set's merge (or vendor) is unknown, since
+   there is nothing to match. Within a tier the **oldest received** set
+   first, then the lowest set number, so the warehouse pulls in the order
+   it stocks. Sets under **`MIN_STOCK_SET_LBS`** (500 lbs) are ignored
+   throughout — a small set means another swap within hours — unless they
+   are all that is available, in which case the same tiers apply to them;
 4. an invented set.
 
 **Manual assignment.** `plan_production(..., assign={'top': [...], 'btm':
@@ -174,6 +265,51 @@ raises `ValueError` rather than falling back, as does a queued set the plan
 never gets to hang, or one that would displace a plant-assigned set (rule
 1). A manual assignment is never silently dropped; this is what the manual
 scheduler (`planners/manual`) relies on.
+
+**Assigning sets after planning.** The walk picks a set for each hang as
+it plans, machine by machine, so a long job planned early takes the sets
+its later hangs need before a hang on another machine that comes sooner
+in time gets a look. A planner that wants stock handed out in **runout
+order** instead plans with **no inventory** — every hang then invents a
+placeholder (`NEW…`, `fresh_beam_lbs` on it; the plant's queued sets are
+still hung, since the queue precedes stock) — and afterwards calls
+
+```
+assign_sets(machines: Mapping[str, Machine], inventory: Inventory,
+            *, now: datetime) -> SetAssignment
+```
+
+which walks **every placeholder hang across the machines in time order**
+(a hang's start; ties by machine id, then bar) and gives each the set the
+walk itself would have picked at that moment: among the stock available
+then — the export's sets by receipt, plus the sets earlier assigned hangs
+tape out again (back at the tape-out's end with what the plan left on
+them, when still `worth_stocking`) — the `choose_stock` pick for continuity
+with the set that came off the bar (the initial set, or the one an earlier
+hang put there); nothing suitable leaves the placeholder in place. Each
+assignment relabels the placeholder throughout the machine's committed
+schedule (`Machine.rebind_sets`: the `Hanging` that mounted it, the
+`Knit`s that ran on it, the `TapeOut` or `Waste` that removed it, the
+`Job`s and `Roll`s that reference those activities, and the statuses) with
+the real set's identity — number, merge, vendor, plant yarn fields,
+`known_merge` — **under the plan's pounds**: the placeholder's lbs were
+what the walk timed the runouts by, and the schedule's arithmetic (and
+its replayability) stays whole only if they stand. `SetAssignment`
+reports, per hang: machine, bar, time, the requirement, the set hung and
+its source (`stock` or `new`), the **real pounds on the set** beside the
+plan's, and the **shortfall** when the plan draws more from the bar than
+the set holds (the knits between this hang and the bar's next hang, at
+the item's bar share, against the set's usable lbs) — the floor will need
+the next set sooner than the schedule shows. `BeamSet.relabelled(like)`
+is the set-level operation: this set's lbs, description and availability
+under `like`'s identity.
+
+A rebound machine is still a machine: its statuses re-derive exactly as
+before (lbs are unchanged), it can be planned further, and its outputs
+carry the real set numbers. What the second pass cannot do is re-time —
+a set lighter than its placeholder runs out before the schedule says;
+re-running the walk with the assignments would be a third pass this
+design does not include.
 
 `plan_production` **never mutates** the inventory it is passed — dozens of
 candidate plans are enumerated against the same stock each iteration. Instead
@@ -214,6 +350,11 @@ Activity (abstract)               # anything that occupies machine time
                                   # comma-separated names), or None when a
                                   # merge is unknown / no variant_map — see
                                   # Inputs
+    top_beam: BeamSet | None      # the set on each bar while this knit ran —
+    btm_beam: BeamSet | None      # its number, merge and vendor are what the
+                                  # floor reads off the schedule; None only
+                                  # when a bar held nothing (never in a plan
+                                  # the walk produced)
 
   Waste(Activity)                 # usable yarn discarded from a swapped-out
                                   # beam — removed unknit (zero machine time),
@@ -246,6 +387,16 @@ Activity (abstract)               # anything that occupies machine time
     top_beam: BeamSet | None      # set removed from top (None if top untouched)
     btm_beam: BeamSet | None      # set removed from btm (None if btm untouched)
 
+  Unhang(Activity)                # a hung, never-threaded set taken off again
+                                  # (a mounted set the plan cannot use — see
+                                  # "Hung bars"); zero duration, no ration unit,
+                                  # no job. Records the set(s) removed, per bar,
+                                  # as returned to inventory with all their lbs
+                                  # (not a blacklisted one).
+    bars: Literal['top', 'btm', 'both']
+    top_beam: BeamSet | None
+    btm_beam: BeamSet | None
+
   Hanging(Activity)               # mounting beam set(s) onto the named bar(s)
                                   # — this is what loads the physical set, so it
                                   # sets each bar's beam and lbs (the set's
@@ -258,6 +409,11 @@ Activity (abstract)               # anything that occupies machine time
     top_beam: BeamSet | None      # set now loaded on top (None if untouched);
                                   # its `lbs` is what the bar now holds
     btm_beam: BeamSet | None
+    passed_over: tuple[tuple[bar, BeamSet], ...]
+                                  # per bar, the plant-assigned sets this hang
+                                  # dropped from the bar's queue because they
+                                  # did not fit; applying the hang removes
+                                  # them (see "Beam-set inventory")
 
   Threading(Activity)             # routing the loaded yarn into the machine.
                                   # Flips the bar(s) to threaded — sets
@@ -327,6 +483,14 @@ Job (HasID)                       # an "order" for some number of rolls of
                                   # on priority across all jobs/demand and is
                                   # resolved later in the `SafetyAwareView`, not
                                   # stored here.
+  prior_job: str | None = None    # provenance: the id of the job in a previous
+                                  # plan this Job was committed to honour (the
+                                  # infinite planner's "Sticking to the prior
+                                  # plan"); None otherwise
+  fill: bool = False              # the job (also) filled a slot wait: whole
+                                  # rolls of the current item knit while the
+                                  # preamble waited for a ration slot — see
+                                  # "Filling a slot wait"
   activities: tuple[Activity, ...] = ()
                                   # the machine time this Job accounts for, in
                                   # schedule order — see "Job activities"
@@ -356,6 +520,24 @@ ProductionPlan                    # return value of plan_production —
                                            # plan's changeover TapeOut appended
                                            # — see "Job activities"; None when
                                            # nothing attaches to a prior job
+  queue_passed_over: tuple[PassedOver, ...] # plant-assigned sets a hang in this
+                                           # plan dropped from a bar's queue
+                                           # because they did not fit — see
+                                           # "Beam-set inventory"
+
+PassedOver                        # one queued set a hang passed over
+  bar: 'top' | 'btm'
+  beam_set: BeamSet               # the set, as the queue described it
+  wanted: BeamSetDesc             # the bar's requirement at that hang
+  at: datetime                    # the hang's start
+  reason: str = 'does not fit'    # or 'blacklisted' — see "Blacklisted merges"
+
+Fill                              # what the preamble may knit instead of idling
+                                  # while it waits for a ration slot — see
+                                  # "Filling a slot wait"
+  rolls: int                      # whole rolls of the machine's *current* item
+                                  # the plant still wants
+  tgt_order: str | None           # the order those rolls are raised against
 
 Status                            # snapshot at a moment in time. Per-bar
                                   # values are read through accessors taking a
@@ -380,6 +562,11 @@ Status                            # snapshot at a moment in time. Per-bar
                                     # threaded, next up first. A Hanging of the
                                     # front set pops it; hanging another set
                                     # leaves the queue alone
+  drop_queued(bar) -> Status        # the same status without `bar`'s front
+                                    # queued set (a pass-over); pure
+  rebind_sets(mapping) -> Status    # the same status with each bar's set
+                                    # relabelled per `mapping` (see "Assigning
+                                    # sets after planning"); lbs untouched
   current_family: str               # derived from current_item
 
 Machine (HasID)
@@ -394,16 +581,30 @@ Machine (HasID)
   status_at(t) -> Status
   duration_of(spec) -> timedelta
   plan_production(item, lbs, start_at, idle_for=timedelta(0),
-                  tgt_order=None, inventory=None, assign=None) -> ProductionPlan
+                  tgt_order=None, inventory=None, assign=None,
+                  capacity=None, prior_job=None, fill=None) -> ProductionPlan
                                     # `inventory` (see "Beam-set inventory") is
                                     # read, never mutated; None/empty means
                                     # every hang invents a set. `assign` queues
-                                    # set numbers per bar for manual scheduling
+                                    # set numbers per bar for manual scheduling.
+                                    # `capacity` is the changeover ration the
+                                    # preamble's slots are placed against.
+                                    # `tgt_order` / `prior_job` are stamped on
+                                    # the new item's Job as provenance. `fill`
+                                    # (a `Fill`) lets the preamble knit the
+                                    # current item while it waits for a slot
   add_activities(activities) -> None
   add_jobs(jobs) -> None
   replace_last_job(job) -> None     # swap the last job for a same-id copy
   commit_plan(plan) -> None         # add_activities + replace_last_job (if
-                                    # plan.replaced_job) + add_jobs
+                                    # plan.replaced_job) + add_jobs, and keeps
+                                    # plan.queue_passed_over
+  queue_passed_over: tuple[PassedOver, ...]
+                                    # every queued set a committed plan passed
+                                    # over, in commit order
+  rebind_sets(mapping) -> None      # relabel placeholder sets throughout the
+                                    # committed schedule — see "Assigning sets
+                                    # after planning"
   # capacity + stopping-point queries
   producible_lbs_through(item, end, start=None, inventory=None) -> float
   producible_lbs_in_week(item, year, week, start=None, inventory=None) -> float
@@ -413,6 +614,17 @@ Machine (HasID)
                                     # from `next_job_end` now that `Job` no
                                     # longer refers to an activity.
   next_runout: datetime
+  run_until(t, inventory=None) -> ProductionPlan | None
+                                    # keep running the current item up to t —
+                                    # the roll in progress plus every whole
+                                    # roll that starts before t (the last may
+                                    # run past t) — as a 'schedule_tail'
+                                    # plan_production; an Idle to t when the
+                                    # machine has nothing to run (NONE / no
+                                    # rate); None when t <= schedule_tail.
+                                    # Not committed. Used by the planner's
+                                    # loader to bring every machine up to the
+                                    # change_date before planning starts.
   whole_rolls_before_runout: int    # rolls doffed running the current item
                                     # until next_runout: the roll in progress
                                     # (when the beams can finish it) plus the
@@ -453,7 +665,9 @@ emits:
 |---|---|
 | `Idle` | no job — the machine standing |
 | `Waste` | no job — explicitly not production |
+| `Unhang` | no job — a hung, never-threaded set taken off again |
 | run-up `Knit` / `Doff` (finishing a roll in progress in either mode; whole rolls in `'next_runout'` mode), incl. a mid-roll re-thread while finishing | the run-up job |
+| fill `Knit` / `Doff` (whole rolls of the current item knit while the preamble waits for a slot — "Filling a slot wait") | the **previous** item's job: the run-up job, extended, or a new current-item job when there is none |
 | preamble `TapeOut` | the **previous** item's job — it records the sets that item was assigned |
 | preamble `Hanging` / `Threading`, the changeover | the **next** item's job — its setup |
 | production-loop `Knit`, `Doff`, mid-run `Hanging` / `Threading` | the next item's job |
@@ -463,7 +677,8 @@ the `Doff` of its last roll, plus the tape-out that later takes its sets
 off. The previous job is:
 
 - in `'next_runout'` mode, the run-up job built in the same plan (the
-  tape-out is appended to it directly);
+  tape-out is appended to it directly); likewise the current-item job a
+  fill built in the same plan;
 - otherwise the machine's **last committed job**. Because `Job` is
   immutable, the plan carries that job recreated with the tape-out appended
   (`Job.with_activities`, same id) as `ProductionPlan.replaced_job`;
@@ -529,10 +744,15 @@ The per-bar transitions and their guards:
   already-threaded bar). Effect: `threaded(bar)` becomes True, nothing else.
 - **`TapeOut(bar)` / `Waste(bar)`** — remove the old set: `beam(bar)` → None,
   `lbs_remaining(bar)` → 0, `threaded(bar)` → False.
+- **`Unhang(bar)`** — requires the bar **hung**; takes the never-threaded
+  set off again: the same effect as a `TapeOut`.
 
 The `'both'` variants apply the same per-bar checks to each bar. A
 freshly-constructed machine is threaded and running, so both bars start
-threaded (`threaded(bar)` is True).
+threaded (`threaded(bar)` is True) — unless the constructor was told a bar
+is hung (`init_*_threaded=False`, see Inputs), in which case that bar
+starts in the hung state and the first activity it accepts is a
+`Threading`.
 
 ## Activity durations
 
@@ -540,8 +760,9 @@ All durations are deterministic given (machine, activity spec).
 
 | Activity | Duration |
 |---|---|
-| `Knit(item, lbs)` | `lbs / item.get_rate_on_mchn(machine.id)` |
+| `Knit(item, lbs)` | `lbs / (item.get_rate_on_mchn(machine.id) × RUNNING_EFFICIENCY)` |
 | `Waste(beam, bar, lbs)` | `timedelta(0)` — yarn is swapped out unknit, not run |
+| `Unhang(bars)` | `timedelta(0)` — a hung set taken off before it was threaded |
 | `Doff` | `DOFF_DURATION` |
 | `TapeOut('top')` or `TapeOut('btm')` | `TAPE_OUT_SINGLE_DURATION` |
 | `TapeOut('both')` | `TAPE_OUT_BOTH_DURATION` |
@@ -554,7 +775,10 @@ All durations are deterministic given (machine, activity spec).
 | `PatternChange` | `PATTERN_CHANGE_DURATION` |
 | `Idle` | caller-supplied via `plan_production(..., idle_for=...)` |
 
-Production rate is machine × item specific (via `Greige.get_rate_on_mchn`).
+Production rate is machine × item specific (via `Greige.get_rate_on_mchn`,
+the style's **nominal** lbs per running hour) scaled by the plant-wide
+`RUNNING_EFFICIENCY` (see Constants) — `Machine._rate(item)` is the one
+place the two meet, and every rate the model uses goes through it.
 Every other duration is now a plant-wide module-level constant (see
 Constants) — including the three changeover durations, which used to be
 per-machine. The `is_new` flag and the pattern-family comparison select
@@ -582,6 +806,11 @@ above):
   `Threading` together replace the old single `BEAM_LOAD_DURATION = 2h`.
 - **`DOFF_DURATION = 20min`** — removing one completed roll.
 
+**Stock selection** (see "Beam-set inventory"):
+
+- **`MIN_STOCK_SET_LBS = 500`** — a stock set lighter than this is passed over
+  for a hang while any heavier set fits the bar.
+
 **Changeover durations** (Step 3) — plant-wide, previously the per-machine
 `simple_change_duration` / `family_change_duration`. The `is_new` flag and
 the pattern-family comparison pick which one applies (see "Beam-swap
@@ -592,6 +821,34 @@ decision"):
   within-pattern-family runner change (the lighter case).
 - **`PATTERN_CHANGE_DURATION = 1.5h`** — a legacy machine's
   cross-pattern-family pattern-wheel rework (the heavier case).
+
+**Running efficiency** — **`RUNNING_EFFICIENCY = 0.765`** (`machine.py`):
+the share of scheduled running time a machine actually knits once
+unplanned stops (a defect, waiting for a fixer) are taken out — 85 % —
+scaled by a further 90 % for the time machines spend waiting on the
+threading team, whose throughput (about eleven bars a day) is not
+rationed explicitly (see "Changeover capacity"). A style's
+`machine_rates` are nominal, `rpm × 60 / 480 revs per rack × rack_wt / 100`
+lbs per running hour, and the model multiplies them by this constant
+(`effective_rate`) — one number to change, rather than a factor baked into
+every style's rate matrix. Planned stops (doffs, threading, changeovers)
+are separate activities.
+
+**Planning mode** (`support.planning_mode`, switched on by the planner's
+run-config `"mode": "planning"`) overrides three groups of these
+process-wide: `RUNNING_EFFICIENCY` becomes `planning_mode.EFFICIENCY`
+(0.65);
+`DOFF_DURATION`, the two `HANGING_*` and the two `THREADING_*` durations all
+become `planning_mode.HANDLING_HOURS` (0.01 h) — the machine model reads
+them through `planning_mode.handling_hours(...)`, so the constants
+themselves keep their real values — and every beam set's starting lbs
+(mounted sets via the machines loader, invented sets via `fresh_beam_lbs`)
+becomes `planning_mode.BEAM_LBS` (1,000,000), so runouts never happen and a
+set leaves a machine only by tape-out. There is no stock in planning mode:
+the planner loads no inventory or bar queues, `worth_stocking` is always
+False so a taped-out set never returns, and every hang invents its set.
+Tape-out and changeover durations and the runout-model constants are
+untouched. See `planners/infinite/DESIGN.md`, "Planning mode".
 
 **Fresh-beam yarn** — plant-wide convention for how much yarn a freshly loaded
 beam holds, by yarn denier (used by `fresh_beam_lbs`):
@@ -828,6 +1085,18 @@ one roll's worth, the other bar possibly more. The changeover preamble
 The working status after the run-up has `current_item` unchanged, with both
 bars still carrying their leftover yarn.
 
+**Foreign bars.** A bar whose set does not fit the current item (see
+"Inputs": a machine the plant reported mid-change, its item switched before
+the bar was re-threaded) holds **no usable yarn for the run-up**: it is
+treated as empty in the whole-roll count above (so `n_rolls = 0`), in
+`whole_rolls_before_runout` and in `next_runout`, which is therefore
+immediate. The run-up emits nothing for such a machine (its roll in
+progress was already zeroed at construction), and the preamble that
+follows meets the foreign set with its real lbs — a `TapeOut` when they
+are worth preserving, a `Waste` otherwise — then re-threads the bar, even
+when `item` is the machine's current item. That is the plant's own
+tape-out, shown rather than assumed away.
+
 ### 2. Changeover preamble
 
 The run-up no longer drains a bar to empty, so a bar reaching the preamble
@@ -853,7 +1122,10 @@ the run-up stops on a whole-roll boundary, leaving the bar with
 **post-run-out yarn** — usable that's less than one roll's worth but, when
 above `MAX_BEAM_WASTE_LBS`, still worth preserving with a `TapeOut` rather
 than discarding. A bar whose yarn matches is never taped out or wasted — the
-machine doesn't drop yarn without reason.
+machine doesn't drop yarn without reason. A **foreign bar** (a machine the
+plant reported mid-change — see Inputs and "Foreign bars") arrives at its
+first preamble in one of the two mismatch rows whatever `item` is, the
+current item included: the reported set comes off before the first roll.
 
 When **both** bars need the same operation together, emit the `'both'`
 variant rather than two singles (cheaper per the duration table): a single
@@ -868,6 +1140,123 @@ the changeover activity selected per "Beam-swap decision":
 `StyleChange` on a new machine, else `RunnerChange` within the pattern family
 or `PatternChange` across it. The activity type carries the semantic — there
 is no `is_family_change` flag.
+
+#### Hung bars
+
+A bar can also arrive at the preamble **hung**: a set on it that is not
+threaded (`not threaded(bar)` with a set present) — only ever at a
+machine's initial status, from the assigned-sets file's `"status":
+"hung"` (see Inputs and File I/O). The plant has mounted the set but not
+yet routed its yarn, so the hanging is done and only the threading is
+owed. Such a bar is a fifth row of the table above:
+
+| Bar state | Activities for that bar |
+|---|---|
+| Hung, yarn matches the new item | `Threading` only — no `Hanging`, the set is already on |
+| Hung, yarn doesn't match | `Unhang` — the set is taken off as it went on, untouched, and goes back to stock with all its lbs (no `TapeOut`: nothing was threaded, so there is nothing to tape; no `Waste` either) — then re-thread |
+
+An `Unhang` is the mirror of a `Hanging`: it empties the bar, takes no
+machine time of its own (the re-thread that follows carries the bar
+work), takes no ration unit (neither a tape-out nor a change — the item
+change that may follow takes its own), belongs to no job, and returns
+the set to inventory (`beam_sets_returned`, available from its end) when
+it is worth stocking — a blacklisted one is not returned. The threadings
+are batched like the re-threads: the bars that need hanging are hung
+first (`'both'` when both do), then every bar owed a threading — hung and
+freshly hung alike — is threaded in one `Threading` (`'both'` when
+both); two unhangs batch into one `Unhang('both')`. A hung bar is
+otherwise like a foreign bar: no run-up and the roll in progress zeroed.
+The guard rails are unchanged: a `Threading` still requires the bar hung,
+which is exactly the state the machine was constructed in, and an
+`Unhang` requires it too.
+
+#### Changeover capacity slots
+
+Three things about a preamble are rationed plant-wide. A `TapeOut` needs
+a threading team beyond the team's regular run-out work and a
+`PatternChange` needs a mechanic, so each has a daily ration of its own
+and neither happens on certain shifts. And the plant as a whole can
+absorb only so many **changes** a day, of any kind: every machine that is
+taped out, re-patterned, has its runners changed or is given a new style
+is one more machine the floor has to get going again, and too many at
+once stop everything. The preamble therefore places its rationed work
+into **capacity slots** supplied by the `ChangeoverCapacity` the call was
+given (see "Changeover capacity" below), the way it takes beam sets from
+the inventory it was given:
+
+- A preamble that **changes the machine** — one that emits a `TapeOut`,
+  `PatternChange`, `RunnerChange` or `StyleChange` — is `1` unit of the
+  `change` resource, however many of those it contains. The unit is taken
+  **first**, before any beam work, at the moment the walk reached: a
+  change is counted on the day it starts. A preamble that only
+  re-threads an empty bar, or discards a residue as `Waste` and
+  re-threads, changes nothing and takes no unit.
+- A `TapeOut` needs `1` unit for a single bar or `2` for `'both'` from the
+  tape-out resource; a `PatternChange` needs `1` unit from the
+  pattern-change resource. (`StyleChange` and `RunnerChange` have no
+  ration of their own: a new machine's style change is a five-minute
+  screen edit, and a runner change needs no mechanic. They count only as
+  changes.)
+- Each is placed at `capacity.next_slot(kind, units, not_before,
+  duration)`: the earliest time at or after the moment the walk reached
+  (`not_before`) at which the activity both lies inside the resource's
+  working window and leaves enough unbooked units in that window's
+  **period**. When that is later than `not_before`, the preamble first
+  knits the current item if the caller allowed it ("Filling a slot
+  wait", next) and emits an `Idle(reason=f'{kind} slot')` for what is
+  left of the wait — the machine waits for the team — and the rest of the
+  preamble and the production loop follow the delay. With no `capacity`
+  given (tests, the legacy path) nothing waits.
+- The order of the preamble: the change unit, then beam work (tape-out,
+  waste, hang, thread), then the changeover activity. A plan may
+  therefore wait up to three times. The per-kind slots are sought after
+  the change unit, so a tape-out whose own ration is full that day can
+  land a day later than the change unit was counted in; accepted, like
+  the score-order booking imprecision noted in
+  `planners/infinite/DESIGN.md`.
+
+`ProductionPlan` records the slots it occupies as `capacity_taken`:
+`(kind, period, units, start)` per rationed activity, parallel to
+`beam_sets_taken`. Committing the plan books them (see
+`planners/infinite/DESIGN.md`, `State.commit_move`); candidate plans only
+read the bookings.
+
+#### Filling a slot wait
+
+A machine waiting for a slot need not stand still: its beams still hold
+the current item's yarn, and when the plant still wants that item the
+wait is better spent knitting it. The caller says how much with `fill`
+— `Fill(rolls, tgt_order)`: whole rolls of the machine's **current item**
+the plant still has demand for, and the order they are raised against;
+`None`, the default, never fills. Whenever a slot lies later than the
+moment the walk reached, the preamble knits whole rolls of the current
+item (`Knit(tgt_wt)` + `Doff`, the run-up's mechanics) **while**:
+
+- fill rolls remain — one budget across all of the preamble's waits;
+- the beams can finish another roll above `BEAM_FLOOR_LBS`
+  (`_whole_rolls_before_floor` on the bars as they stand, a foreign bar
+  counting 0 lbs). The fill never hangs a set: a set hung only to be
+  taped out an hour later is exactly the work the ration exists to
+  limit;
+- the roll would **start** before the slot. The last roll may run past
+  it: knitting beats idling, and a slot is a count within its period,
+  not a time, so the change takes it when the roll doffs. After each
+  roll the slot is looked up again from the new moment — a roll that
+  ran past the period's end finds the next period, and the fill goes on
+  against that.
+
+What is left of the wait is the `Idle` above. In `'next_runout'` mode the
+run-up has already run the beams to the runout, so nothing can fill and
+the wait is idle as before.
+
+The fill rolls are the **current** item's production and belong to its
+job: the run-up job built in the same plan, extended with them, or — in
+`'schedule_tail'` mode, where there is no run-up job — a new job of the
+current item built from them, carrying the fill's `tgt_order`. Either
+way the job is marked `fill=True`. It is the previous item's job from
+then on, so the preamble's `TapeOut` is appended to it rather than to the
+machine's last committed job. Filling never changes what the plan was
+asked for: the new item's job is still `lbs`, placed after the preamble.
 
 ### 3. Production loop
 
@@ -907,9 +1296,10 @@ resolve():
     if 0 < usable(btm) < MAX_BEAM_WASTE_LBS: emit Waste(btm, usable(btm))
     bars = 'both' if top_swap and btm_swap else ('top' if top_swap else 'btm')
     emit Hanging(bars, pick(inventory, ...)); emit Threading(bars)
-                                                 # mount (stock set with the
-                                                 # most lbs, else invent), then
-                                                 # route yarn
+                                                 # mount (stock set: same merge,
+                                                 # else same vendor, else any;
+                                                 # oldest first; else invent),
+                                                 # then route yarn
 
 while rolls_left > 0:
     if roll_filled == 0:
@@ -960,6 +1350,61 @@ All emitted activities have `start` / `end` anchored to the activity-schedule
 tail and threaded through `workcal`. The walk does not mutate `current_status`,
 `activities`, `jobs`, or the `inventory` it was given — it reports the sets it
 took and returned on the `ProductionPlan`.
+
+## Changeover capacity
+
+The plant-wide ration of threading-team and mechanic work, held in one
+object the machines consult (`schedule/capacity.py`):
+
+```
+ChangeoverCapacity(workcal, resources)
+  resources: {kind: Resource}                 # kind ∈ {'change', 'tape_out', 'pattern_change'}
+  Resource
+    units_per_period: int                     # change: 5 (machines changed, of any kind);
+                                              # tape_out: 2 (bars); pattern_change: 3 (changes)
+    window: (start_hour, end_hour)            # local clock hours; change: (0, 24),
+                                              # the others (8, 24)
+  period_of(kind, t) -> (date, start, end)    # the window instance containing t, clipped to work hours
+  booked(kind, period) -> int                 # units committed in that period
+  next_slot(kind, units, not_before, duration) -> datetime
+  book(kind, period, units, start) ; release(...)   # commit / undo
+  view(extra: list[(kind, period, units)]) -> CapacityView   # bookings plus someone else's
+                                                              # uncommitted plans (the manual
+                                                              # planner's stagings)
+```
+
+A **period** is one instance of a resource's working window: for the
+tape-out and pattern-change resources the sixteen hours of first and
+second shift, 08:00 to 24:00 of each working day — no tape-outs and no
+pattern changes on third shift; for the `change` resource the whole
+working day, 00:00 to 24:00, since a change is counted against the day
+it starts on whichever shift that is. A period is clipped to the working
+calendar, so none exists on a weekend or holiday. `units_per_period` is
+the ration: two tape-out bars a day means one both-bar tape-out or two
+singles, in any order and at any time inside the window — the team that
+does a double early pushes its run-out work onto the next shift, so the
+day as a whole is what is limited, not a particular hour. Five changes a
+day means five machines changed, however each is changed: a both-bar
+tape-out with a pattern change is one, a style change on a new machine
+is one (see "Changeover capacity slots" for what counts).
+
+`next_slot` walks forward from `not_before` period by period and returns the
+first start time at which the activity fits entirely inside the window and
+`booked + units <= units_per_period`. Inside a period the slot is simply
+`max(not_before, period start)`: slots are not pre-timed, they are a count,
+and the activity goes where the machine needs it. The ration is a **hard
+limit**: there is no over-booking at a penalty, because the plant has no
+one to call in.
+
+Bookings are a plain count per `(kind, period)`; the planner's
+`State.commit_move` books a committed plan's `capacity_taken` and candidate
+plans read the committed count. The `CapacityView` overlays uncommitted
+bookings so several staged plans can be laid out against each other
+without committing any of them (the manual planner).
+
+Limits and windows are configuration (the run-config's
+`changeover_capacity` block — see `planners/infinite/DESIGN.md`); the
+defaults above are the plant's current practice.
 
 ## Capacity queries
 
@@ -1112,14 +1557,46 @@ read_machines(
 `assigned_sets` is the plant's assigned-sets list: records of `set_no`,
 `merge`, `vendor`, `machine`, `bar` for sets staged at a machine but not yet
 threaded (bar 1 the bottom, any higher bar the top; machine ids zero-padded,
-`N01`). Each becomes the next entry in that machine bar's queue
-(`init_*_queue`), resolved through `beam_sets` for its data (the export's
-set with that number and, when both name one, the same vendor — see
-"Beam-set inventory"), or built from the record — the bar's requirement, the
-record's merge and vendor, a fresh-beam weight, available from `start_date`
-— when the export lacks it. Records for machines not in the file are
-ignored — those sets still leave free stock via the export's `assigned`
-flag.
+`N01`), carrying the same yarn fields as an inventory-export record —
+`denier`, `luster`, `desc` (the yarn type), `ends`, `beams`, `lbs` and
+optionally `received`. Each becomes the next entry in that machine bar's
+queue (`init_*_queue`), resolved through `beam_sets` for its data (the
+export's set with that number and, when both name one, the same vendor —
+see "Beam-set inventory"), or, when the export lacks it, built from the
+record exactly as `products.beam_sets_from_list` builds an export record
+(`products.beam_set_from_record`): the yarn is the merge's per the variant
+map, else normalised from the record's denier / luster / type; the
+description `{yarn} {ends}X{beams}`; the record's lbs and receipt (default
+`start_date`). The set is therefore described by what the plant says is on
+it, and a set that does not fit the bar it was staged for is passed over at
+the hang (see "Beam-set inventory") rather than relabelled. An older record
+with none of the yarn fields falls back to the bar's requirement and a
+fresh-beam weight (it can only ever fit); one whose yarn normalises to
+nothing (not polyester) is skipped. Records for machines not in the file
+are ignored — those sets still leave free stock via the export's
+`assigned` flag.
+
+A record's optional **`status`** says where the set is:
+
+- `"inventory"` (the default when absent) — assigned to the bar on
+  paper but still in the warehouse: queued on the bar, next up;
+- `"staged"` — at the machine, queued exactly the same way (the planner
+  does not model the walk from the warehouse); the set's `location`
+  records which (`'staged'` / `'inventory'`) so the outputs can say
+  which sets the floor still has to pull;
+- `"hung"` — already **on the bar, not threaded**. The set becomes the
+  bar's initial set in place of whatever the machines file named for it
+  (`init_*_set`, which is then reported as replaced), with the record's
+  own lbs (the file's `init_*_lbs` for that bar is ignored) and
+  `init_*_threaded=False`; the machine's `init_roll_lbs` is taken as
+  `0.0`. The set is built as any assigned record is (the export's set,
+  else from the record's yarn fields) and is never queued. Two `"hung"`
+  records for one bar raise `ValueError`. The loader reports every hung
+  set it applied. The merge-blacklist applies to a hung set as to any
+  mounted one: it fits nothing, so the first plan unhangs it (and does
+  not return it to stock).
+
+Any other `status` value raises `ValueError`.
 
 `path` points to a JSON file with one entry per machine. Per-entry
 fields: machine id, initial item, the lbs remaining on each bar
@@ -1141,16 +1618,24 @@ module-level constants — so the file no longer carries
 `style_change_time` / `family_change_time`.) The initial top and
 bottom beam sets are built as physical `BeamSet`s: id = the file's
 `init_*_set` set number when given, else `<machine id>-top` / `<machine
-id>-btm`; `lbs` from the file's `init_*_lbs`; `avail_date = start_date`;
-`desc` from the resolved `Greige`'s `configuration` (a machine currently
-set up to run an item is by definition threaded with that item's beams).
+id>-btm`; `lbs` from the file's `init_*_lbs`; `avail_date = start_date`.
 Its **merge** and **vendor** come, in order, from the `init_*_set` object
 itself (the plant's statement of what is mounted), else from the inventory
 export's record of that set (`beam_sets`, matched by set number and vendor)
 — which also supplies the plant's denier / luster / yarn type — else, for
 the merge only, from the variant the file named when a `variant_map` was
 passed (the variant's recipe supplying the merge on each bar); otherwise
-`None`. `known_merge` is True whenever a merge was found. A set named as
+`None`. `known_merge` is True whenever a merge was found. Its `desc` is
+**what the evidence says is on the bar**, in order: the export's
+description of the set when the export holds it; else, for a merge the
+variant map knows, that merge's yarn at the bar's construction — `{map
+yarn} {ends}X{beams}` from the item's beam label; else the item's beam
+label itself (with no yarn evidence, a machine set up for an item is taken
+to be threaded with its beams — the only case left, since a recipe merge
+always carries the master's yarn). A description that does not fit the
+item's requirement makes the bar **foreign** (see Inputs and "Foreign
+bars"): the first plan on the machine tapes out or wastes the reported set
+instead of knitting the item from yarn it does not use. A set named as
 mounted is on the machine, not in stock: the planner's loader builds the
 inventory from the export *minus* the machines' initial sets. `start_date` and `workcal` are
 plant-wide rather than per-machine, so they're passed alongside the
@@ -1168,7 +1653,8 @@ not by the schedule module itself.
 reads. The scheduler can score the plan freely and discard if not committing.
 
 ```
-plan = machine.plan_production(item, lbs, start_at, inventory=inventory)   # pure
+plan = machine.plan_production(item, lbs, start_at, inventory=inventory,
+                               capacity=capacity)                           # pure
 # plan.jobs is already a tuple of Job records (1 in 'schedule_tail'
 # mode, 1-2 in 'next_runout' mode). Group by item id so each RlsItem
 # gets a single batch.

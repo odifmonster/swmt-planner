@@ -5,6 +5,7 @@ they satisfy. See "Beam-set inventory" in `schedule/DESIGN.md`."""
 
 from typing import Iterable, Mapping, Sequence, TYPE_CHECKING
 
+from swmtplanner.support import planning_mode
 from swmtplanner.schedule.activity import BEAM_FLOOR_LBS, MAX_BEAM_WASTE_LBS
 
 if TYPE_CHECKING:
@@ -21,7 +22,12 @@ InventoryView = Mapping['BeamSetDesc', Sequence['BeamSet']]
 def worth_stocking(beam_set: 'BeamSet') -> bool:
     """Whether a set has enough usable yarn (`lbs - BEAM_FLOOR_LBS`) to be
     hung at all: below `MAX_BEAM_WASTE_LBS` the max-waste gate would swap it
-    straight back out, so it is not usable stock."""
+    straight back out, so it is not usable stock. Never for a blacklisted
+    set (its merge is flagged for quality — see "Blacklisted merges" in
+    DESIGN.md), and never in planning mode, which keeps no stock at all (a
+    taped-out set is not returned; the next changeover invents its sets)."""
+    if planning_mode.enabled() or beam_set.blacklisted:
+        return False
     return beam_set.lbs - BEAM_FLOOR_LBS >= MAX_BEAM_WASTE_LBS
 
 

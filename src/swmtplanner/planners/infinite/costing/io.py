@@ -19,7 +19,7 @@ def weights_from_dict(
     Phase 1: `lateness`, `drainage`, `carrying`, `excess`,
     `tape_out_single`, `tape_out_both`, `style_change`, `runner_change`,
     `pattern_change`, `idle_time`, `waste_lbs`; Phase 2 cross-cutting:
-    `priority`, `level_loading`, `old_machine`.
+    `priority`, `level_loading`, `old_machine`, `recovery`.
     All fields are required (callers set 0 to opt out of a
     contribution). Extra keys raise `TypeError` so a typo isn't
     silently dropped.

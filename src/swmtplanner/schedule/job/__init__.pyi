@@ -25,6 +25,11 @@ class Job(HasID[str]):
     """The machine time the job accounts for, in schedule order: its item's
     setup (re-threads, changeover), its knits and doffs, and the tape-out
     that later takes its sets off. Idle and Waste belong to no job."""
+    prior_job: str | None = ...
+    """The previous plan's job this one was committed to honour, else None."""
+    fill: bool = ...
+    """True when the job knit rolls of the current item while the machine
+    waited for a changeover-ration slot ("Filling a slot wait")."""
 
     @property
     def id(self) -> str: ...

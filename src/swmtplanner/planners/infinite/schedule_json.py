@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .loop import PlanReport
 
 __all__ = [
+    'has_work',
     'PLANT_TZ',
     'schedule_json', 'write_schedule_json',
     'machines_schedule_json', 'write_machines_schedule_json',
@@ -55,8 +56,11 @@ def _dt(t: datetime, tz: tzinfo) -> str:
 def _beam_set(bs: 'BeamSet | None') -> dict | None:
     if bs is None:
         return None
-    return {'set_no': bs.set_no, 'merge': bs.merge, 'vendor': bs.vendor,
-            'desc': bs.desc.id, 'lbs': bs.lbs}
+    out = {'set_no': bs.set_no, 'merge': bs.merge, 'vendor': bs.vendor,
+           'desc': bs.desc.id, 'lbs': bs.lbs}
+    if bs.blacklisted:
+        out['blacklisted'] = True
+    return out
 
 
 def _activity(a: 'Activity', tz: tzinfo) -> dict[str, Any]:
@@ -67,22 +71,31 @@ def _activity(a: 'Activity', tz: tzinfo) -> dict[str, Any]:
         'start': _dt(a.start, tz), 'end': _dt(a.end, tz),
     }
     if isinstance(a, Knit):
-        out.update(item=a.item.id, lbs=a.lbs, variant=a.variant)
+        out.update(item=a.item.id, lbs=a.lbs, variant=a.variant,
+                   top_beam=_beam_set(a.top_beam), btm_beam=_beam_set(a.btm_beam))
     elif isinstance(a, Waste):
         out.update(beam=_beam_set(a.beam), bar=a.bar, lbs=a.lbs)
     elif isinstance(a, (TapeOut, Hanging)):
         out.update(bars=a.bars, top_beam=_beam_set(a.top_beam),
                    btm_beam=_beam_set(a.btm_beam))
+        if isinstance(a, Hanging) and a.passed_over:
+            out['passed_over'] = [
+                {'bar': bar, **_beam_set(bs),
+                 'reason': 'blacklisted' if bs.blacklisted else 'does not fit'}
+                for bar, bs in a.passed_over]
     elif isinstance(a, Threading):
         out.update(bars=a.bars)
     elif isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         out.update(from_item=a.from_item.id, to_item=a.to_item.id)
-    elif not isinstance(a, (Doff, Idle)):
+    elif isinstance(a, Idle):
+        if a.reason:
+            out.update(reason=a.reason)
+    elif not isinstance(a, Doff):
         raise TypeError(f'unknown activity type: {type(a).__name__}')
     return out
 
 
-def _job(job: 'Job', tz: tzinfo) -> dict[str, Any]:
+def _job(job: 'Job', tz: tzinfo, due_dates: 'Mapping[str, datetime]') -> dict[str, Any]:
     acts = job.activities
     rolls = []
     for n, roll in enumerate(job.rolls, start=1):
@@ -98,6 +111,15 @@ def _job(job: 'Job', tz: tzinfo) -> dict[str, Any]:
     return {
         'kind': 'job', 'id': job.id, 'item': job.item.id,
         'tgt_order': job.tgt_order,
+        # The target order's due date (None for a safety or run-up job):
+        # what a later run matches this job to its order by, since order
+        # ids count weeks from each run's own start.
+        'due_date': (_dt(due_dates[job.tgt_order], tz)
+                     if job.tgt_order in due_dates else None),
+        'prior_job': job.prior_job,
+        # True when the job knit rolls of the current item while the machine
+        # waited for a changeover-ration slot ("Filling a slot wait").
+        'fill': job.fill,
         'start': _dt(acts[0].start, tz) if acts else None,
         'end': _dt(acts[-1].end, tz) if acts else None,
         'total_lbs': job.total_lbs,
@@ -106,8 +128,16 @@ def _job(job: 'Job', tz: tzinfo) -> dict[str, Any]:
     }
 
 
+def has_work(activities: 'tuple[Activity, ...]') -> bool:
+    """Whether a machine's schedule holds anything but `Idle`: machines that
+    sit idle for the whole run are left out of the schedule outputs (the
+    JSON and the xlsx schedule sheets)."""
+    return any(not isinstance(a, Idle) for a in activities)
+
+
 def _machine(machine_id: str, activities: 'tuple[Activity, ...]',
-             jobs: 'tuple[Job, ...]', tz: tzinfo) -> dict[str, Any]:
+             jobs: 'tuple[Job, ...]', tz: tzinfo,
+             due_dates: 'Mapping[str, datetime] | None' = None) -> dict[str, Any]:
     """A machine's schedule: jobs (placed at their first activity's start)
     interleaved with the activities no job claims, chronologically."""
     claimed = {a.id for j in jobs for a in j.activities}
@@ -115,7 +145,7 @@ def _machine(machine_id: str, activities: 'tuple[Activity, ...]',
     for j in jobs:
         anchor = j.activities[0].start if j.activities else (
             j.rolls[0].completion_time if j.rolls else datetime.min)
-        entries.append((anchor, 0, _job(j, tz)))
+        entries.append((anchor, 0, _job(j, tz, due_dates or {})))
     for a in activities:
         if a.id not in claimed:
             entries.append((a.start, 1, _activity(a, tz)))
@@ -125,12 +155,25 @@ def _machine(machine_id: str, activities: 'tuple[Activity, ...]',
 
 def schedule_json(report: 'PlanReport', tz: tzinfo = PLANT_TZ) -> list[dict[str, Any]]:
     """The report's per-machine schedules as JSON-ready objects, machines in
-    the report's order. `tz` is what the planner's naive times mean; the
-    output is UTC."""
+    the report's order, leaving out machines whose only activity is `Idle`
+    (`has_work`). `tz` is what the planner's naive times mean; the output
+    is UTC."""
+    due = order_due_dates(report)
     return [
-        _machine(m_id, acts, report.jobs_by_machine.get(m_id, ()), tz)
+        _machine(m_id, acts, report.jobs_by_machine.get(m_id, ()), tz, due)
         for m_id, acts in report.schedules.items()
+        if has_work(acts)
     ]
+
+
+def order_due_dates(report: 'PlanReport') -> dict[str, datetime]:
+    """`{order id: due date}` over every regular order of the report's demand
+    items — the lookup that gives each job its `due_date` in the JSON."""
+    out: dict[str, datetime] = {}
+    for rls in report.rls_items.values():
+        for order in rls.safety_view.orders:
+            out[order.id] = order.week.due_date
+    return out
 
 
 def machines_schedule_json(machines: 'Mapping[str, Machine]',
@@ -138,7 +181,8 @@ def machines_schedule_json(machines: 'Mapping[str, Machine]',
     """The same objects straight from `Machine`s (their `activities` and
     `jobs`) — for schedules built without a `PlanReport`, e.g. the manual
     scheduler."""
-    return [_machine(m_id, m.activities, m.jobs, tz) for m_id, m in machines.items()]
+    return [_machine(m_id, m.activities, m.jobs, tz)
+            for m_id, m in machines.items() if has_work(m.activities)]
 
 
 def write_schedule_json(report: 'PlanReport', path: 'str | Path',

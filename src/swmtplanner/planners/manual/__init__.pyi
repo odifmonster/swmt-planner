@@ -23,6 +23,8 @@ class Step:
     """Set numbers per hang in hang order; None leaves a hang to the machine's
     queue / stock (JSON null)."""
     btm: tuple[str | None, ...] = ...
+    order: str | None = ...
+    """The new job's `tgt_order` (JSON `order`); None for no order."""
     def to_json(self) -> dict[str, Any]: ...
     @classmethod
     def from_json(cls, d: Mapping[str, Any]) -> Step: ...
@@ -32,9 +34,20 @@ class ManualSchedule:
     """Build a schedule by hand on the planner's `State`: stage a move per
     machine with `rolls`, inspect the plans, `commit` or `discard` one or
     all, write schedule JSON."""
-    def __init__(self, state: State) -> None: ...
+    def __init__(self, state: State, stock: Literal['all', 'named', 'none'] = ...) -> None:
+        """`stock`: what automatic picks draw on — the committed inventory
+        (`'all'`), nothing (`'none'`: every automatic pick invents a
+        placeholder; naming a set raises) or only the sets the step names
+        (`'named'`)."""
+        ...
     @classmethod
-    def from_config(cls, config: str | Path, *, quiet: bool = ...) -> ManualSchedule: ...
+    def from_config(
+        cls, config: str | Path, *, quiet: bool = ...,
+        change_date: datetime | None = ...,
+    ) -> ManualSchedule:
+        """Load a run-config as `plan infinite` does; the machines are already
+        run up to the config's `change_date` (or the one given here)."""
+        ...
     @property
     def state(self) -> State: ...
     @property
@@ -60,6 +73,7 @@ class ManualSchedule:
     def rolls(
         self, machine: str, item: str, n: int, at: StartAt = ...,
         top: Iterable[str | None] = ..., btm: Iterable[str | None] = ...,
+        order: str | None = ...,
     ) -> ProductionPlan:
         """Plan and stage `n` rolls of `item` on `machine` (replacing that
         machine's earlier staging; others stay), against the inventory less

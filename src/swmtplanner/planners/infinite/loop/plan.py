@@ -1,25 +1,32 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, fields
-from datetime import datetime
+from dataclasses import dataclass, field, fields
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from swmtplanner.demand.rlsitem import CostComponents, RlsItem
+from swmtplanner.schedule import (
+    TapeOut, Hanging, StyleChange, RunnerChange, PatternChange, Idle,
+)
 
-from swmtplanner.planners.infinite.coordination import build_context
+from swmtplanner.planners.infinite.coordination import (
+    RegularOrder, build_context, eligible_orders,
+)
 from swmtplanner.planners.infinite.costing import Costing
 from swmtplanner.planners.infinite.report import (
     demand_dataframe, unmet_demand_dataframe,
 )
-from swmtplanner.planners.infinite.state import State
+from swmtplanner.planners.infinite.state import Move, PriorCommit, State
 
-from .candidates import enumerate_candidates
+from .candidates import enumerate_candidates, fill_for
 
 if TYPE_CHECKING:
     from swmtplanner.demand.order import RawOrder
-    from swmtplanner.schedule import Activity, Job
+    from swmtplanner.schedule import Activity, Job, ChangeoverCapacity, PassedOver
     from swmtplanner.debuglog import DebugLog
     from swmtplanner.planners.infinite.state import Move
+    from swmtplanner.planners.infinite.coordination import ScoringContext
 
 
 @dataclass
@@ -48,10 +55,22 @@ class PlanReport:
     unmet_lbs_by_item_week: dict[tuple[str, int], float]
     late_orders: tuple['RawOrder', ...]
     rls_items: dict[str, RlsItem]
+    # The changeover ration with its final bookings (None for a hand-built
+    # report) — the `changeovers` sheet reads the periods from it.
+    capacity: 'ChangeoverCapacity | None' = None
+    # Per machine, the plant-assigned sets its committed plans passed over
+    # because they did not fit the bar at the hang (`Machine.queue_passed_over`;
+    # see "Assigned sets and bar queues" in schedule/DESIGN.md). Machines
+    # with none are left out.
+    queue_passed_over: 'dict[str, tuple[PassedOver, ...]]' = field(default_factory=dict)
+    # The prior plan's jobs, each with its fate in this run (see "Sticking
+    # to the prior plan" in DESIGN.md); empty without a prior plan.
+    prior: 'tuple[PriorCommit, ...]' = ()
 
 
 def plan(
     state: State, costing: Costing, *, debuglog: 'DebugLog | None' = None,
+    tape_out_report: 'Path | None' = None,
 ) -> PlanReport:
     """Greedy planner. Iterates enumerate → score → commit-lowest,
     advancing the decision window as needed to keep the candidate pool
@@ -79,13 +98,25 @@ def plan(
     copies are written once from the finished report. When absent, the hot path
     (scalar score, pick the min) runs and nothing is logged. (The old
     `verbose`-flag audit reconstruction stays divorced; the `PlanReport` detail
-    tuples remain `None`.)"""
+    tuples remain `None`.)
+
+    `tape_out_report` is an optional text file: every time the move chosen
+    carries a `TapeOut`, the iteration's whole candidate list is appended to
+    it with each candidate's score, so the alternatives to that tape-out and
+    what they would have cost are on record (see `_tape_out_block`)."""
     horizon = _compute_horizon(state)
+    if tape_out_report is not None:
+        tape_out_report.write_text(
+            'Tape-out decisions: at every iteration whose chosen move tapes a set '
+            'out, every candidate of that iteration and its score (lower is '
+            'better; "delta" is the score above the chosen move).\n')
 
     if debuglog is not None:
         _emit_run_configs(debuglog, state, costing)
 
-    move_count = 0
+    # 0. Start from the prior plan: its jobs that fill urgent demand are
+    #    recommitted before anything is scored.
+    move_count = recommit_prior(state)
 
     while True:
         print(f'Total moves committed: {move_count}', end='\r')
@@ -106,32 +137,25 @@ def plan(
         if not candidates:
             break
 
-        # Build the per-iteration scoring context (priorities, earliest
-        # DP time, new-machine availability) once before scoring.
-        ctx = build_context(state, candidates)
-        urgent_items = {
-            k.item_id for k in ctx.regular_orders_by_key.keys()
-            if k.week_idx is not None and k.week_idx <= state.reference_week_idx
-        }
+        # Advance the reference week while too few items have an urgent
+        # regular order, then build the per-iteration scoring context
+        # (earliest DP time, new-machine availability, fill predictor)
+        # once before scoring.
         while (
-            len(urgent_items) < state.reference_threshold
+            len(_urgent_items(state)) < state.reference_threshold
             and state.reference_week_idx <= 8
         ):
             state.advance_reference_week()
             candidates = enumerate_candidates(state)
-            ctx = build_context(state, candidates)
-            urgent_items = {
-                k.item_id for k in ctx.regular_orders_by_key.keys()
-                if k.week_idx is not None and k.week_idx <= state.reference_week_idx
-            }
+        ctx = build_context(state, candidates)
 
         if debuglog is None:
             # Hot path: scalar score only, pick the min.
-            _, best_move = min(
-                ((costing.score_after_move(state, m, ctx), m)
-                 for m in candidates),
-                key=lambda pair: pair[0],
-            )
+            scored = [(costing.score_after_move(state, m, ctx), m) for m in candidates]
+            _, best_move = min(scored, key=lambda pair: pair[0])
+            if tape_out_report is not None and _has_tape_out(best_move):
+                with open(tape_out_report, 'a') as fh:
+                    fh.write(_tape_out_block(move_count, state, scored, best_move, costing, ctx))
         else:
             # Debug path: record this iteration's window/reference-week state
             # (parent of the iteration_log rows), then score and rank the full
@@ -150,10 +174,165 @@ def plan(
         move_count += 1
 
     print()
-    report = _build_report(state, costing)
+    report = build_report(state, costing)
     if debuglog is not None:
         _emit_demand_tables(debuglog, report)
     return report
+
+
+def recommit_prior(state: State) -> int:
+    """The pre-pass (see "Sticking to the prior plan" in DESIGN.md): walk
+    the prior plan's jobs in prior start order across machines and
+    recommit each whose order is still urgent and open — the prior roll
+    count at the machine's schedule tail, targeting the order matched by
+    item and due date, with the current item's fill — stamped with the
+    prior job's id. A job whose order is open but not urgent, or starting
+    at or past `start_date + frozen_window` (when set), is left open for
+    the loop with the reason noted; one whose order is filled or cannot be
+    matched, whose item the machine cannot run (or `plan_production`
+    refuses) is dropped with the reason. Returns the number of moves
+    committed."""
+    jobs = sorted((pc for lst in state.prior.values() for pc in lst),
+                  key=lambda pc: (pc.start, pc.machine))
+    cutoff = (state.start_date + state.frozen_window
+              if state.frozen_window is not None else None)
+    committed = 0
+    for pc in jobs:
+        if pc.status != 'open':
+            continue
+        if cutoff is not None and pc.start >= cutoff:
+            pc.note = 'outside the frozen window'
+            continue
+        current, why = _current_order_for(state, pc)
+        if current is None:
+            if why == 'not urgent':
+                pc.note = why                   # left open for the loop
+            else:
+                pc.status, pc.note = 'dropped', why
+            continue
+        machine = state.machines[pc.machine]
+        item = current.item
+        if not item.can_run_on_mchn(pc.machine):
+            pc.status, pc.note = 'dropped', f'{item.id} cannot run on {pc.machine}'
+            continue
+        lbs = pc.rolls * item.tgt_wt
+        try:
+            plan = machine.plan_production(
+                item, lbs, start_at='schedule_tail', tgt_order=current.order_id,
+                inventory=state.inventory, capacity=state.capacity,
+                prior_job=pc.prior_job, fill=fill_for(state, machine, item),
+            )
+        except (ValueError, KeyError) as e:
+            pc.status, pc.note = 'dropped', str(e)
+            continue
+        move = Move(machine_id=pc.machine, item=item, lbs=lbs, start_at='schedule_tail',
+                    idle_for=timedelta(0), plan=plan, week_idx=current.week_idx,
+                    order_remaining_lbs=current.lbs)
+        state.commit_move(move)
+        new_job = next((j for j in plan.jobs if j.tgt_order is not None), None)
+        pc.status, pc.job_id, pc.note = 'consumed', (new_job.id if new_job else None), ''
+        committed += 1
+    return committed
+
+
+def _current_order_for(state: State, pc: 'PriorCommit') -> 'tuple[RegularOrder | None, str]':
+    """The urgent open order of this run a prior job serves — the item's
+    regular order with the job's due date, `week_idx <=
+    state.reference_week_idx`, remaining lbs — or None with why not:
+    `not urgent`, `order filled`, `no such order` (a safety or unmatched
+    prior job, or an item the run does not have)."""
+    rls = state.rls_items.get(pc.item)
+    if rls is None or pc.due_date is None:
+        return None, 'no such order'
+    for order in rls.safety_view.orders:
+        if order.week.due_date != pc.due_date:
+            continue
+        if order.week.week_idx > state.reference_week_idx:
+            return None, 'not urgent'
+        if order.remaining_lbs <= 0:
+            return None, 'order filled'
+        return RegularOrder(item=rls.item, week_idx=order.week.week_idx,
+                            due_date=order.week.due_date, lbs=order.remaining_lbs,
+                            gross_lbs=order.week.qty_lbs, order_id=order.id), ''
+    return None, 'no such order'
+
+
+def _urgent_items(state: State) -> set[str]:
+    """The items whose eligible order is a regular order at or before the
+    reference week — what the reference-week advance counts."""
+    return {
+        o.item.id for o in eligible_orders(state)
+        if isinstance(o, RegularOrder)
+        and o.week_idx <= state.reference_week_idx
+    }
+
+
+def _has_tape_out(move: 'Move') -> bool:
+    return any(isinstance(a, TapeOut) for a in move.plan.activities)
+
+
+def _move_line(move: 'Move', score: float, best: float,
+               recovery: 'tuple[float, list] | None' = None) -> str:
+    """One candidate: machine, item, lbs, where it starts, leading idle, the
+    order week and order it serves, when its plan starts and ends, the
+    changeover it needs (tape-out bars, changeover kind, sets hung), the
+    changeover slots it books (`kind@day` with the wait, if any), its
+    weighted recovery cost with the items it strands, and its score with
+    the gap to the chosen move."""
+    acts = move.plan.activities
+    tos = [a.bars for a in acts if isinstance(a, TapeOut)]
+    hangs = [f"{a.bars}:{'/'.join(b.set_no for b in (a.top_beam, a.btm_beam) if b)}"
+             for a in acts if isinstance(a, Hanging)]
+    change = next((type(a).__name__ for a in acts
+                   if isinstance(a, (StyleChange, RunnerChange, PatternChange))), '-')
+    idle = move.idle_for.total_seconds() / 3600
+    week = '-' if move.week_idx is None else f'wk{move.week_idx}'
+    order = _targeted_order_id(move) or '-'
+    starts = f'{acts[0].start:%m-%d %H:%M}' if acts else '-'
+    ends = f'{acts[-1].end:%m-%d %H:%M}' if acts else '-'
+    waited = sum(((a.end - a.start).total_seconds() / 3600
+                  for a in acts if isinstance(a, Idle) and a.reason), 0.0)
+    slots = ' '.join(f"{k[:4]}x{u}@{d:%m-%d}" for k, d, u, _t in move.plan.capacity_taken)
+    if slots and waited:
+        slots += f' wait {waited:.0f}h'
+    rec_cost, items = recovery if recovery is not None else (0.0, [])
+    strands = ','.join(i for i, _c in items)
+    return (f"{move.machine_id:4} {move.item.id:11} {move.lbs:8.0f} lbs  "
+            f"{move.start_at:13} idle {idle:6.1f}h  {week:5} {order:22} "
+            f"{starts} -> {ends}  "
+            f"tape-out {','.join(tos) or '-':5} {change:13} "
+            f"hang {' '.join(hangs) or '-':28} "
+            f"slot {slots or '-':22} recovery {rec_cost:9.2f} strands {strands or '-':16} "
+            f"score {score:14.2f}  delta {score - best:12.2f}")
+
+
+def _tape_out_block(iteration: int, state: State,
+                    scored: list[tuple[float, 'Move']], best: 'Move',
+                    costing: 'Costing | None' = None,
+                    ctx: 'ScoringContext | None' = None) -> str:
+    """The report block for one iteration whose chosen move tapes out: the
+    chosen move first, then every candidate by ascending score."""
+    best_score = next(sc for sc, m in scored if m is best)
+    def sc_of(m):
+        if costing is None or ctx is None:
+            return None
+        q, items = costing.recovery_detail(state, m, ctx)
+        return (costing.weights.recovery * q, items)
+    lines = [
+        '',
+        f'=== iteration {iteration}  window_end {state.window_end}  '
+        f'reference week {state.reference_week_idx}  '
+        f'candidates {len(scored)}',
+        f'CHOSEN  {_move_line(best, best_score, best_score, sc_of(best))}',
+        f'  on {best.machine_id}, now running '
+        f'{state.machines[best.machine_id].current_status.current_item.id}; '
+        f'tail {state.machines[best.machine_id].schedule_tail}',
+        'alternatives:',
+    ]
+    for sc, m in sorted(scored, key=lambda p: p[0]):
+        mark = '*' if m is best else ' '
+        lines.append(f'  {mark} {_move_line(m, sc, best_score, sc_of(m))}')
+    return '\n'.join(lines) + '\n'
 
 
 def _targeted_order_id(move: 'Move') -> str | None:
@@ -314,7 +493,7 @@ def _compute_horizon(state: State) -> datetime:
     return latest_due + state.planning_horizon_buffer
 
 
-def _build_report(state: State, costing: Costing) -> PlanReport:
+def build_report(state: State, costing: Costing) -> PlanReport:
     """Build a `PlanReport` from the (post-loop) state. Snapshots the
     machines' activity tuples and the rls_items' job tuples; reads the
     final score and per-item cost components from the demand views;
@@ -353,4 +532,10 @@ def _build_report(state: State, costing: Costing) -> PlanReport:
             if order.late_lbs > 0
         ),
         rls_items=dict(state.rls_items),
+        capacity=state.capacity,
+        queue_passed_over={
+            m_id: m.queue_passed_over for m_id, m in state.machines.items()
+            if m.queue_passed_over
+        },
+        prior=tuple(pc for jobs in state.prior.values() for pc in jobs),
     )

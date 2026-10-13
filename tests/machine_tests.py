@@ -21,6 +21,12 @@ from swmtplanner.support import WorkCal
 
 # 24/7 workcal so most tests can do plain clock-time arithmetic. The
 # weekday workcal is reserved for the workcal-offset test in 1.5.
+# The fixtures state each item's *working* rate on a machine directly and
+# derive expected durations as lbs / rate, so the plant-wide running
+# efficiency the model applies on top is pinned to 1 here.
+import swmtplanner.schedule.machine.machine as _machine_module
+_machine_module.RUNNING_EFFICIENCY = 1.0
+
 _24_7 = WorkCal(work_days=(0, 1, 2, 3, 4, 5, 6),
                 day_start=0, day_end=24, holidays=())
 _WEEKDAY_9H = WorkCal(work_days=(0, 1, 2, 3, 4),
@@ -951,7 +957,7 @@ _ITEM_F = Greige(  # different yarn on both bars AND different family
 )
 # Large-roll item (same yarn/family as A) for the production-loop runout
 # cases: tgt_wt=300 makes the per-roll yarn draw (300*pct = 120 top / 180
-# btm) exceed MAX_BEAM_WASTE_LBS=100, so a bar can reach the floor exactly
+# btm) exceed MAX_BEAM_WASTE_LBS=20, so a bar can reach the floor exactly
 # at a roll boundary (clean reload, no Waste) instead of always passing
 # through the (0, MAX] waste window. Fresh beams: 40D->2800, 60D->1800.
 _ITEM_BIG = Greige(
@@ -1163,16 +1169,16 @@ class PlanProductionLoopTests(unittest.TestCase):
 
     def test_exhaust_at_roll_boundary_coswaps_below_max_bar(self):
         # 2.3.3.2. btm=365 hits exactly 0 at the 2-roll boundary (re-thread);
-        # top=305 has only 60 usable yarn there (305-240-5=60 < MAX), so the
-        # gate co-swaps it -> a zero-duration Waste(top,60) alongside the
+        # top=260 has only 15 usable yarn there (260-240-5=15 < MAX 20), so
+        # the gate co-swaps it -> a zero-duration Waste(top,15) alongside the
         # 'both' re-thread.
         m = _make_machine(init_item=_ITEM_BIG,
-                          init_top_lbs=305.0, init_btm_lbs=365.0)
+                          init_top_lbs=260.0, init_btm_lbs=365.0)
         plan = m.plan_production(_ITEM_BIG, lbs=900.0,
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), (
             _kd(300.0, 'AU_BIG') * 2
-            + [('Waste', 'top', 60.0, '40D BLACK 1000X4')]
+            + [('Waste', 'top', 15.0, '40D BLACK 1000X4')]
             + _rethread('both', top_lbs=2800.0, btm_lbs=1800.0)
             + _kd(300.0, 'AU_BIG')
         ))
@@ -1203,16 +1209,16 @@ class PlanProductionLoopTests(unittest.TestCase):
 
     def test_exhaust_mid_roll_double_rethread_coswap(self):
         # 2.3.4.2 (other bar below MAX). btm=305 floors 200 lbs into roll 2;
-        # top=255 has 50 usable yarn there (50 < MAX), so the runout co-swaps
-        # top -> Waste(top,50) + a 'both' re-thread.
+        # top=215 has 10 usable yarn there (215-200-5=10 < MAX 20), so the
+        # runout co-swaps top -> Waste(top,10) + a 'both' re-thread.
         m = _make_machine(init_item=_ITEM_BIG,
-                          init_top_lbs=255.0, init_btm_lbs=305.0)
+                          init_top_lbs=215.0, init_btm_lbs=305.0)
         plan = m.plan_production(_ITEM_BIG, lbs=900.0,
                                  start_at='schedule_tail')
         self.assertEqual(_shape(plan), (
             _kd(300.0, 'AU_BIG')
             + [('Knit', 200.0, 'AU_BIG'),
-               ('Waste', 'top', 50.0, '40D BLACK 1000X4')]
+               ('Waste', 'top', 10.0, '40D BLACK 1000X4')]
             + _rethread('both', top_lbs=2800.0, btm_lbs=1800.0)
             + [('Knit', 100.0, 'AU_BIG'), ('Doff',)]
             + _kd(300.0, 'AU_BIG')
@@ -1356,7 +1362,7 @@ class PlanProductionStartAtTests(unittest.TestCase):
         # next-item roll of usable yarn. The new item's FIRST roll straddles
         # a mid-roll re-thread. Current BIG (tgt 300): top=355 ->
         # usable (355-5)/0.4=875 = 2 rolls (limits); btm=2000 has slack.
-        # After 2 rolls: top=115 (usable 110: >MAX 100 but < the 120 a BIG2
+        # After 2 rolls: top=115 (usable 110: >MAX 20 but < the 120 a BIG2
         # top-roll needs), btm=1640. Preamble keeps both (matching yarn) and
         # emits only the changeover; BIG2's first roll winds 275 lbs, top
         # floors, top re-threads, then 25 lbs finish the roll.
@@ -1709,13 +1715,14 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
 
     def test_mismatched_bar_below_max_is_wasted(self):
         # 3.1.3. A -> D (top yarn differs 30D, btm matches 60D). top has only
-        # 50 lbs -> usable 45 <= MAX_BEAM_WASTE_LBS, so its mismatched residue
-        # is discarded as a zero-duration Waste(top,45) rather than preserved
-        # with a TapeOut. The Waste is attributed to the outgoing yarn (40D).
-        m = _make_machine(init_top_lbs=50.0, init_btm_lbs=2800.0)
+        # 20 lbs -> usable 15 <= MAX_BEAM_WASTE_LBS (20), so its mismatched
+        # residue is discarded as a zero-duration Waste(top,15) rather than
+        # preserved with a TapeOut. The Waste is attributed to the outgoing
+        # yarn (40D).
+        m = _make_machine(init_top_lbs=20.0, init_btm_lbs=2800.0)
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), (
-            [('Waste', 'top', 45.0, '40D BLACK 1000X4')]
+            [('Waste', 'top', 15.0, '40D BLACK 1000X4')]
             + _rethread('top', top_lbs=2800.0)
             + [('RunnerChange', 'AU0001', 'AU0004')]
             + _kd(100.0, 'AU0004')
@@ -1735,32 +1742,32 @@ class PlanProductionChangeoverShapeTests(unittest.TestCase):
 
     def test_mixed_tape_out_and_waste_no_both(self):
         # 3.1.6. A -> G (both yarns differ). top is full (usable > MAX) so it
-        # tapes out to preserve; btm has only 50 lbs (usable 45 <= MAX) so it
-        # wastes. Only one bar tapes -> single TapeOut('top'), NOT 'both';
+        # tapes out to preserve; btm has only 20 lbs (usable 15 <= MAX 20) so
+        # it wastes. Only one bar tapes -> single TapeOut('top'), NOT 'both';
         # both bars re-thread together.
-        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=50.0)
+        m = _make_machine(init_top_lbs=2800.0, init_btm_lbs=20.0)
         plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), (
             [('TapeOut', 'top'),
-             ('Waste', 'btm', 45.0, '60D WHITE 1000X4')]
+             ('Waste', 'btm', 15.0, '60D WHITE 1000X4')]
             + _rethread('both', top_lbs=2800.0, btm_lbs=1800.0)
             + [('RunnerChange', 'AU0001', 'AU0007')]
             + _kd(100.0, 'AU0007')
         ))
 
     def test_matching_near_empty_bar_kept_then_swapped_in_loop(self):
-        # 3.1.7. A -> E (top matches 40D, btm differs 90D). top has only 50
-        # lbs but its yarn MATCHES E, so the preamble keeps it (no Waste, no
-        # TapeOut) -- the near-empty swap is deferred to the production
-        # loop's pre-roll gate, which then wastes it. btm (mismatched, full)
-        # tapes out in the preamble.
-        m = _make_machine(init_top_lbs=50.0, init_btm_lbs=2800.0)
+        # 3.1.7. A -> E (top matches 40D, btm differs 90D). top has only 20
+        # lbs (usable 15 < MAX 20) but its yarn MATCHES E, so the preamble
+        # keeps it (no Waste, no TapeOut) -- the near-empty swap is deferred
+        # to the production loop's pre-roll gate, which then wastes it. btm
+        # (mismatched, full) tapes out in the preamble.
+        m = _make_machine(init_top_lbs=20.0, init_btm_lbs=2800.0)
         plan = m.plan_production(_ITEM_E, lbs=100.0, start_at='schedule_tail')
         self.assertEqual(_shape(plan), (
             [('TapeOut', 'btm')]                 # preamble: btm mismatched/full
             + _rethread('btm', btm_lbs=1800.0)
             + [('RunnerChange', 'AU0001', 'AU0005')]
-            + [('Waste', 'top', 45.0, '40D BLACK 1000X4')]  # loop: matching near-empty top
+            + [('Waste', 'top', 15.0, '40D BLACK 1000X4')]  # loop: matching near-empty top
             + _rethread('top', top_lbs=2800.0)
             + _kd(100.0, 'AU0005')
         ))
@@ -1794,18 +1801,18 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
                          [('AU_BIG', 3, 900.0), ('AU0006', 1, 100.0)])
 
     def test_limiting_bar_wasted_other_bar_taped(self):
-        # 3.2.2. A (tgt 100) run up from 200/2000 -> 4 rolls (400 lbs),
-        # leaving top=40 (usable 35) and btm=1760 (usable 1755). A -> G both
-        # yarns differ (same family): the limiting top (usable 35 <= MAX) is
-        # wasted, while the full btm (usable 1755 > MAX) is preserved with a
-        # single TapeOut('btm'); both re-thread together.
+        # 3.2.2. A (tgt 100) run up from 180/2000 -> 4 rolls (400 lbs),
+        # leaving top=20 (usable 15) and btm=1760 (usable 1755). A -> G both
+        # yarns differ (same family): the limiting top (usable 15 <= MAX 20)
+        # is wasted, while the full btm (usable 1755 > MAX) is preserved with
+        # a single TapeOut('btm'); both re-thread together.
         m = _make_machine(init_item=_ITEM_A,
-                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+                          init_top_lbs=180.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_G, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), (
             _kd(100.0, 'AU0001') * 4
             + [('TapeOut', 'btm'),                       # other bar preserved
-               ('Waste', 'top', 35.0, '40D BLACK 1000X4')]  # limiting bar discarded
+               ('Waste', 'top', 15.0, '40D BLACK 1000X4')]  # limiting bar discarded
             + _rethread('both', top_lbs=2800.0, btm_lbs=1800.0)
             + [('RunnerChange', 'AU0001', 'AU0007')]
             + _kd(100.0, 'AU0007')
@@ -1813,14 +1820,15 @@ class PlanProductionNextRunoutChangeoverTests(unittest.TestCase):
 
     def test_one_bar_matches_is_kept(self):
         # 3.2.3. A -> D (btm yarn matches 60D, top differs, same family). Run
-        # up 200/2000 -> 4 rolls; top leftover (usable 35, mismatched) is
-        # wasted and re-threaded, btm leftover (matching) is kept.
+        # up 180/2000 -> 4 rolls; top leftover (usable 15 <= MAX 20,
+        # mismatched) is wasted and re-threaded, btm leftover (matching) is
+        # kept.
         m = _make_machine(init_item=_ITEM_A,
-                          init_top_lbs=200.0, init_btm_lbs=2000.0)
+                          init_top_lbs=180.0, init_btm_lbs=2000.0)
         plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout')
         self.assertEqual(_shape(plan), (
             _kd(100.0, 'AU0001') * 4
-            + [('Waste', 'top', 35.0, '40D BLACK 1000X4')]
+            + [('Waste', 'top', 15.0, '40D BLACK 1000X4')]
             + _rethread('top', top_lbs=2800.0)
             + [('RunnerChange', 'AU0001', 'AU0004')]
             + _kd(100.0, 'AU0004')
@@ -2003,14 +2011,14 @@ class ProducibleLbsNoPreambleTests(unittest.TestCase):
         self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 12600.0)
 
     def test_beam_bound_single_cycle(self):
-        # 5h window remaining in the week. top=200 (top_pct=0.4): usable yarn
+        # 5h window remaining in the week. top=140 (top_pct=0.4): usable yarn
         # drops below MAX_BEAM_WASTE_LBS at the 4th-roll boundary
-        # (200-3*40-5=75 < 100), so only 3 whole rolls (300 lbs = 3h) are
+        # (140-3*40-5=15 < 20), so only 3 whole rolls (300 lbs = 3h) are
         # produced before the max-waste gate swaps top. The reload then runs
         # h=3..5, ending exactly at week_end, so no 4th roll fits -> 300 lbs.
         # (Under the no-floor model this used to be 500.)
         as_of = _W21_END - timedelta(hours=5)
-        m = _make_machine(init_top_lbs=200.0, init_btm_lbs=2000.0,
+        m = _make_machine(init_top_lbs=140.0, init_btm_lbs=2000.0,
                           start=as_of)
         self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 300.0)
 
@@ -2018,10 +2026,12 @@ class ProducibleLbsNoPreambleTests(unittest.TestCase):
         # top=200, btm=300, 168h window. Production cascades through many
         # beam swaps. Each roll now also costs a Doff (1/3h), and each swap is
         # a re-thread (Hanging + Threading) rather than a single BeamLoad, so
-        # fewer whole rolls fit than under the old model: 11200 lbs.
+        # fewer whole rolls fit than under the old model. With the max-waste
+        # gate at 20 lbs the first beams are run closer to the floor before
+        # they are swapped than at 100, so one more roll fits: 11300 lbs.
         m = _make_machine(init_top_lbs=200.0, init_btm_lbs=300.0,
                           start=_W21_START)
-        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 11200.0)
+        self.assertEqual(m.producible_lbs_in_week(_ITEM_A, *_W21), 11300.0)
 
 
 # --- 4.2 Preamble required ----------------------------------------------
@@ -2219,5 +2229,1244 @@ class ProducibleLbsStartParameterTests(unittest.TestCase):
                                       start=_W21_START - timedelta(hours=1))
 
 
+# ---------------------------- PHASE 5 -----------------------------------
+# Changeover capacity: `schedule/capacity.py` and the slot waits
+# `plan_production` emits. See SCHEDULE_TEST_SPEC.md, Phase 5.
+
+from datetime import date as _date
+from swmtplanner.schedule import (
+    ChangeoverCapacity, CapacityView, Resource, capacity_from_dict,
+    DEFAULT_RESOURCES,
+)
+from swmtplanner.support.workcal.holidays import holidays_from_list
+
+# Weekday, round-the-clock calendar with Columbus Day (2nd Monday of
+# October — 2026-10-12) as the one holiday.
+_COLUMBUS = holidays_from_list([
+    {'kind': 'flex', 'name': 'Columbus Day', 'month': 10, 'weekday': 0, 'n': 2},
+])
+_WEEKDAY_24 = WorkCal(work_days=(0, 1, 2, 3, 4), day_start=0, day_end=24,
+                      holidays=_COLUMBUS)
+
+_TUE = datetime(2026, 10, 6)      # a Tuesday
+_WED = datetime(2026, 10, 7)
+_FRI = datetime(2026, 10, 2)
+_MON = datetime(2026, 10, 5)
+_FRI2 = datetime(2026, 10, 9)     # the Friday before Columbus Day
+_TUE2 = datetime(2026, 10, 13)
+
+
+# The per-kind rations alone (tape-outs and pattern changes); the plant-wide
+# change cap is added by the tests that cover it (5.6).
+_PER_KIND = {k: DEFAULT_RESOURCES[k] for k in ('tape_out', 'pattern_change')}
+
+
+def _cap(workcal=_WEEKDAY_24, resources=_PER_KIND) -> ChangeoverCapacity:
+    return ChangeoverCapacity(workcal, resources)
+
+
+def _h(day: datetime, hours: float) -> datetime:
+    return day + timedelta(hours=hours)
+
+
+# --- 5.1 Periods ----------------------------------------------------------
+
+class CapacityPeriodTests(unittest.TestCase):
+
+    def test_inside_window(self):
+        p = _cap().period_of('tape_out', _h(_TUE, 10))
+        self.assertEqual((p.day, p.start, p.end),
+                         (_TUE.date(), _h(_TUE, 8), _h(_TUE, 24)))
+
+    def test_third_shift_has_no_period(self):
+        cap = _cap()
+        self.assertIsNone(cap.period_of('tape_out', _h(_TUE, 3)))
+        p = cap.next_period('tape_out', _h(_TUE, 3))
+        self.assertEqual((p.start, p.end), (_h(_TUE, 8), _h(_TUE, 24)))
+
+    def test_exactly_at_period_end_is_next_day(self):
+        cap = _cap()
+        self.assertIsNone(cap.period_of('tape_out', _h(_TUE, 24)))
+        self.assertEqual(cap.next_period('tape_out', _h(_TUE, 24)).day, _WED.date())
+
+    def test_weekend_rolls_to_monday(self):
+        cap = _cap()
+        sat = datetime(2026, 10, 3, 10)
+        self.assertIsNone(cap.period_of('tape_out', sat))
+        self.assertEqual(cap.next_period('tape_out', sat).start, _h(_MON, 8))
+
+    def test_holiday_skipped(self):
+        cap = _cap()
+        self.assertIsNone(cap.period_of('tape_out', datetime(2026, 10, 12, 10)))
+        self.assertEqual(cap.next_period('tape_out', _h(_FRI2, 24)).start,
+                         _h(_TUE2, 8))
+
+    def test_window_clipped_to_work_day(self):
+        short = WorkCal(work_days=(0, 1, 2, 3, 4), day_start=0, day_end=22,
+                        holidays=())
+        p = _cap(short).period_of('tape_out', _h(_TUE, 10))
+        self.assertEqual(p.end, _h(_TUE, 22))
+        # A window entirely after the work day clips to nothing: no period
+        # ever exists for that resource.
+        late = ChangeoverCapacity(short, {'tape_out': Resource(2, (22.0, 24.0))})
+        self.assertIsNone(late.period_of('tape_out', _h(_TUE, 23)))
+        with self.assertRaises(RuntimeError):
+            late.next_period('tape_out', _h(_TUE, 23))
+
+    def test_cal_shift_moves_the_period(self):
+        shifted = WorkCal(work_days=(0, 1, 2, 3, 4), day_start=0, day_end=24,
+                          holidays=(), cal_shift=2)
+        cap = _cap(shifted)
+        # Planner clock 09:00 is calendar 07:00 — before the window.
+        self.assertIsNone(cap.period_of('tape_out', _h(_TUE, 9)))
+        p = cap.period_of('tape_out', _h(_TUE, 11))
+        self.assertEqual((p.start, p.end), (_h(_TUE, 10), _h(_WED, 2)))
+        self.assertEqual(p.day, _TUE.date())
+
+
+# --- 5.2 next_slot --------------------------------------------------------
+
+class CapacityNextSlotTests(unittest.TestCase):
+
+    def test_free_period_takes_the_requested_time(self):
+        self.assertEqual(_cap().next_slot('tape_out', 1, _h(_TUE, 10), 2.0),
+                         _h(_TUE, 10))
+
+    def test_before_window_opens(self):
+        self.assertEqual(_cap().next_slot('tape_out', 1, _h(_TUE, 3), 2.0),
+                         _h(_TUE, 8))
+
+    def test_must_fit_before_period_end(self):
+        cap = _cap()
+        self.assertEqual(cap.next_slot('tape_out', 2, _h(_FRI, 22), 3.0), _h(_MON, 8))
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_FRI, 22), 2.0), _h(_FRI, 22))
+
+    def test_units_exhausted_pushes_to_next_period(self):
+        cap = _cap()
+        cap.book('tape_out', _FRI.date(), 2)
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_FRI, 9), 2.0), _h(_MON, 8))
+        cap.book('tape_out', _FRI2.date(), 2)
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_FRI2, 9), 2.0), _h(_TUE2, 8))
+
+    def test_partial_booking_admits_single_not_double(self):
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 1)
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_TUE, 10), 2.0), _h(_TUE, 10))
+        self.assertEqual(cap.next_slot('tape_out', 2, _h(_TUE, 10), 3.0), _h(_WED, 8))
+
+    def test_pattern_changes_have_their_own_units(self):
+        cap = _cap()
+        cap.book('pattern_change', _TUE.date(), 3)
+        self.assertEqual(cap.next_slot('pattern_change', 1, _h(_TUE, 10), 1.5), _h(_WED, 8))
+        cap.book('tape_out', _WED.date(), 2)       # a full tape-out day…
+        self.assertEqual(cap.next_slot('pattern_change', 1, _h(_WED, 10), 1.5),
+                         _h(_WED, 10))             # …leaves pattern changes free
+
+    def test_unrationed_kind_never_waits(self):
+        only_tape = ChangeoverCapacity(_WEEKDAY_24, {'tape_out': DEFAULT_RESOURCES['tape_out']})
+        self.assertEqual(only_tape.next_slot('pattern_change', 1, _h(_TUE, 3), 1.5), _h(_TUE, 3))
+        none = ChangeoverCapacity(None, {})
+        sat = datetime(2026, 10, 3, 2)
+        self.assertEqual(none.next_slot('tape_out', 2, sat, 3.0), sat)
+        self.assertIsNone(none.limits('tape_out'))
+
+    def test_over_allowance_raises(self):
+        with self.assertRaises(ValueError):
+            _cap().next_slot('tape_out', 3, _h(_TUE, 10), 3.0)
+
+
+# --- 5.3 Bookings and CapacityView ---------------------------------------
+
+class CapacityBookingTests(unittest.TestCase):
+
+    def test_book_release_and_listing(self):
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 1)
+        cap.book('tape_out', _TUE.date(), 1)
+        self.assertEqual(cap.booked('tape_out', _TUE.date()), 2)
+        cap.release('tape_out', _TUE.date(), 1)
+        self.assertEqual(cap.booked('tape_out', _TUE.date()), 1)
+        cap.release('tape_out', _TUE.date(), 5)
+        self.assertEqual(cap.booked('tape_out', _TUE.date()), 0)
+        self.assertEqual(cap.bookings(), {})
+        cap.book('pattern_change', _WED.date(), 1)
+        self.assertEqual(cap.bookings(), {('pattern_change', _WED.date()): 1})
+        only_tape = ChangeoverCapacity(_WEEKDAY_24, {'tape_out': DEFAULT_RESOURCES['tape_out']})
+        only_tape.book('pattern_change', _WED.date(), 1)       # unrationed: no-op
+        self.assertEqual(only_tape.bookings(), {})
+
+    def test_view_overlays_without_touching_base(self):
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 1)
+        view = cap.view({('tape_out', _TUE.date()): 1, ('pattern_change', _TUE.date()): 2})
+        self.assertIsInstance(view, CapacityView)
+        self.assertEqual(view.booked('tape_out', _TUE.date()), 2)
+        self.assertEqual(view.next_slot('tape_out', 1, _h(_TUE, 10), 2.0), _h(_WED, 8))
+        self.assertEqual(cap.booked('tape_out', _TUE.date()), 1)
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_TUE, 10), 2.0), _h(_TUE, 10))
+        self.assertEqual(view.bookings(), {('tape_out', _TUE.date()): 2,
+                                           ('pattern_change', _TUE.date()): 2})
+
+    def test_view_is_read_only(self):
+        view = _cap().view({})
+        with self.assertRaises(TypeError):
+            view.book('tape_out', _TUE.date(), 1)
+        with self.assertRaises(TypeError):
+            view.release('tape_out', _TUE.date(), 1)
+
+    def test_view_reads_base_live(self):
+        cap = _cap()
+        view = cap.view({})
+        cap.book('tape_out', _TUE.date(), 2)
+        self.assertEqual(view.booked('tape_out', _TUE.date()), 2)
+
+
+# --- 5.4 capacity_from_dict -----------------------------------------------
+
+class CapacityFromDictTests(unittest.TestCase):
+
+    def test_none_is_unrationed(self):
+        cap = capacity_from_dict(None, _WEEKDAY_24)
+        self.assertEqual(dict(cap.resources), {})
+
+    def test_full_block_default_and_missing_window(self):
+        cap = capacity_from_dict({
+            'tape_out': {'units_per_period': 1, 'window': [6, 18]},
+            'pattern_change': 'default',
+        }, _WEEKDAY_24)
+        self.assertEqual(cap.limits('tape_out'), Resource(1, (6.0, 18.0)))
+        self.assertEqual(cap.limits('pattern_change'), DEFAULT_RESOURCES['pattern_change'])
+        cap2 = capacity_from_dict({'tape_out': {'units_per_period': 4}}, _WEEKDAY_24)
+        self.assertEqual(cap2.limits('tape_out'), Resource(4, DEFAULT_RESOURCES['tape_out'].window))
+
+    def test_missing_kind_is_unrationed(self):
+        cap = capacity_from_dict({'tape_out': 'default'}, _WEEKDAY_24)
+        self.assertIsNone(cap.limits('pattern_change'))
+        self.assertEqual(cap.next_slot('pattern_change', 1, _h(_TUE, 3), 1.5), _h(_TUE, 3))
+
+    def test_bad_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            capacity_from_dict({'doffing': {'units_per_period': 1}}, _WEEKDAY_24)
+        with self.assertRaises(ValueError):
+            ChangeoverCapacity(None, DEFAULT_RESOURCES)
+
+
+# --- 5.5 plan_production slot waits -------------------------------------
+
+def _wait_machine(start=_h(_TUE, 10), init_item=_ITEM_A, is_new=False):
+    """A machine on the weekday calendar with plenty of yarn, so the only
+    thing that moves its preamble is the changeover ration."""
+    return _make_machine(init_item=init_item, init_top_lbs=2800.0,
+                         init_btm_lbs=1800.0, workcal=_WEEKDAY_24,
+                         start=start, is_new=is_new)
+
+
+def _first(plan, cls):
+    return next(a for a in plan.activities if isinstance(a, cls))
+
+
+def _idles(plan):
+    return [a for a in plan.activities if isinstance(a, Idle)]
+
+
+class PlanProductionSlotWaitTests(unittest.TestCase):
+
+    def test_no_capacity_matches_phase_3(self):
+        m = _wait_machine()
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        self.assertEqual(_shape(plan), [
+            ('TapeOut', 'top'), *_rethread('top', top_lbs=2800.0),
+            ('RunnerChange', 'AU0001', 'AU0004'),
+            *_kd(100.0, 'AU0004'),
+        ])
+        self.assertEqual(plan.capacity_taken, ())
+        self.assertEqual(_idles(plan), [])
+
+    def test_free_slot_records_the_booking(self):
+        m = _wait_machine()
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail',
+                                 capacity=_cap())
+        self.assertEqual(_first(plan, TapeOut).start, _h(_TUE, 10))
+        self.assertEqual(plan.capacity_taken,
+                         (('tape_out', _TUE.date(), 1, _h(_TUE, 10)),))
+        self.assertEqual(_idles(plan), [])
+        both = m.plan_production(_ITEM_G, lbs=100.0, start_at='schedule_tail',
+                                 capacity=_cap())
+        self.assertEqual(both.capacity_taken,
+                         (('tape_out', _TUE.date(), 2, _h(_TUE, 10)),))
+
+    def test_full_day_waits_for_the_next_period(self):
+        m = _wait_machine()
+        free = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 2)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail',
+                                 capacity=cap)
+        idle = plan.activities[0]
+        self.assertIsInstance(idle, Idle)
+        self.assertEqual((idle.start, idle.end, idle.reason),
+                         (_h(_TUE, 10), _h(_WED, 8), 'tape_out slot'))
+        self.assertEqual(_first(plan, TapeOut).start, _h(_WED, 8))
+        # Everything after the wait is the free plan shifted by 22 hours
+        # (no non-work time between Tuesday 10:00 and Wednesday 08:00).
+        self.assertEqual(_shape(plan)[1:], _shape(free))
+        for a, b in zip(plan.activities[1:], free.activities):
+            self.assertEqual(a.start - b.start, timedelta(hours=22))
+        self.assertEqual(plan.capacity_taken,
+                         (('tape_out', _WED.date(), 1, _h(_WED, 8)),))
+        # The wait belongs to no job.
+        self.assertIsNone(plan.replaced_job)
+        for job in plan.jobs:
+            self.assertFalse(any(isinstance(a, Idle) for a in job.activities))
+
+    def test_third_shift_arrival_waits_for_eight(self):
+        m = _wait_machine(start=_h(_TUE, 3))
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail',
+                                 capacity=_cap())
+        idle = plan.activities[0]
+        self.assertEqual((idle.start, idle.end, idle.reason),
+                         (_h(_TUE, 3), _h(_TUE, 8), 'tape_out slot'))
+        self.assertEqual(_first(plan, TapeOut).start, _h(_TUE, 8))
+
+    def test_pattern_change_books_and_waits_on_its_own_ration(self):
+        m = _wait_machine()
+        cap = _cap()
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail',
+                                 capacity=cap)
+        self.assertEqual(plan.capacity_taken,
+                         (('pattern_change', _TUE.date(), 1, _h(_TUE, 10)),))
+        cap.book('pattern_change', _TUE.date(), 3)
+        plan = m.plan_production(_ITEM_C, lbs=150.0, start_at='schedule_tail',
+                                 capacity=cap)
+        idle = plan.activities[0]
+        self.assertEqual((idle.end, idle.reason), (_h(_WED, 8), 'pattern_change slot'))
+        self.assertEqual(_first(plan, PatternChange).start, _h(_WED, 8))
+        self.assertEqual(plan.capacity_taken,
+                         (('pattern_change', _WED.date(), 1, _h(_WED, 8)),))
+        # The re-thread before a pattern change is not delayed: with the
+        # pattern day full, the top tape-out and re-thread happen at 10:00
+        # and only the PatternChange waits.
+        plan = m.plan_production(_ITEM_H, lbs=100.0, start_at='schedule_tail',
+                                 capacity=cap)
+        self.assertEqual(_first(plan, TapeOut).start, _h(_TUE, 10))
+        kinds = [type(a).__name__ for a in plan.activities]
+        self.assertEqual(kinds[:5], ['TapeOut', 'Hanging', 'Threading', 'Idle', 'PatternChange'])
+        self.assertEqual(plan.activities[3].reason, 'pattern_change slot')
+
+    def test_runner_and_style_changes_book_nothing(self):
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 2)
+        cap.book('pattern_change', _TUE.date(), 3)
+        runner = _wait_machine().plan_production(
+            _ITEM_B, lbs=200.0, start_at='schedule_tail', capacity=cap)
+        self.assertEqual(runner.capacity_taken, ())
+        self.assertEqual(_idles(runner), [])
+        style = _wait_machine(is_new=True).plan_production(
+            _ITEM_C, lbs=150.0, start_at='schedule_tail', capacity=cap)
+        self.assertEqual(style.capacity_taken, ())
+        self.assertEqual(_idles(style), [])
+
+    def test_both_kinds_in_one_preamble(self):
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 2)
+        plan = _wait_machine().plan_production(
+            _ITEM_F, lbs=100.0, start_at='schedule_tail', capacity=cap)
+        idles = _idles(plan)
+        self.assertEqual(len(idles), 1)
+        self.assertEqual(idles[0].reason, 'tape_out slot')
+        self.assertEqual(_first(plan, TapeOut).start, _h(_WED, 8))
+        self.assertEqual(_first(plan, PatternChange).start.date(), _WED.date())
+        self.assertEqual(
+            [(k, d, u) for k, d, u, _t in plan.capacity_taken],
+            [('tape_out', _WED.date(), 2), ('pattern_change', _WED.date(), 1)],
+        )
+
+    def test_next_runout_waits_from_the_run_up_end(self):
+        # The bottom bar limits the run-up to five whole rolls of A; the
+        # top bar keeps 800 lbs, so D's changeover tapes it out. The wait is
+        # measured from the last run-up doff, not the schedule tail.
+        m = _make_machine(init_top_lbs=1000.0, init_btm_lbs=305.0,
+                          workcal=_WEEKDAY_24, start=_h(_TUE, 10))
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 2)
+        plan = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout',
+                                 capacity=cap)
+        idle = _idles(plan)[0]
+        last_doff = [a for a in plan.activities if isinstance(a, Doff)
+                     and a.end <= idle.start][-1]
+        self.assertGreater(idle.start, _h(_TUE, 10))
+        self.assertEqual(idle.start, last_doff.end)
+        self.assertEqual(idle.end, _h(_WED, 8))
+
+    def test_planning_books_nothing_and_repeats(self):
+        m = _wait_machine()
+        cap = _cap()
+        a = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail', capacity=cap)
+        b = m.plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail', capacity=cap)
+        self.assertEqual(cap.bookings(), {})
+        self.assertEqual(_shape(a), _shape(b))
+        self.assertEqual(_first(a, TapeOut).start, _first(b, TapeOut).start)
+
+    def test_producible_lbs_through_counts_the_wait(self):
+        m = _wait_machine()
+        end = _h(_FRI2, 24)
+        cap = _cap()
+        cap.book('tape_out', _TUE.date(), 2)
+        without = m.producible_lbs_through(_ITEM_D, end=end)
+        with_cap = m.producible_lbs_through(_ITEM_D, end=end, capacity=cap)
+        self.assertLess(with_cap, without)
+        self.assertGreaterEqual(without - with_cap, _ITEM_D.tgt_wt)
+
+
 if __name__ == '__main__':
     unittest.main()
+
+
+# ---------------------------- PHASE 6 -----------------------------------
+# Reported sets: foreign bars and passed-over assigned sets
+# (tests/spec-files/SCHEDULE_TEST_SPEC.md, Phase 6).
+
+from swmtplanner.products import beam_set_from_record, beam_sets_from_list
+from swmtplanner.products.variants import (
+    VariantMapFile, MergeInfo, MasterVariants, Recipe, BarRecipe,
+)
+from swmtplanner.schedule import (
+    machines_from_list, build_inventory, PassedOver, rebind_sets as _rebind_acts,
+    assign_sets,
+)
+
+_RECEIVED = datetime(2026, 1, 2)
+_VMAP = VariantMapFile(
+    merges={
+        'M1': MergeInfo('M1', '40', 'V', 'SD', 'POLY', '40D BLACK'),
+        'M2': MergeInfo('M2', '40', 'V', 'SD', 'POLY', '40D RED'),
+        'M3': MergeInfo('M3', '60', 'V', 'SD', 'POLY', '60D WHITE'),
+    },
+    masters={},
+)
+
+
+def _record(set_no='S1', merge='M1', **over) -> dict:
+    rec = {'set_no': set_no, 'merge': merge, 'vendor': 'V', 'received': '2026-01-02 00:00:00',
+           'lbs': 900.0, 'beams': 4, 'ends': 1000, 'denier': 40, 'luster': 'SD', 'desc': 'POLY'}
+    rec.update(over)
+    return rec
+
+
+def _entry(**over) -> dict:
+    e = {'id': 'M1', 'is_new': False, 'init_item': 'AU0001',
+         'init_top_lbs': 200.0, 'init_btm_lbs': 300.0}
+    e.update(over)
+    return e
+
+
+def _load(entries, **kw) -> dict[str, Machine]:
+    kw.setdefault('greige_by_id', {'AU0001': _ITEM_A})
+    kw.setdefault('variant_map', _VMAP)
+    return machines_from_list(entries, start_date=_START, workcal=_24_7, **kw)
+
+
+def _stock_set(set_no, label, merge='M1', lbs=900.0, received=_RECEIVED, **kw) -> BeamSet:
+    return BeamSet(set_no, merge, lbs, BeamSetDesc(label), received, vendor='V',
+                   denier=int(label.split('D')[0]), luster='SD', ytype='POLY',
+                   known_merge=True, **kw)
+
+
+class BeamSetFromRecordTests(unittest.TestCase):
+    """6.1"""
+
+    def test_merge_known_to_the_map(self):
+        bs = beam_set_from_record(_record(assigned=True), _VMAP, _START)
+        self.assertEqual(bs.desc.id, '40D BLACK 1000X4')
+        self.assertTrue(bs.known_merge)
+        self.assertEqual((bs.lbs, bs.avail_date, bs.vendor), (900.0, _RECEIVED, 'V'))
+        self.assertEqual((bs.denier, bs.luster, bs.ytype, bs.assigned), (40, 'SD', 'POLY', True))
+
+    def test_merge_unknown_is_normalised(self):
+        bs = beam_set_from_record(_record(merge='ZZ'), _VMAP, _START)
+        self.assertEqual(bs.desc.id, '40D WHT 1000X4')
+        self.assertFalse(bs.known_merge)
+
+    def test_not_polyester_is_none_and_left_out(self):
+        self.assertIsNone(beam_set_from_record(_record(merge='ZZ', desc='NYLON'), _VMAP, _START))
+        out = beam_sets_from_list([_record(), _record(set_no='S2', merge='ZZ', desc='NYLON')],
+                                  _VMAP, _START)
+        self.assertEqual(sorted(out), ['S1'])
+
+
+class MountedSetDescriptionTests(unittest.TestCase):
+    """6.2"""
+
+    def _top(self, **kw):
+        return _load([_entry(**{k: v for k, v in kw.items() if k.startswith('init')})],
+                     **{k: v for k, v in kw.items() if not k.startswith('init')})['M1'].initial_status.beam('top')
+
+    def test_export_holds_the_set(self):
+        export = {'S1': _stock_set('S1', '40D RED 1000X4', merge='M2')}
+        top = self._top(init_top_set={'set_no': 'S1', 'merge': 'M2'}, beam_sets=export)
+        self.assertEqual(top.desc.id, '40D RED 1000X4')
+        self.assertEqual((top.denier, top.luster, top.ytype), (40, 'SD', 'POLY'))
+        self.assertFalse(top.fits(BeamSetDesc(_ITEM_A.configuration.top_beam)))
+
+    def test_merge_known_export_lacks_the_set(self):
+        top = self._top(init_top_set={'set_no': 'S2', 'merge': 'M2'})
+        self.assertEqual(top.desc.id, '40D RED 1000X4')
+        self.assertFalse(top.fits(BeamSetDesc('40D BLACK 1000X4')))
+        top = self._top(init_top_set={'set_no': 'S2', 'merge': 'M1'})
+        self.assertEqual(top.desc.id, '40D BLACK 1000X4')
+        self.assertTrue(top.fits(BeamSetDesc('40D BLACK 1000X4')))
+
+    def test_no_yarn_evidence_falls_back_to_the_label(self):
+        for kw in ({'init_top_set': {'set_no': 'S3'}},
+                   {'init_top_set': {'set_no': 'S3', 'merge': 'ZZ'}},
+                   {},
+                   {'init_top_set': {'set_no': 'S3', 'merge': 'M2'}, 'variant_map': None}):
+            self.assertEqual(self._top(**kw).desc.id, '40D BLACK 1000X4', kw)
+
+    def test_recipe_merge_fits_by_construction(self):
+        recipe = Recipe('AU0001', 'AU0001-V/1', 4,
+                        BarRecipe('M1', 1000, False, '40D BLACK 1000X4'),
+                        BarRecipe('M3', 1000, False, '60D WHITE 1000X4'))
+        vmap = VariantMapFile(_VMAP.merges, {'AU0001': MasterVariants(
+            'AU0001', '40D BLACK 1000X4', '60D WHITE 1000X4', (recipe,),
+            {recipe.key: (recipe,)}, None)})
+        m = _load([_entry(init_item='AU0001-V/1')], variant_map=vmap,
+                  variant_masters={'AU0001-V/1': 'AU0001'})['M1']
+        top = m.initial_status.beam('top')
+        self.assertEqual((top.merge, top.desc.id), ('M1', '40D BLACK 1000X4'))
+        self.assertTrue(top.fits(BeamSetDesc('40D BLACK 1000X4')))
+
+    def test_roll_in_progress_on_a_foreign_bar_is_zeroed(self):
+        foreign = _load([_entry(init_roll_lbs=50.0, init_top_set={'set_no': 'S2', 'merge': 'M2'})])['M1']
+        self.assertEqual(foreign.initial_status.roll_lbs_remaining, 0.0)
+        fitting = _load([_entry(init_roll_lbs=50.0, init_top_set={'set_no': 'S2', 'merge': 'M1'})])['M1']
+        self.assertEqual(fitting.initial_status.roll_lbs_remaining, 50.0)
+
+
+class AssignedSetRecordTests(unittest.TestCase):
+    """6.3"""
+
+    def _queue(self, records, bar='top', **kw):
+        return _load([_entry()], assigned_sets=records, **kw)['M1'].initial_status.queue(bar)
+
+    def test_export_form(self):
+        q = self._queue([_record(set_no='Q1', merge='M2', machine='M01', bar=2, lbs=700.0)])
+        self.assertEqual(len(q), 1)
+        self.assertEqual((q[0].desc.id, q[0].assigned, q[0].lbs, q[0].avail_date),
+                         ('40D RED 1000X4', True, 700.0, _RECEIVED))
+        self.assertFalse(q[0].fits(BeamSetDesc(_ITEM_A.configuration.top_beam)))
+
+    def test_export_holds_the_set(self):
+        export = {'Q1': _stock_set('Q1', '40D BLACK 1000X4', lbs=650.0, assigned=True)}
+        q = self._queue([_record(set_no='Q1', merge='M2', machine='M01', bar=2)], beam_sets=export)
+        self.assertEqual((q[0].desc.id, q[0].lbs), ('40D BLACK 1000X4', 650.0))
+
+    def test_older_form_falls_back_to_the_requirement(self):
+        rec = {'set_no': 'Q2', 'merge': 'M2', 'vendor': 'V', 'machine': 'M01', 'bar': 2}
+        for kw in ({}, {'variant_map': None}):
+            q = self._queue([rec], **kw)
+            self.assertEqual((q[0].desc.id, q[0].lbs), ('40D BLACK 1000X4', 2800.0), kw)
+
+    def test_not_polyester_is_skipped(self):
+        q = self._queue([_record(set_no='Q1', merge='ZZ', desc='NYLON', machine='M01', bar=2),
+                         _record(set_no='Q2', machine='M01', bar=2)])
+        self.assertEqual([b.set_no for b in q], ['Q2'])
+
+    def test_other_machines_and_bar_numbers(self):
+        records = [_record(set_no='Q1', machine='M09', bar=2),
+                   _record(set_no='Q2', machine='M01', bar=1, merge='M3', denier=60)]
+        self.assertEqual(self._queue(records, 'top'), ())
+        self.assertEqual([b.set_no for b in self._queue(records, 'btm')], ['Q2'])
+
+
+class ForeignBarTests(unittest.TestCase):
+    """6.4 — a `30D RED` top set on a machine running `_ITEM_A`."""
+
+    def _foreign(self, **kw):
+        kw.setdefault('init_top_beam', _ALT_TOP_BEAM)
+        return _make_machine(**kw)
+
+    def test_construction_zeroes_the_roll(self):
+        m = Machine('M1', _ITEM_A, _START, _ALT_TOP_BEAM, 200.0, _BTM_BEAM, 300.0, _24_7,
+                    init_roll_lbs_remaining=50.0)
+        s = m.initial_status
+        self.assertEqual(s.roll_lbs_remaining, 0.0)
+        self.assertTrue(s.threaded('top'))
+        self.assertEqual(s.lbs_remaining('top'), 200.0)
+
+    def test_no_run_up(self):
+        m = self._foreign()
+        self.assertEqual(m.whole_rolls_before_runout, 0)
+        self.assertEqual(m.next_runout, _START)
+        self.assertGreater(_make_machine().whole_rolls_before_runout, 0)
+
+    def test_preamble_tapes_out_the_foreign_set(self):
+        plan = self._foreign().plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        kinds = [type(a).__name__ for a in plan.activities]
+        self.assertEqual(kinds[:4], ['TapeOut', 'Hanging', 'Threading', 'Knit'])
+        tape = plan.activities[0]
+        self.assertEqual((tape.bars, tape.top_beam.set_no, tape.top_beam.lbs),
+                         ('top', _ALT_TOP_BEAM.set_no, 200.0))
+        self.assertTrue(plan.activities[1].top_beam.fits(BeamSetDesc('40D BLACK 1000X4')))
+        self.assertNotIn('StyleChange', kinds)
+        self.assertEqual([b.set_no for b in plan.beam_sets_returned], [_ALT_TOP_BEAM.set_no])
+
+    def test_waste_below_the_limit(self):
+        plan = self._foreign(init_top_lbs=BEAM_FLOOR_LBS + 10).plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        kinds = [type(a).__name__ for a in plan.activities]
+        self.assertEqual(kinds[:3], ['Waste', 'Hanging', 'Threading'])
+        self.assertEqual(plan.activities[0].bar, 'top')
+
+    def test_next_runout_mode_runs_nothing_up(self):
+        plan = self._foreign().plan_production(_ITEM_B, 200.0, 'next_runout')
+        self.assertEqual({j.item.id for j in plan.jobs}, {_ITEM_B.id})
+        self.assertEqual(type(plan.activities[0]).__name__, 'TapeOut')
+        self.assertIsNone(plan.replaced_job)
+
+    def test_both_bars_foreign(self):
+        plan = self._foreign(init_btm_beam=_ALT_BTM_BEAM).plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual((type(plan.activities[0]).__name__, plan.activities[0].bars), ('TapeOut', 'both'))
+        self.assertEqual((type(plan.activities[1]).__name__, plan.activities[1].bars), ('Hanging', 'both'))
+
+    def test_producible_lbs_counts_no_run_up(self):
+        end = _START + timedelta(hours=24)
+        foreign = self._foreign().producible_lbs_through(_ITEM_A, end)
+        fitting = _make_machine().producible_lbs_through(_ITEM_A, end)
+        self.assertLess(foreign, fitting)
+
+
+_Q_BAD = BeamSet('QB', 'MX', 900.0, BeamSetDesc('30D RED 1000X4'), _FIXTURE_DATE, vendor='V',
+                 known_merge=True, assigned=True)
+_Q_BAD2 = BeamSet('QB2', 'MX', 900.0, BeamSetDesc('90D GREEN 1000X4'), _FIXTURE_DATE, vendor='V',
+                  known_merge=True, assigned=True)
+_Q_OK = BeamSet('QO', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
+                known_merge=True, assigned=True)
+
+
+def _queued_machine(top_queue=(), btm_queue=(), top_lbs=BEAM_FLOOR_LBS, btm_lbs=300.0) -> Machine:
+    return Machine('M1', _ITEM_A, _START, _TOP_BEAM, top_lbs, _BTM_BEAM, btm_lbs, _24_7,
+                   init_top_queue=top_queue, init_btm_queue=btm_queue)
+
+
+def _first_hang(plan, bar='top'):
+    return next(a for a in plan.activities
+                if isinstance(a, Hanging) and getattr(a, f'{bar}_beam') is not None)
+
+
+class PassOverTests(unittest.TestCase):
+    """6.5"""
+
+    def test_dropped_and_recorded(self):
+        plan = _queued_machine((_Q_BAD,)).plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        hang = _first_hang(plan)
+        self.assertTrue(hang.top_beam.is_new)
+        self.assertEqual(hang.passed_over, (('top', _Q_BAD),))
+        self.assertEqual(len(plan.queue_passed_over), 1)
+        p = plan.queue_passed_over[0]
+        self.assertEqual((p.bar, p.beam_set, p.wanted.physical.id, p.at),
+                         ('top', _Q_BAD, '40D BLACK 1000X4', hang.start))
+        self.assertNotIn('QB', [b.set_no for b in plan.beam_sets_returned])
+
+    def test_next_queued_set_is_considered(self):
+        m = _queued_machine((_Q_BAD, _Q_OK))
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        hang = _first_hang(plan)
+        self.assertEqual(hang.top_beam.set_no, 'QO')
+        self.assertEqual(hang.passed_over, (('top', _Q_BAD),))
+        m.commit_plan(plan)
+        self.assertEqual(m.current_status.queue('top'), ())
+
+    def test_fitting_front_untouched(self):
+        m = _queued_machine((_Q_OK, _Q_BAD))
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        hang = _first_hang(plan)
+        self.assertEqual((hang.top_beam.set_no, hang.passed_over), ('QO', ()))
+        m.commit_plan(plan)
+        self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])
+
+    def test_commit_keeps_it(self):
+        m = _queued_machine((_Q_BAD,), btm_queue=(_Q_BAD2,), btm_lbs=BEAM_FLOOR_LBS + 70.0)
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])   # purity
+        m.commit_plan(plan)
+        hang = _first_hang(plan)
+        self.assertEqual(m.current_status.queue('top'), ())
+        self.assertEqual(m.status_at(hang.end).queue('top'), ())
+        self.assertEqual([p.beam_set.set_no for p in m.queue_passed_over], ['QB'])
+        # the second roll meets the btm bar near-empty: its re-thread passes QB2 over
+        plan2 = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([p.beam_set.set_no for p in plan2.queue_passed_over], ['QB2'])
+        m.commit_plan(plan2)
+        self.assertEqual([p.beam_set.set_no for p in m.queue_passed_over], ['QB', 'QB2'])
+
+    def test_drop_queued(self):
+        s = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
+                          top_beam=_TOP_BEAM, top_lbs_remaining=200.0, top_threaded=True,
+                          btm_beam=_BTM_BEAM, btm_lbs_remaining=300.0, btm_threaded=True,
+                          top_queue=(_Q_BAD, _Q_OK))
+        d = s.drop_queued('top')
+        self.assertEqual([b.set_no for b in d.queue('top')], ['QO'])
+        self.assertEqual((d.as_of, d.beam('top'), d.lbs_remaining('top'), d.current_item),
+                         (_START, _TOP_BEAM, 200.0, _ITEM_A))
+        with self.assertRaises(ValueError):
+            d.drop_queued('btm')
+
+    def test_applying_a_hang_with_passed_over(self):
+        s = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
+                          top_beam=None, top_lbs_remaining=0.0, top_threaded=False,
+                          btm_beam=_BTM_BEAM, btm_lbs_remaining=300.0, btm_threaded=True,
+                          top_queue=(_Q_OK, _Q_BAD))
+        hang = Hanging(start=_START, end=_START + timedelta(hours=1), bars='top',
+                       top_beam=_Q_OK, passed_over=(('top', _Q_BAD), ('top', _Q_BAD2)))
+        self.assertEqual(s.apply_activity(hang).queue('top'), ())
+
+    def test_manual_assignment_still_locked(self):
+        s9 = BeamSet('S9', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
+                     known_merge=True)
+        inv = build_inventory([s9])
+        with self.assertRaises(ValueError):
+            _queued_machine((_Q_OK,)).plan_production(_ITEM_A, 100.0, 'schedule_tail',
+                                                      inventory=inv, assign={'top': ['S9']})
+        plan = _queued_machine((_Q_BAD,)).plan_production(_ITEM_A, 100.0, 'schedule_tail',
+                                                          inventory=inv, assign={'top': ['S9']})
+        self.assertEqual(_first_hang(plan).top_beam.set_no, 'S9')
+        self.assertEqual([p.beam_set.set_no for p in plan.queue_passed_over], ['QB'])
+
+
+# ---------------------------- PHASE 7 -----------------------------------
+# Assigning sets after planning (SCHEDULE_TEST_SPEC.md, Phase 7).
+
+_ITEM_R = Greige(
+    'AU0009', family='A', tgt_wt=100.0,
+    top_beam='30D RED 1000X4', top_pct=0.4,
+    btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+    safety=0.0, machines={'M1': 100.0, 'M2': 100.0},
+)
+_R1 = _stock_set('R1', '40D BLACK 1000X4', received=_START - timedelta(days=1))
+_R2 = _stock_set('R2', '40D BLACK 1000X4', received=_START)
+
+
+def _placeholder():
+    return BeamSet.new(BeamSetDesc('40D BLACK 1000X4 S/L'), 2800.0, _START)
+
+
+class RelabelTests(unittest.TestCase):
+    """7.1"""
+
+    def test_beamset_relabelled(self):
+        ph = _placeholder()
+        r = ph.relabelled(_R1)
+        self.assertEqual((r.set_no, r.merge, r.vendor, r.denier, r.luster, r.ytype, r.known_merge),
+                         ('R1', 'M1', 'V', 40, 'SD', 'POLY', True))
+        self.assertEqual((r.lbs, r.desc, r.avail_date, r.assigned), (2800.0, ph.desc, _START, False))
+
+    def test_rebind_sets_on_activities(self):
+        ph = _placeholder()
+        relabel = lambda b: b.relabelled(_R1) if b is not None and b.id == ph.id else b
+        t = _START
+        knit = Knit(start=t, end=t + timedelta(hours=1), item=_ITEM_A, lbs=100.0, top_beam=ph, btm_beam=_BTM_BEAM)
+        waste = Waste(start=t, end=t, beam=ph, bar='top', lbs=10.0)
+        tape = TapeOut(start=t, end=t + timedelta(hours=1), bars='top', top_beam=ph)
+        hang = Hanging(start=t, end=t + timedelta(hours=1), bars='top', top_beam=ph,
+                       passed_over=(('top', _Q_BAD),))
+        for a, field_name in ((knit, 'top_beam'), (waste, 'beam'), (tape, 'top_beam'), (hang, 'top_beam')):
+            new = _rebind_acts(a, relabel)
+            self.assertEqual((new.id, new.start, new.end), (a.id, a.start, a.end))
+            self.assertEqual(getattr(new, field_name).set_no, 'R1')
+            self.assertEqual(getattr(new, field_name).lbs, getattr(a, field_name).lbs)
+        self.assertIs(_rebind_acts(knit, relabel).btm_beam, _BTM_BEAM)
+        self.assertEqual(_rebind_acts(hang, relabel).passed_over, (('top', _Q_BAD),))
+        doff = Doff(start=t, end=t)
+        self.assertIs(_rebind_acts(doff, relabel), doff)
+        other = Hanging(start=t, end=t, bars='top', top_beam=_Q_OK)
+        self.assertIs(_rebind_acts(other, relabel), other)
+
+    def test_status_rebind_sets(self):
+        ph = _placeholder()
+        relabel = lambda b: b.relabelled(_R1) if b is not None and b.id == ph.id else b
+        s = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
+                          top_beam=ph, top_lbs_remaining=123.0, top_threaded=False,
+                          btm_beam=_BTM_BEAM, btm_lbs_remaining=300.0, btm_threaded=True,
+                          top_queue=(_Q_OK,))
+        r = s.rebind_sets(relabel)
+        self.assertEqual((r.beam('top').set_no, r.lbs_remaining('top'), r.threaded('top')), ('R1', 123.0, False))
+        self.assertEqual(r.queue('top'), (_Q_OK,))
+        s2 = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
+                           top_beam=_TOP_BEAM, top_lbs_remaining=1.0, top_threaded=True,
+                           btm_beam=_BTM_BEAM, btm_lbs_remaining=1.0, btm_threaded=True)
+        self.assertIs(s2.rebind_sets(relabel), s2)
+
+    def test_machine_rebind_sets(self):
+        m = _queued_machine()                       # top at the floor: the plan hangs a placeholder
+        m.commit_plan(m.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        m.commit_plan(m.plan_production(_ITEM_R, 100.0, 'schedule_tail'))   # tapes the placeholder out
+        ph = next(a.top_beam for a in m.activities if isinstance(a, Hanging) and a.top_beam is not None)
+        self.assertTrue(ph.is_new)
+        ids = [a.id for a in m.activities]
+        job_ids = [j.id for j in m.jobs]
+        m.rebind_sets({ph.id: _R1})
+        hang = next(a for a in m.activities if isinstance(a, Hanging) and a.top_beam is not None)
+        tape = next(a for a in m.activities if isinstance(a, TapeOut))
+        knits = [a for a in m.activities if isinstance(a, Knit) and a.item is _ITEM_A]
+        self.assertEqual(hang.top_beam.set_no, 'R1')
+        self.assertEqual(tape.top_beam.set_no, 'R1')
+        self.assertTrue(all(k.top_beam.set_no == 'R1' for k in knits))
+        self.assertIn(hang, m.jobs[0].activities)
+        self.assertIs(next(a for a in m.jobs[0].activities if isinstance(a, Hanging)), hang)
+        self.assertTrue(all(k in {id(a) for a in m.activities}
+                            for k in (id(k) for r in m.jobs[0].rolls for k in r.knits)))
+        self.assertEqual(m.status_at(hang.end).beam('top').set_no, 'R1')
+        self.assertEqual(([a.id for a in m.activities], [j.id for j in m.jobs]), (ids, job_ids))
+        self.assertEqual(m.status_at(m.schedule_tail).as_of, m.current_status.as_of)   # still replays
+        before = list(m.activities)
+        m.rebind_sets({})
+        self.assertTrue(all(a is b for a, b in zip(before, m.activities)))
+
+
+class KnitSetsTests(unittest.TestCase):
+    """7.2"""
+
+    def test_knits_carry_their_sets(self):
+        # usable top = 20: not gated, but a 40-lb draw runs out mid-roll.
+        m = _make_machine(init_top_lbs=BEAM_FLOOR_LBS + 20.0)
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        knits = [a for a in plan.activities if isinstance(a, Knit)]
+        self.assertEqual(len(knits), 2)
+        self.assertIs(knits[0].top_beam, _TOP_BEAM)
+        self.assertIs(knits[0].btm_beam, _BTM_BEAM)
+        hung = _first_hang(plan).top_beam
+        self.assertIs(knits[1].top_beam, hung)
+        self.assertEqual(len(plan.jobs[0].rolls), 1)
+        self.assertEqual(plan.jobs[0].rolls[0].knits, (knits[0], knits[1]))
+
+
+def _two_machines(m1_top=BEAM_FLOOR_LBS, m2_top_rolls=3):
+    """`M1` with its top at the floor (hang at the start), `M2` with
+    `m2_top_rolls` rolls' worth of top yarn (hang before the roll after)."""
+    m1 = Machine('M1', _ITEM_A, _START, _TOP_BEAM, m1_top, _BTM_BEAM, 1800.0, _24_7)
+    m2 = Machine('M2', _ITEM_A, _START, _TOP_BEAM, BEAM_FLOOR_LBS + 40.0 * m2_top_rolls,
+                 _BTM_BEAM, 1800.0, _24_7)
+    m1.commit_plan(m1.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+    m2.commit_plan(m2.plan_production(_ITEM_A, 100.0 * (m2_top_rolls + 1), 'schedule_tail'))
+    return {'M1': m1, 'M2': m2}
+
+
+def _hung_on(m, bar='top'):
+    return [getattr(a, f'{bar}_beam').set_no for a in m.activities
+            if isinstance(a, Hanging) and getattr(a, f'{bar}_beam') is not None]
+
+
+class AssignSetsTests(unittest.TestCase):
+    """7.3"""
+
+    def test_runout_order(self):
+        ms = _two_machines()
+        inv = build_inventory([_R1, _R2])
+        res = assign_sets(ms, inv, now=_START)
+        self.assertEqual([(h.machine, h.hung.set_no, h.source) for h in res.hangs],
+                         [('M1', 'R1', 'stock'), ('M2', 'R2', 'stock')])
+        self.assertLess(res.hangs[0].at, res.hangs[1].at)
+        h = res.hangs[0]
+        self.assertTrue(h.placeholder.is_new)
+        self.assertEqual((h.plan_lbs, h.set_lbs), (2800.0, 900.0))
+        self.assertEqual(set(res.mapping), {res.hangs[0].placeholder.id, res.hangs[1].placeholder.id})
+        self.assertEqual((_hung_on(ms['M1']), _hung_on(ms['M2'])), (['R1'], ['R2']))
+
+    def test_ties_by_machine_then_bar(self):
+        m1 = Machine('M1', _ITEM_A, _START, _TOP_BEAM, BEAM_FLOOR_LBS, _BTM_BEAM, 1800.0, _24_7)
+        m2 = Machine('M2', _ITEM_A, _START, _TOP_BEAM, BEAM_FLOOR_LBS, _BTM_BEAM, 1800.0, _24_7)
+        for m in (m1, m2):
+            m.commit_plan(m.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        res = assign_sets({'M2': m2, 'M1': m1}, build_inventory([_R1, _R2]), now=_START)
+        self.assertEqual([(h.machine, h.hung.set_no) for h in res.hangs], [('M1', 'R1'), ('M2', 'R2')])
+
+    def test_availability(self):
+        ms = _two_machines()
+        late = _stock_set('R1', '40D BLACK 1000X4', received=_START + timedelta(hours=1))
+        res = assign_sets(ms, build_inventory([late]), now=_START)
+        self.assertEqual([(h.machine, h.source) for h in res.hangs], [('M1', 'new'), ('M2', 'stock')])
+        self.assertEqual(res.hangs[1].hung.set_no, 'R1')
+
+    def test_continuity(self):
+        t0 = BeamSet('T0', 'M7', BEAM_FLOOR_LBS, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
+                     vendor='V', known_merge=True)
+        m1 = Machine('M1', _ITEM_A, _START, t0, BEAM_FLOOR_LBS, _BTM_BEAM, 1800.0, _24_7)
+        m1.commit_plan(m1.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        older = _stock_set('OLD', '40D BLACK 1000X4', merge='M1', received=_START - timedelta(days=5))
+        same = _stock_set('SAME', '40D BLACK 1000X4', merge='M7', received=_START)
+        res = assign_sets({'M1': m1}, build_inventory([older, same]), now=_START)
+        self.assertEqual(res.hangs[0].hung.set_no, 'SAME')
+
+    def test_returned_sets(self):
+        ms = _two_machines(m2_top_rolls=8)
+        m1 = ms['M1']
+        m1.commit_plan(m1.plan_production(_ITEM_R, 100.0, 'schedule_tail'))     # tapes the A set out
+        res = assign_sets(ms, build_inventory([_R1]), now=_START)
+        by = {h.machine: h for h in res.hangs if h.desc.physical.id == '40D BLACK 1000X4'}
+        self.assertEqual((by['M1'].hung.set_no, by['M2'].hung.set_no), ('R1', 'R1'))
+        self.assertAlmostEqual(by['M2'].set_lbs, 900.0 - 40.0)
+        ms2 = _two_machines(m2_top_rolls=8)
+        ms2['M1'].commit_plan(ms2['M1'].plan_production(_ITEM_R, 100.0, 'schedule_tail'))
+        tiny = _stock_set('R1', '40D BLACK 1000X4', lbs=60.0)
+        res2 = assign_sets(ms2, build_inventory([tiny]), now=_START)
+        by2 = {h.machine: h for h in res2.hangs if h.desc.physical.id == '40D BLACK 1000X4'}
+        self.assertEqual((by2['M1'].source, by2['M2'].source), ('stock', 'new'))
+
+    def test_shortfall(self):
+        ms = _two_machines()
+        small = _stock_set('R1', '40D BLACK 1000X4', lbs=30.0)
+        res = assign_sets({'M1': ms['M1']}, build_inventory([small]), now=_START)
+        h = res.hangs[0]
+        self.assertAlmostEqual(h.consumed, 40.0)
+        self.assertAlmostEqual(h.short_by, 40.0 - (30.0 - BEAM_FLOOR_LBS))
+        res2 = assign_sets({'M1': _two_machines()['M1']}, build_inventory([_R1]), now=_START)
+        self.assertEqual(res2.hangs[0].short_by, 0.0)
+
+    def test_nothing_suitable(self):
+        ms = _two_machines()
+        res = assign_sets({'M1': ms['M1']}, {}, now=_START)
+        h = res.hangs[0]
+        self.assertEqual((h.hung, h.source, h.set_lbs), (None, 'new', None))
+        self.assertEqual(res.still_new, (h,))
+        self.assertTrue(_hung_on(ms['M1'])[0].startswith('NEW'))
+
+    def test_purity_and_queued_sets(self):
+        ms = _two_machines()
+        inv = build_inventory([_R1, _R2])
+        snapshot = {k: list(v) for k, v in inv.items()}
+        assign_sets(ms, inv, now=_START)
+        self.assertEqual({k: [b.id for b in v] for k, v in inv.items()},
+                         {k: [b.id for b in v] for k, v in snapshot.items()})
+        q = _queued_machine((_Q_OK,))
+        q.commit_plan(q.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        self.assertEqual(_hung_on(q), ['QO'])
+        self.assertEqual(assign_sets({'M1': q}, build_inventory([_R1]), now=_START).hangs, ())
+        self.assertEqual(_hung_on(q), ['QO'])
+
+
+class JobProvenanceTests(unittest.TestCase):
+    """7.4"""
+
+    def test_prior_job_pass_through(self):
+        m = _make_machine()
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail', prior_job='J9')
+        self.assertEqual(plan.jobs[0].prior_job, 'J9')
+        self.assertIsNone(m.plan_production(_ITEM_A, 100.0, 'schedule_tail').jobs[0].prior_job)
+        plan2 = m.plan_production(_ITEM_B, 200.0, 'next_runout', prior_job='J9')
+        by_item = {j.item.id: j.prior_job for j in plan2.jobs}
+        self.assertEqual(by_item[_ITEM_B.id], 'J9')
+        if _ITEM_A.id in by_item:
+            self.assertIsNone(by_item[_ITEM_A.id])
+        self.assertEqual(plan.jobs[0].with_activities(()).prior_job, 'J9')
+
+
+# ---------------------------- PHASE 5 (cont.) ----------------------------
+# The plant-wide change cap and filling a slot wait
+# (tests/spec-files/SCHEDULE_TEST_SPEC.md, 5.1.8, 5.2.9, 5.4.2, 5.5.10–12, 5.6).
+
+from swmtplanner.schedule import Fill
+from swmtplanner.schedule.capacity import KINDS as _KINDS, capacity_from_dict as _cap_from_dict
+
+_CHANGE_ONLY = {'change': DEFAULT_RESOURCES['change']}
+_SAT = datetime(2026, 10, 3)       # the Saturday before _MON
+
+
+def _change_cap(resources=DEFAULT_RESOURCES, booked_days=()):
+    """A ration over `resources` with every change unit of `booked_days` taken."""
+    cap = _cap(resources=resources)
+    for day in booked_days:
+        cap.book('change', day, DEFAULT_RESOURCES['change'].units_per_period)
+    return cap
+
+
+def _knits_of(plan, item):
+    return [a for a in plan.activities if isinstance(a, Knit) and a.item == item]
+
+
+class ChangeCapTests(unittest.TestCase):
+
+    def test_change_period_is_the_whole_day(self):                   # 5.1.8
+        cap = _change_cap()
+        p = cap.period_of('change', _h(_TUE, 3))
+        self.assertEqual((p.day, p.start, p.end), (_TUE.date(), _h(_TUE, 0), _h(_TUE, 24)))
+        self.assertIsNone(cap.period_of('change', _h(_SAT, 10)))
+        self.assertEqual(cap.next_period('change', _h(_SAT, 10)).day, _MON.date())
+
+    def test_sixth_change_waits_for_midnight(self):                  # 5.2.9
+        cap = _change_cap(booked_days=[_TUE.date()])
+        self.assertEqual(cap.next_slot('change', 1, _h(_TUE, 10), 0.0), _h(_WED, 0))
+        self.assertEqual(cap.next_slot('tape_out', 1, _h(_TUE, 10), 2.0), _h(_TUE, 10))
+        cap2 = _change_cap()
+        cap2.book('tape_out', _TUE.date(), 2)
+        cap2.book('pattern_change', _TUE.date(), 3)
+        self.assertEqual(cap2.next_slot('change', 1, _h(_TUE, 10), 0.0), _h(_TUE, 10))
+
+    def test_defaults_and_kinds(self):                               # 5.4.2
+        self.assertIn('change', _KINDS)
+        r = DEFAULT_RESOURCES['change']
+        self.assertEqual((r.units_per_period, r.window), (5, (0.0, 24.0)))
+        cap = _cap_from_dict({'change': 'default'}, _WEEKDAY_24)
+        self.assertEqual(cap.limits('change'), r)
+        self.assertIsNone(cap.limits('tape_out'))
+
+    def test_the_change_unit(self):                                  # 5.5.10
+        cap = _change_cap(_CHANGE_ONLY)
+        plan = _wait_machine().plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail',
+                                               capacity=cap)
+        self.assertEqual(plan.capacity_taken, (('change', _TUE.date(), 1, _h(_TUE, 10)),))
+        self.assertEqual(_idles(plan), [])
+        # no tape-out — a runner change, a new machine's style change, a
+        # pattern change — is still one unit
+        for machine, item in ((_wait_machine(), _ITEM_B),
+                              (_wait_machine(is_new=True), _ITEM_C),
+                              (_wait_machine(), _ITEM_C)):
+            plan = machine.plan_production(item, lbs=item.tgt_wt, start_at='schedule_tail',
+                                           capacity=cap)
+            self.assertEqual([(k, u) for k, _d, u, _t in plan.capacity_taken], [('change', 1)])
+        # continuing the current item takes none, nor does re-threading an empty bar
+        plan = _wait_machine().plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail',
+                                               capacity=cap)
+        self.assertEqual(plan.capacity_taken, ())
+        empty = _make_machine(init_top_lbs=BEAM_FLOOR_LBS, init_btm_lbs=1800.0,
+                              workcal=_WEEKDAY_24, start=_h(_TUE, 10))
+        plan = empty.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail', capacity=cap)
+        self.assertIsInstance(plan.activities[0], Hanging)
+        self.assertEqual(plan.capacity_taken, ())
+
+    def test_one_unit_per_preamble(self):                            # 5.5.11
+        plan = _wait_machine().plan_production(_ITEM_F, lbs=100.0, start_at='schedule_tail',
+                                               capacity=_change_cap())
+        self.assertEqual([(k, u) for k, _d, u, _t in plan.capacity_taken],
+                         [('change', 1), ('tape_out', 2), ('pattern_change', 1)])
+
+    def test_waiting_for_a_change_slot(self):                        # 5.5.12
+        cap = _change_cap(_CHANGE_ONLY, booked_days=[_TUE.date()])
+        free = _wait_machine().plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail')
+        plan = _wait_machine().plan_production(_ITEM_D, lbs=100.0, start_at='schedule_tail',
+                                               capacity=cap)
+        idle = plan.activities[0]
+        self.assertIsInstance(idle, Idle)
+        self.assertEqual((idle.start, idle.end, idle.reason),
+                         (_h(_TUE, 10), _h(_WED, 0), 'change slot'))
+        self.assertEqual(_first(plan, TapeOut).start, _h(_WED, 0))
+        self.assertEqual(plan.capacity_taken, (('change', _WED.date(), 1, _h(_WED, 0)),))
+        shift = _h(_WED, 0) - _h(_TUE, 10)
+        self.assertEqual([(a.start, a.end) for a in plan.activities[1:]],
+                         [(a.start + shift, a.end + shift) for a in free.activities])
+        # with no tape-out the changeover activity itself waits
+        runner = _wait_machine().plan_production(_ITEM_B, lbs=200.0, start_at='schedule_tail',
+                                                 capacity=cap)
+        self.assertEqual(runner.activities[0].reason, 'change slot')
+        self.assertEqual(_first(runner, RunnerChange).start, _h(_WED, 0))
+
+
+class FillSlotWaitTests(unittest.TestCase):
+    """5.6 — the wait machine on A changing to D at Tuesday 10:00 with the
+    day's changes booked: the change slot is Wednesday 00:00. A roll of A
+    is an hour's knit plus a 20-minute doff."""
+
+    def setUp(self):
+        self.cap = _change_cap(_CHANGE_ONLY, booked_days=[_TUE.date()])
+
+    def _plan(self, machine=None, fill=None, item=_ITEM_D, **kw):
+        machine = machine or _wait_machine()
+        return machine.plan_production(item, lbs=100.0, start_at='schedule_tail',
+                                       capacity=self.cap, fill=fill, **kw)
+
+    def test_no_fill_is_idle(self):                                  # 5.6.1
+        plan = self._plan()
+        self.assertEqual(_knits_of(plan, _ITEM_A), [])
+        self.assertEqual([(a.reason, a.end) for a in _idles(plan)], [('change slot', _h(_WED, 0))])
+        self.assertFalse(any(j.fill for j in plan.jobs))
+
+    def test_filling(self):                                          # 5.6.2
+        m = _wait_machine()
+        m.commit_plan(m.plan_production(_ITEM_A, lbs=100.0, start_at='schedule_tail'))
+        committed = m.jobs[-1]
+        plan = self._plan(m, fill=Fill(3, 'P1@AU0001'))
+        kinds = [type(a).__name__ for a in plan.activities]
+        self.assertEqual(kinds[:8], ['Knit', 'Doff'] * 3 + ['Idle', 'TapeOut'])
+        knits = _knits_of(plan, _ITEM_A)
+        self.assertEqual([k.lbs for k in knits], [100.0] * 3)
+        self.assertEqual(knits[0].start, m.schedule_tail)
+        idle = plan.activities[6]
+        self.assertEqual((idle.start, idle.end, idle.reason),
+                         (plan.activities[5].end, _h(_WED, 0), 'change slot'))
+        fill_job, new_job = plan.jobs
+        self.assertEqual((fill_job.item, fill_job.total_rolls, fill_job.tgt_order, fill_job.fill),
+                         (_ITEM_A, 3, 'P1@AU0001', True))
+        self.assertEqual([type(a).__name__ for a in fill_job.activities],
+                         ['Knit', 'Doff'] * 3 + ['TapeOut'])
+        self.assertEqual((new_job.item, new_job.fill, new_job.total_lbs), (_ITEM_D, False, 100.0))
+        self.assertIsInstance(new_job.activities[0], Hanging)
+        self.assertNotIn(idle, fill_job.activities)
+        self.assertNotIn(idle, new_job.activities)
+        # the tape-out went to the fill job, not to the committed job
+        self.assertIsNone(plan.replaced_job)
+        without = self._plan(m)
+        self.assertEqual(without.replaced_job.id, committed.id)
+        self.assertEqual(plan.capacity_taken, (('change', _WED.date(), 1, _h(_WED, 0)),))
+
+    def test_until_the_slot(self):                                   # 5.6.3
+        plan = self._plan(fill=Fill(100, 'P1@AU0001'))
+        knits = _knits_of(plan, _ITEM_A)
+        self.assertTrue(0 < len(knits) < 100)
+        self.assertTrue(all(k.start < _h(_WED, 0) for k in knits))
+        last_doff = plan.activities[2 * len(knits) - 1]
+        self.assertIsInstance(last_doff, Doff)
+        self.assertGreater(last_doff.end, _h(_WED, 0))
+        self.assertEqual(_idles(plan), [])
+        tape = _first(plan, TapeOut)
+        self.assertEqual(tape.start, last_doff.end)
+        self.assertEqual(plan.capacity_taken, (('change', _WED.date(), 1, tape.start),))
+        self.assertEqual(plan.jobs[0].total_rolls, len(knits))
+        self.assertEqual((plan.jobs[-1].item, plan.jobs[-1].total_lbs), (_ITEM_D, 100.0))
+
+    def test_beam_limited(self):                                     # 5.6.4
+        # the top bar holds yarn for exactly two whole rolls of A (40 lbs each)
+        m = _make_machine(init_top_lbs=2 * 40.0 + BEAM_FLOOR_LBS + 1.0, init_btm_lbs=1800.0,
+                          workcal=_WEEKDAY_24, start=_h(_TUE, 10))
+        plan = self._plan(m, fill=Fill(10, 'P1@AU0001'))
+        self.assertEqual(len(_knits_of(plan, _ITEM_A)), 2)
+        kinds = [type(a).__name__ for a in plan.activities]
+        self.assertEqual(kinds[:5], ['Knit', 'Doff', 'Knit', 'Doff', 'Idle'])
+        self.assertEqual(plan.activities[4].end, _h(_WED, 0))
+        self.assertEqual(plan.jobs[0].total_rolls, 2)
+
+    def test_run_up_job_extended(self):                              # 5.6.5
+        m = Machine('M1', _ITEM_A, _h(_TUE, 10), _TOP_BEAM, 2800.0, _BTM_BEAM, 1800.0,
+                    _WEEKDAY_24, init_roll_lbs_remaining=50.0)
+        plan = self._plan(m, fill=Fill(2, 'P1@AU0001'))
+        self.assertEqual(len(plan.jobs), 2)
+        job = plan.jobs[0]
+        self.assertEqual((job.item, job.total_rolls, job.fill), (_ITEM_A, 3, True))
+        self.assertEqual([type(a).__name__ for a in job.activities],
+                         ['Knit', 'Doff'] * 3 + ['TapeOut'])
+        self.assertEqual(job.activities[0].lbs, 50.0)
+
+    def test_one_budget_across_waits(self):                          # 5.6.6
+        # all three kinds rationed: the change slot is Wednesday 00:00 and
+        # the tape-out window opens at 08:00, so the preamble waits twice.
+        self.cap = _change_cap(booked_days=[_TUE.date()])
+        plan = self._plan(fill=Fill(12, 'P1@AU0001'))
+        knits = _knits_of(plan, _ITEM_A)
+        self.assertEqual(len(knits), 12)
+        self.assertGreater(knits[-1].start, _h(_WED, 0))          # knit in the second wait
+        self.assertEqual([a.reason for a in _idles(plan)], ['tape_out slot'])
+        self.assertEqual(_first(plan, TapeOut).start, _h(_WED, 8))
+        self.assertEqual(plan.jobs[0].total_rolls, 12)
+
+    def test_next_runout_does_not_fill(self):                        # 5.6.7
+        m = _make_machine(init_top_lbs=1000.0, init_btm_lbs=305.0,
+                          workcal=_WEEKDAY_24, start=_h(_TUE, 10))
+        with_fill = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout',
+                                      capacity=self.cap, fill=Fill(5, 'P1@AU0001'))
+        without = m.plan_production(_ITEM_D, lbs=100.0, start_at='next_runout',
+                                    capacity=self.cap)
+        self.assertEqual(_shape(with_fill), _shape(without))
+        self.assertFalse(any(j.fill for j in with_fill.jobs))
+        self.assertEqual([a.reason for a in _idles(with_fill)], ['change slot'])
+
+    def test_producible_cap_counts_the_fill(self):                   # 5.6.8
+        m = _wait_machine()
+        end = _h(_WED, 24)
+        without = m.producible_lbs_through(_ITEM_D, end=end, capacity=self.cap)
+        with_fill = m.producible_lbs_through(_ITEM_D, end=end, capacity=self.cap,
+                                             fill=Fill(100, 'P1@AU0001'))
+        self.assertLessEqual(with_fill, without)
+        # eleven rolls of 80 minutes from 10:00 overrun midnight by 40 minutes
+        overrun = m.producible_lbs_through(
+            _ITEM_D, end=end, start=_h(_WED, 0) + timedelta(minutes=40), capacity=self.cap)
+        self.assertEqual(with_fill, overrun)
+
+
+# ---------------------------- PHASE 6 (cont.) ----------------------------
+# Blacklisted merges (tests/spec-files/SCHEDULE_TEST_SPEC.md, 6.6).
+
+from swmtplanner.products import normalize_blacklist, is_blacklisted
+from swmtplanner.schedule import worth_stocking as _worth_stocking
+
+_BL = normalize_blacklist(['M1'])          # _VMAP's M1: _ITEM_A's top yarn
+_Q_BLACK = BeamSet('QK', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
+                   vendor='V', known_merge=True, assigned=True, blacklisted=True)
+
+
+class BlacklistTests(unittest.TestCase):
+    """6.6"""
+
+    def test_the_flag(self):
+        want = BeamSetDesc('40D BLACK 1000X4')
+        plain = _stock_set('S1', '40D BLACK 1000X4')
+        black = BeamSet('S1', 'M1', 900.0, want, _RECEIVED, vendor='V', known_merge=True,
+                        blacklisted=True)
+        self.assertTrue(plain.fits(want))
+        self.assertFalse(black.fits(want))
+        self.assertFalse(black.fits(BeamSetDesc('40D BLACK 1000X4 S/L')))
+        self.assertTrue(black.returned(500.0, _START).blacklisted)
+        self.assertTrue(BeamSet.new(want, 100.0, _START).relabelled(black).blacklisted)
+        self.assertFalse(BeamSet.new(want, 100.0, _START).relabelled(plain).blacklisted)
+        self.assertFalse(BeamSet.new(want, 2800.0, _START).blacklisted)
+        self.assertTrue(_worth_stocking(plain))
+        self.assertFalse(_worth_stocking(black))
+        self.assertEqual(build_inventory([plain, black]), {want: [plain]})
+
+    def test_codes(self):
+        self.assertEqual(normalize_blacklist([' 292286 ', 'g622', '', 5]),
+                         frozenset({'292286', 'G622', '5'}))
+        bl = normalize_blacklist(['292286', 'g622'])
+        self.assertTrue(is_blacklisted('292286', bl))
+        self.assertTrue(is_blacklisted(' G622 ', bl))
+        self.assertFalse(is_blacklisted('292286BAD', bl))
+        self.assertFalse(is_blacklisted(None, bl))
+        self.assertFalse(is_blacklisted('292286', frozenset()))
+        rec = beam_set_from_record(_record(set_no='S1', merge='M1'), _VMAP, _START, blacklist=_BL)
+        self.assertTrue(rec.blacklisted)
+        self.assertFalse(beam_set_from_record(_record(set_no='S1', merge='M1'), _VMAP, _START).blacklisted)
+        sets = beam_sets_from_list([_record(set_no='S1', merge='M1'), _record(set_no='S2', merge='M2')],
+                                   _VMAP, _START, blacklist=_BL)
+        self.assertEqual({k: v.blacklisted for k, v in sets.items()}, {'S1': True, 'S2': False})
+
+    def test_mounted_set_is_a_foreign_bar(self):
+        entry = _entry(init_top_set={'set_no': 'S2', 'merge': 'M1'}, init_roll_lbs=50.0)
+        plain = _load([entry])['M1']
+        m = _load([entry], blacklist=_BL)['M1']
+        top = m.initial_status.beam('top')
+        self.assertTrue(top.blacklisted)
+        self.assertEqual((top.set_no, top.merge), ('S2', 'M1'))
+        self.assertEqual(m.whole_rolls_before_runout, 0)
+        self.assertEqual(m.next_runout, m.initial_status.as_of)
+        self.assertEqual(m.initial_status.roll_lbs_remaining, 0.0)
+        self.assertGreater(plain.whole_rolls_before_runout, 0)
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        kinds = [type(a).__name__ for a in plan.activities[:4]]
+        self.assertEqual(kinds, ['TapeOut', 'Hanging', 'Threading', 'Knit'])
+        tape = plan.activities[0]
+        self.assertEqual((tape.bars, tape.top_beam.set_no, tape.top_beam.blacklisted),
+                         ('top', 'S2', True))
+        self.assertNotIn('S2', [b.set_no for b in plan.beam_sets_returned])
+
+    def test_queued_set_is_passed_over(self):
+        m = _queued_machine((_Q_BLACK, _Q_OK))
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        hang = _first_hang(plan)
+        self.assertEqual(hang.top_beam.set_no, 'QO')
+        self.assertEqual(hang.passed_over, (('top', _Q_BLACK),))
+        self.assertEqual([(p.beam_set.set_no, p.reason) for p in plan.queue_passed_over],
+                         [('QK', 'blacklisted')])
+        bad = _queued_machine((_Q_BAD,)).plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([p.reason for p in bad.queue_passed_over], ['does not fit'])
+        q = _load([_entry()], assigned_sets=[_record(set_no='Q1', merge='M1', machine='M01', bar=2)],
+                  blacklist=_BL)['M1'].initial_status.queue('top')
+        self.assertEqual([(b.set_no, b.blacklisted) for b in q], [('Q1', True)])
+
+    def test_manual_assignment_refused(self):
+        black = BeamSet('S9', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _RECEIVED,
+                        vendor='V', known_merge=True, blacklisted=True)
+        plain = _stock_set('S9', '40D BLACK 1000X4')
+        m = _queued_machine()
+        ok = m.plan_production(_ITEM_A, 100.0, 'schedule_tail',
+                               inventory=build_inventory([plain]), assign={'top': ['S9']})
+        self.assertEqual(_first_hang(ok).top_beam.set_no, 'S9')
+        with self.assertRaises(ValueError):
+            m.plan_production(_ITEM_A, 100.0, 'schedule_tail',
+                              inventory=build_inventory([black]), assign={'top': ['S9']})

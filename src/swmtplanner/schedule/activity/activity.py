@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal, TYPE_CHECKING
 
@@ -39,7 +39,7 @@ PATTERN_CHANGE_DURATION: float = 1.5
 # status.py (the "removed" guard predicate) and machine.py (the planning
 # gates) can import them without a circular dependency.
 BEAM_FLOOR_LBS: float = 5.0
-MAX_BEAM_WASTE_LBS: float = 100.0
+MAX_BEAM_WASTE_LBS: float = 20.0
 
 
 def _make_id_counter():
@@ -87,10 +87,14 @@ class Knit(Activity):
     `variant` is the plant variant the merges on the two bars identify under
     `item` (the recipe's comma-separated names), or `None` when a bar's set has
     no known merge, the pair matches no recipe, or the machine has no variant
-    map — the knit is then for the generic master only."""
+    map — the knit is then for the generic master only. `top_beam` /
+    `btm_beam` are the sets on the bars while it ran — what the floor reads
+    off the schedule; `None` only when a bar held nothing."""
     item: 'Greige'
     lbs: float
     variant: str | None = None
+    top_beam: 'BeamSet | None' = None
+    btm_beam: 'BeamSet | None' = None
     _count: int = field(default_factory=_KNIT_ID, init=False)
 
     @property
@@ -166,10 +170,14 @@ class Hanging(Activity):
     `'both'` is cheaper than two singles (shared setup). Together, `Hanging` +
     `Threading` replace the old single `BeamLoad`. The set comes from the
     inventory the plan was given, or is invented (`BeamSet.new`) when nothing
-    suitable is in stock."""
+    suitable is in stock. `passed_over` lists, per bar, the plant-assigned
+    sets this hang dropped from that bar's queue because they did not fit
+    the requirement (see "Assigned sets and bar queues" in DESIGN.md);
+    applying the hang removes them from the queue."""
     bars: Literal['top', 'btm', 'both']
     top_beam: 'BeamSet | None' = None
     btm_beam: 'BeamSet | None' = None
+    passed_over: 'tuple[tuple[Literal["top", "btm"], BeamSet], ...]' = ()
     _count: int = field(default_factory=_HANGING_ID, init=False)
 
     @property
@@ -236,9 +244,40 @@ class PatternChange(Activity):
 class Idle(Activity):
     """Deliberate gap where the machine is committed to not running, used
     when staffing limits prevent continuous operation. Beam state and
-    current_item are unchanged across the interval."""
+    current_item are unchanged across the interval.
+
+    `reason` names what the machine waited for when the gap is not the
+    caller's own idle: `'tape_out slot'` / `'pattern_change slot'` when the
+    day's ration of that changeover was used up (see "Changeover capacity"
+    in DESIGN.md); empty for a caller-supplied idle."""
+    reason: str = ''
     _count: int = field(default_factory=_IDLE_ID, init=False)
 
     @property
     def id(self) -> str:
         return f'IDLE{self._count:08}'
+
+
+def rebind_sets(activity: Activity, relabel) -> Activity:
+    """`activity` with every beam set it references replaced by
+    `relabel(set)` — the same activity (same id, times, bars, lbs) under
+    other set identities: a `Knit`'s bar sets, a `Waste`'s beam, a
+    `TapeOut`'s or `Hanging`'s per-bar sets (a `Hanging`'s `passed_over`
+    is left alone — those are real sets). Activities that reference no set
+    come back as they are. See "Assigning sets after planning" in
+    DESIGN.md."""
+    if isinstance(activity, Knit):
+        changes = {'top_beam': relabel(activity.top_beam),
+                   'btm_beam': relabel(activity.btm_beam)}
+    elif isinstance(activity, Waste):
+        changes = {'beam': relabel(activity.beam)}
+    elif isinstance(activity, (TapeOut, Hanging)):
+        changes = {'top_beam': relabel(activity.top_beam),
+                   'btm_beam': relabel(activity.btm_beam)}
+    else:
+        return activity
+    if all(changes[k] is getattr(activity, k) for k in changes):
+        return activity
+    new = replace(activity, **changes)
+    object.__setattr__(new, '_count', activity._count)   # keep the id
+    return new

@@ -43,7 +43,7 @@ _DEFAULT_LEAD_TIME = timedelta(days=7)
 # RlsItem treats start_date as week 0's due_date, so to share the same week
 # offsets as the view tests we anchor start_date one week past _START. With
 # that anchor, RlsItem's week-i due_date matches _due(i).
-_START = datetime(2026, 1, 1)
+_START = datetime(2026, 1, 5)       # a Monday: due dates fall on Mondays
 
 
 def _due(week_idx: int) -> datetime:
@@ -267,10 +267,10 @@ class RlsItemCostTrackerTests(unittest.TestCase):
         # for order 3 held 13 days → 6 days past lead_time).
         #
         # Raw view FIFO walk:
-        #   order 0 takes 100 from Job A (1d late) → 100 * 2^1 = 200.
-        #   order 1 takes 200 from Job B (1d late) → 200 * 2^1 = 400.
+        #   order 0 takes 100 from Job A (1d late) → (100/100) * f(1) = 1.
+        #   order 1 takes 200 from Job B (1d late) → (200/200) * f(1) = 1.
         #   orders 2 and 3 take from Job B on-time.
-        #   lateness = 600.
+        #   lateness = 2.
         #
         # Safety view:
         #   week_0.due → week_0.due+1d (1d × deficit 1400)  = 1400
@@ -286,7 +286,7 @@ class RlsItemCostTrackerTests(unittest.TestCase):
             [o.allocated_lbs for o in rls.safety_view.orders],
             [100.0, 200.0, 150.0, 300.0],
         )
-        self.assertAlmostEqual(rls.raw_view.lateness, 600.0)
+        self.assertAlmostEqual(rls.raw_view.lateness, 2.0)
         self.assertAlmostEqual(rls.safety_view.drainage, 11200.0)
         self.assertAlmostEqual(rls.safety_view.carrying, 1800.0)
         self.assertEqual(rls.safety_view.excess, 0.0)

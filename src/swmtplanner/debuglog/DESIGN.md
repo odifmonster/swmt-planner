@@ -225,12 +225,13 @@ cost_summary                  # parallel of CostBreakdown — one row per weight
                               #   the matching CostBreakdown scalar
 ```
 
-`kind` partitions the fourteen `CostBreakdown` components exactly:
+`kind` partitions the fifteen `CostBreakdown` components exactly:
 
 - **inventory** — `lateness`, `drainage`, `carrying`, `excess`
 - **schedule** — `tape_out_single`, `tape_out_both`, `style_change`,
   `runner_change`, `pattern_change`, `idle_time`, `waste_lbs`
-- **other** — `priority`, `level_loading`, `old_machine`
+- **other** — `priority`, `level_loading`, `old_machine`, `recovery` — none
+  with a leaf table
 
 Config:
 `set_pk('iteration_log', 'move_id', ctr_name='move_id')` (auto-incremented);
@@ -320,7 +321,10 @@ inv_cost_detail
 
 Granularity by `label`:
 - **lateness** — one row per late delivery of material to an order: `days` =
-  days late, `qty` = lbs delivered late, `value` = `weight × qty × 2^days`.
+  days late, `qty` = the **share of the gross order** delivered late (lbs
+  late / the week's demand as loaded, 0–1), `value` = `weight × qty ×
+  lateness_factor(days)` (linear for a week, doubling beyond — see
+  `demand/DESIGN.md`).
 - **drainage** — one row per stretch the pool sits at the same level **below**
   target: `days` = stretch length, `qty` = deficit lbs, `value` =
   `weight × qty × days`.
@@ -368,7 +372,7 @@ leaf, so it is not expected to sum to a `cost_summary` row. Config:
 'move_id', 'iteration_log', 'move_id')`.
 
 **`priority_detail`** — one row per higher-priority deferred regular order the
-move charges against.
+move charges against (see "Priority cost" in `planners/infinite/DESIGN.md`).
 
 ```
 priority_detail
@@ -376,9 +380,9 @@ priority_detail
   item           # greige id of the deferred order
   week_idx       # its week
   remaining_lbs  # its unfilled lbs
-  late_day       # the selected late-delivery day (days_late used)
+  late_day       # the predicted days late (one week past the earliest other-machine DP, minus the due date)
   weight         # w.priority
-  cost           # weight × remaining_lbs × 2^late_day
+  cost           # weight × (remaining_lbs / the week's gross lbs) × lateness_factor(late_day)
 ```
 
 Key-less — a flat leaf grouped by `move_id`. Config: `set_fk('priority_detail',

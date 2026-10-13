@@ -4,9 +4,10 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, TYPE_CHECKING
+from typing import Any, Collection, Mapping, TYPE_CHECKING
 
-from swmtplanner.products import BeamSet, BeamSetDesc
+from swmtplanner.products import BeamSet, BeamSetDesc, beam_set_from_record, is_blacklisted
+from swmtplanner.support import planning_mode
 from .machine import Machine, fresh_beam_lbs
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ def machines_from_list(
     beam_sets: Mapping[str, BeamSet] | None = None,
     assigned_sets: 'list[Any] | None' = None,
     source: str = '<machines list>',
+    blacklist: Collection[str] = (),
 ) -> dict[str, Machine]:
     """Build a `{machine_id: Machine}` dict from an already-parsed list
     of machine records — the same shape a machines JSON file holds.
@@ -38,13 +40,13 @@ def machines_from_list(
     is mapped to its master and kept as the machine's `init_variant`;
     anything else is an unrecognised item and resolves to the `NONE`
     greige. The initial top and bottom bars hold physical `BeamSet`s
-    with ids `<machine id>-top` / `-btm`, described by the resolved
-    `Greige`'s `configuration` (a machine currently set up to run an
-    item is by definition threaded with that item's beams), holding
-    `init_top_lbs` / `init_btm_lbs` and available from `start_date`.
-    The optional `init_roll_lbs` (default 0) is how many lbs remain to
-    complete the roll on the machine at `start_date`; the planner always
-    finishes that roll first.
+    with ids `<machine id>-top` / `-btm` (or the mounted set's number,
+    below), holding `init_top_lbs` / `init_btm_lbs` and available from
+    `start_date`. The optional `init_roll_lbs` (default 0) is how many
+    lbs remain to complete the roll on the machine at `start_date`; the
+    planner always finishes that roll first. In planning mode
+    (`support.planning_mode`) a non-empty bar's lbs is replaced by
+    `planning_mode.BEAM_LBS`; an empty bar (0) stays empty.
     An entry may name the sets actually mounted, `init_top_set` /
     `init_btm_set` (optional): an object `{set_no, merge, vendor}` — the
     plant's report of what is on the bar, `merge` / `vendor` possibly null
@@ -55,21 +57,33 @@ def machines_from_list(
     `BeamSet.same_vendor`), which also supplies the plant's denier /
     luster / yarn type; else the merge is known only when a variant was
     named *and* a `variant_map` is given: that variant's recipe supplies
-    the merge on each bar. The `variant_map` is also handed to every
-    `Machine` so its knits carry variants. Sets named here are on the
-    machines, not in stock — the caller keeps them out of the inventory
-    (see the planner's `load_inputs`).
+    the merge on each bar. The set's **description** is what that evidence
+    says is on the bar: the export's description when the export holds
+    the set; else, for a merge the `variant_map` knows, that merge's yarn
+    at the bar's construction (the item's beam label's ends and beams);
+    else the item's beam label itself. A description that does not fit
+    the item's requirement makes the bar *foreign* — the plant reported
+    the machine mid-change — and the machine's first plan tapes out or
+    wastes the reported set (see `Machine`). The `variant_map` is also
+    handed to every `Machine` so its knits carry variants. Sets named
+    here are on the machines, not in stock — the caller keeps them out of
+    the inventory (see the planner's `load_inputs`).
 
     `assigned_sets` is the plant's assigned-sets list — records of
     `set_no`, `merge`, `vendor`, `machine`, `bar` (bar 1 the bottom, any
-    higher bar the top) for sets staged at a machine but not yet threaded.
-    Each becomes the next set in that machine bar's **queue**, resolved
-    through `beam_sets` for its data (same match rule), or built from the
-    record — the record's merge and vendor, a fresh-beam weight, available
-    from `start_date` — when the export lacks it. Machine ids are matched
-    after normalising zero padding (`N01` -> `N1`); records for machines
-    not in this list are ignored (they still leave the free stock via the
-    export's `assigned` flag). `start_date` (plant local time, like every
+    higher bar the top) for sets staged at a machine but not yet threaded,
+    carrying the export's yarn fields (`denier`, `luster`, `desc`, `ends`,
+    `beams`, `lbs`, optional `received`). Each becomes the next set in
+    that machine bar's **queue**, resolved through `beam_sets` for its
+    data (same match rule), or, when the export lacks it, built from the
+    record as an export record is (`products.beam_set_from_record`, so
+    the set is described by its own yarn and may not fit the bar — it is
+    then passed over at the hang). A record with none of the yarn fields
+    (the older form) falls back to the bar's requirement and a fresh-beam
+    weight; one whose yarn normalises to nothing is skipped. Machine ids
+    are matched after normalising zero padding (`N01` -> `N1`); records
+    for machines not in this list are ignored (they still leave the free
+    stock via the export's `assigned` flag). `start_date` (plant local time, like every
     timestamp the planner handles) and `workcal` are plant-wide, applied
     uniformly to every machine.
     (Changeover durations are no longer per-machine — they are
@@ -104,8 +118,14 @@ def machines_from_list(
         )
         start = start_date + workcal.cal_shift
         machine_id = str(entry['id'])
+        # Planning mode: every mounted set starts with BEAM_LBS (a bar the
+        # export reports empty stays empty — it is waiting for a set).
         top_lbs = float(entry['init_top_lbs'])
         btm_lbs = float(entry['init_btm_lbs'])
+        if top_lbs > 0:
+            top_lbs = planning_mode.beam_lbs(top_lbs)
+        if btm_lbs > 0:
+            btm_lbs = planning_mode.beam_lbs(btm_lbs)
         top_set = _set_ref(entry.get('init_top_set'), f'{source} {machine_id} init_top_set')
         btm_set = _set_ref(entry.get('init_btm_set'), f'{source} {machine_id} init_btm_set')
         machine = Machine(
@@ -114,11 +134,11 @@ def machines_from_list(
             start=start,
             init_top_beam=_initial_set(machine_id, 'top', item_cfg.top_beam,
                                        top_lbs, start, top_merge, top_set,
-                                       beam_sets),
+                                       beam_sets, variant_map, blacklist),
             init_top_lbs=top_lbs,
             init_btm_beam=_initial_set(machine_id, 'btm', item_cfg.btm_beam,
                                        btm_lbs, start, btm_merge, btm_set,
-                                       beam_sets),
+                                       beam_sets, variant_map, blacklist),
             init_btm_lbs=btm_lbs,
             workcal=workcal,
             is_new=bool(entry['is_new']),
@@ -126,9 +146,11 @@ def machines_from_list(
             variant_map=variant_map,
             init_roll_lbs_remaining=float(entry.get('init_roll_lbs', 0.0)),
             init_top_queue=_queued_sets(queues.get((_norm_id(machine_id), 'top'), ()),
-                                        item_cfg.top_beam, start, beam_sets),
+                                        item_cfg.top_beam, start, beam_sets,
+                                        variant_map, source, blacklist),
             init_btm_queue=_queued_sets(queues.get((_norm_id(machine_id), 'btm'), ()),
-                                        item_cfg.btm_beam, start, beam_sets),
+                                        item_cfg.btm_beam, start, beam_sets,
+                                        variant_map, source, blacklist),
         )
         out[machine.id] = machine
     return out
@@ -160,15 +182,25 @@ def _bar_queues(records: list[Any]) -> dict[tuple[str, str], list[dict]]:
     return out
 
 
+_YARN_FIELDS = ('denier', 'luster', 'desc', 'ends', 'beams', 'lbs')
+
+
 def _queued_sets(
     records: list[dict], label: str, start: datetime,
     beam_sets: Mapping[str, BeamSet] | None,
+    variant_map: 'VariantMapFile | None', source: str,
+    blacklist: Collection[str] = (),
 ) -> list[BeamSet]:
     """The `BeamSet`s for a bar's assigned records: the export's set when
-    the record matches one (set number and vendor; flagged assigned), else
-    one built from the record — the bar's requirement as its description,
-    the record's merge and vendor, a fresh-beam weight — since the plant put
-    it at the machine for exactly that bar."""
+    the record matches one (set number and vendor; flagged assigned); else,
+    when the record carries the export's yarn fields and a `variant_map` is
+    given, the set the record describes (`beam_set_from_record`, flagged
+    assigned, available from its `received` or `start`) — skipped when its
+    yarn normalises to nothing; else (the older record form) one built from
+    the bar's requirement, the record's merge and vendor and a fresh-beam
+    weight, since the plant put it at the machine for exactly that bar. A
+    set whose merge is on `blacklist` is stamped `blacklisted` (the export's
+    sets already are)."""
     out: list[BeamSet] = []
     for rec in records:
         set_no = str(rec['set_no'])
@@ -177,11 +209,19 @@ def _queued_sets(
         if known is not None:
             out.append(known)
             continue
+        if variant_map is not None and all(rec.get(f) not in (None, '') for f in _YARN_FIELDS):
+            built = beam_set_from_record(
+                {**rec, 'assigned': True}, variant_map, start,
+                f'{source} assigned set {set_no!r}', blacklist,
+            )
+            if built is not None:
+                out.append(built)
+            continue
         desc = BeamSetDesc(label).physical
         merge = _opt_str(rec.get('merge'))
         out.append(BeamSet(set_no, merge, fresh_beam_lbs(desc), desc, start,
                            vendor=vendor, known_merge=merge is not None,
-                           assigned=True))
+                           assigned=True, blacklisted=is_blacklisted(merge, blacklist)))
     return out
 
 
@@ -242,14 +282,20 @@ def _initial_set(
     recipe_merge: str | None,
     ref: tuple[str | None, str | None, str | None],
     beam_sets: Mapping[str, BeamSet] | None,
+    variant_map: 'VariantMapFile | None' = None,
+    blacklist: Collection[str] = (),
 ) -> BeamSet:
     """The physical set on a machine's `bar` at `start`. `ref` is the
     machines file's `(set_no, merge, vendor)` (see `_set_ref`). The set's id
-    is that set number when given, else `<machine>-<bar>`; its description
-    is the physical form of the style's beam-set `label`; its merge and
+    is that set number when given, else `<machine>-<bar>`; its merge and
     vendor come from `ref` when it names them, else from the export's
     record of the set (matched by set number and vendor), else — merge only
-    — from `recipe_merge` (the named variant's recipe)."""
+    — from `recipe_merge` (the named variant's recipe). Its description is
+    what that evidence says is on the bar: the export's description when
+    the export holds the set; else the merge's yarn per `variant_map` at
+    the `label`'s construction; else the physical form of `label` itself.
+    Stamped `blacklisted` when its merge is on `blacklist`, which makes the
+    bar foreign (see "Blacklisted merges" in DESIGN.md)."""
     set_no, merge, vendor = ref
     known = _export_set(beam_sets, set_no, vendor)
     if known is not None:
@@ -257,13 +303,30 @@ def _initial_set(
         vendor = vendor if vendor is not None else known.vendor
     if merge is None:
         merge = recipe_merge
-    return BeamSet(set_no or f'{machine_id}-{bar}', merge, lbs,
-                   BeamSetDesc(label).physical, start,
+    desc = _mounted_desc(label, known, merge, variant_map)
+    return BeamSet(set_no or f'{machine_id}-{bar}', merge, lbs, desc, start,
                    vendor=vendor,
                    denier=known.denier if known else None,
                    luster=known.luster if known else '',
                    ytype=known.ytype if known else '',
-                   known_merge=merge is not None)
+                   known_merge=merge is not None,
+                   blacklisted=is_blacklisted(merge, blacklist))
+
+
+def _mounted_desc(
+    label: str, known: BeamSet | None, merge: str | None,
+    variant_map: 'VariantMapFile | None',
+) -> BeamSetDesc:
+    """A mounted set's description (see `_initial_set`): the export's when
+    it holds the set, else the merge's yarn (per the map) at the label's
+    ends and beams, else the label's physical form."""
+    want = BeamSetDesc(label).physical
+    if known is not None:
+        return known.desc
+    info = variant_map.merges.get(merge) if variant_map is not None and merge else None
+    if info is not None:
+        return BeamSetDesc(f'{info.yarn_desc} {want.ends}X{want.spools}').physical
+    return want
 
 
 def read_machines(
@@ -276,6 +339,7 @@ def read_machines(
     variant_map: 'VariantMapFile | None' = None,
     beam_sets: Mapping[str, BeamSet] | None = None,
     assigned_sets: 'list[Any] | None' = None,
+    blacklist: Collection[str] = (),
 ) -> dict[str, Machine]:
     """Load machine records from a JSON file. Thin wrapper over
     `machines_from_list`. The file's shape: a top-level list of
@@ -289,5 +353,5 @@ def read_machines(
         greige_by_id=greige_by_id, variant_masters=variant_masters,
         variant_map=variant_map, beam_sets=beam_sets,
         assigned_sets=assigned_sets,
-        source=f'machines file at {path!r}',
+        source=f'machines file at {path!r}', blacklist=blacklist,
     )

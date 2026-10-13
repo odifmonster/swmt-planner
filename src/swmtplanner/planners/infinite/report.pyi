@@ -8,7 +8,8 @@ __all__ = [
     'demand_dataframe',
     'schedule_dataframe', 'production_dataframe', 'xref_dataframe',
     'unmet_demand_dataframe',
-    'late_orders_dataframe', 'write_plan_report_xlsx',
+    'late_orders_dataframe', 'changeovers_dataframe', 'prior_jobs_dataframe',
+    'write_plan_report_xlsx',
 ]
 
 
@@ -21,3 +22,10 @@ def unmet_demand_dataframe(report: PlanReport) -> pd.DataFrame: ...
 def write_plan_report_xlsx(
     report: PlanReport, path: str | Path,
 ) -> None: ...
+
+
+def prior_jobs_dataframe(report: PlanReport) -> pd.DataFrame:
+    """The `prior_jobs` sheet: one row per prior-plan job with its fate
+    (machine, prior_job, item, rolls, order, due_date, start, status, job_id,
+    note), in start order."""
+    ...

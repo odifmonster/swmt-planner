@@ -69,6 +69,15 @@ class Job(HasID[str]):
     rolls: tuple[Roll, ...] = ()
     tgt_order: str | None = None
     activities: tuple['Activity', ...] = ()
+    # Provenance: the id of a previous plan's job this one was committed to
+    # honour (the infinite planner's "Sticking to the prior plan"); None
+    # otherwise.
+    prior_job: str | None = None
+    # True when the job (also) knit rolls of the current item while the
+    # machine waited for a changeover-ration slot (see "Filling a slot wait"
+    # in DESIGN.md): a new current-item job built from those rolls, or the
+    # run-up job they extended.
+    fill: bool = False
     # init=True (with a default) so `dataclasses.replace` preserves the id.
     _count: int = field(default_factory=_JOB_ID, repr=False)
 

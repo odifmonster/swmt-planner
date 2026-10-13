@@ -1,4 +1,4 @@
-from datetime import tzinfo
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -7,7 +7,7 @@ from .loop import PlanReport
 
 __all__ = [
     'PLANT_TZ',
-    'schedule_json', 'write_schedule_json',
+    'schedule_json', 'write_schedule_json', 'order_due_dates',
     'machines_schedule_json', 'write_machines_schedule_json',
 ]
 
@@ -38,3 +38,9 @@ def write_schedule_json(
 def write_machines_schedule_json(
     machines: Mapping[str, Machine], path: str | Path, tz: tzinfo = ...,
 ) -> None: ...
+
+
+def order_due_dates(report: PlanReport) -> dict[str, datetime]:
+    """`{order id: due date}` over the report's regular orders — what gives
+    each job its `due_date` in the JSON."""
+    ...

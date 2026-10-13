@@ -8,6 +8,7 @@ from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING
 
 from swmtplanner.support import HasID
 from swmtplanner.products import BeamSet, BeamSetDesc
+from swmtplanner.support import planning_mode
 from swmtplanner.schedule.activity import (
     Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
@@ -16,15 +17,17 @@ from swmtplanner.schedule.activity import (
     THREADING_SINGLE_DURATION, THREADING_BOTH_DURATION,
     DOFF_DURATION,
     STYLE_CHANGE_DURATION, RUNNER_CHANGE_DURATION, PATTERN_CHANGE_DURATION,
-    BEAM_FLOOR_LBS, MAX_BEAM_WASTE_LBS,
+    BEAM_FLOOR_LBS, MAX_BEAM_WASTE_LBS, rebind_sets,
 )
 from swmtplanner.schedule.job import Job, Roll
+from swmtplanner.schedule.inventory import worth_stocking
 from .status import Status
 
 if TYPE_CHECKING:
     from swmtplanner.support import WorkCal
     from swmtplanner.products import Greige, VariantMapFile
     from swmtplanner.schedule.inventory import InventoryView
+    from swmtplanner.schedule.capacity import ChangeoverCapacity, Slot
 
 
 # Plant convention: fresh-beam yarn quantity depends on yarn denier. Low-
@@ -33,30 +36,134 @@ if TYPE_CHECKING:
 # machine, and not a property of `BeamSetDesc` (which stays plant-agnostic).
 _LOW_DENIER_FRESH_LBS = 2800.0
 _HIGH_DENIER_FRESH_LBS = 1800.0
+
+# A stock set lighter than this is passed over for a hang while any heavier
+# set fits the bar (it would mean another swap within hours). See "Beam-set
+# inventory" in DESIGN.md.
+MIN_STOCK_SET_LBS = 500.0
 _LOW_DENIER_THRESHOLD = 45
 
 
 def fresh_beam_lbs(beam: BeamSetDesc) -> float:
     """How much yarn is on a freshly loaded beam, by denier convention. Sizes
-    the sets the planner **invents** when nothing suitable is in stock."""
-    return (_LOW_DENIER_FRESH_LBS if beam.denier <= _LOW_DENIER_THRESHOLD
-            else _HIGH_DENIER_FRESH_LBS)
+    the sets the planner **invents** when nothing suitable is in stock. In
+    planning mode every set starts with `planning_mode.BEAM_LBS`."""
+    return planning_mode.beam_lbs(
+        _LOW_DENIER_FRESH_LBS if beam.denier <= _LOW_DENIER_THRESHOLD
+        else _HIGH_DENIER_FRESH_LBS
+    )
+
+
+def _doff_hours() -> float:
+    """`DOFF_DURATION`, or the planning-mode handling time."""
+    return planning_mode.handling_hours(DOFF_DURATION)
+
+
+# Running efficiency: the share of scheduled running time a machine actually
+# knits, once unplanned stops (a defect, waiting for a fixer) are taken out.
+# A style's `machine_rates` are nominal lbs per running hour (rpm × 60 / 480
+# revs per rack × rack_wt / 100); every rate the model uses is scaled by this.
+# Planned stops (doffs, threading, changeovers) are separate activities; the
+# threading team's limited throughput — beams waiting to be re-threaded — is
+# folded in here too (0.85 × 0.9) rather than rationed.
+RUNNING_EFFICIENCY: float = 0.765
+
+
+def effective_rate(nominal: float, mtype: str) -> float:
+    """A machine's working rate from a style's nominal rate: scaled by
+    `RUNNING_EFFICIENCY` (or planning mode's efficiency)."""
+    return nominal * planning_mode.efficiency(RUNNING_EFFICIENCY, mtype)
+
+
+def choose_stock(cands: list[BeamSet], prev: 'BeamSet | None') -> BeamSet:
+    """The stock set to hang from `cands` (sets that fit the bar, available
+    and not yet taken), for continuity with `prev`, the set coming off the
+    bar: first a set with the same merge, then one from the same vendor,
+    then any — a tier is skipped when `prev` is None or its merge (vendor)
+    is unknown, since there is nothing to match. Within a tier the oldest
+    received first, then the lowest set number. Sets under
+    `MIN_STOCK_SET_LBS` are ignored unless they are all there is. See
+    "Beam-set inventory" in DESIGN.md."""
+    heavy = [b for b in cands if b.lbs >= MIN_STOCK_SET_LBS]
+    pool = heavy or cands
+    merge = prev.merge if prev is not None else None
+    vendor = prev.vendor if prev is not None else None
+
+    def tier(b: BeamSet) -> int:
+        if merge is not None and b.merge == merge:
+            return 0
+        if vendor is not None and b.vendor == vendor:
+            return 1
+        return 2
+
+    return min(pool, key=lambda b: (tier(b), b.avail_date, b.set_no))
+
+
+@dataclass(frozen=True)
+class PassedOver:
+    """A plant-assigned set a hang dropped from a bar's queue because it did
+    not fit the bar's requirement at the time (see "Assigned sets and bar
+    queues" in DESIGN.md): the bar, the set as the queue described it, the
+    requirement it failed, the hang's start and the reason: `'does not fit'`,
+    or `'blacklisted'` for a set whose merge the run blacklisted (see
+    "Blacklisted merges" in DESIGN.md)."""
+    bar: Literal['top', 'btm']
+    beam_set: BeamSet
+    wanted: BeamSetDesc
+    at: datetime
+    reason: str = 'does not fit'
+
+
+class UnhungAssignments(ValueError):
+    """`plan_production(assign=)` named sets the plan never got to hang:
+    `leftover` is `{bar: [set numbers]}` of them. A `ValueError`, so callers
+    that do not care treat it as any refused assignment."""
+
+    def __init__(self, leftover: dict[str, list[str]]) -> None:
+        super().__init__(f'assigned sets never hung by this plan: {leftover}')
+        self.leftover = leftover
+
+
+@dataclass(frozen=True)
+class Fill:
+    """What a plan's preamble may knit instead of idling while it waits for
+    a changeover-ration slot (see "Filling a slot wait" in DESIGN.md):
+    whole `rolls` of the machine's *current* item the plant still wants,
+    raised against `tgt_order`."""
+    rolls: int
+    tgt_order: str | None = None
 
 
 @dataclass
 class _PlanCtx:
     """Per-`plan_production` scratch: the (read-only) inventory the plan
     draws on, per-bar queues of manually assigned set numbers, the stock
-    sets it has hung so far (so one set is not hung twice in a plan) and
-    the sets it has taped out for return."""
+    sets it has hung so far (so one set is not hung twice in a plan), the
+    sets it has taped out for return and the queued sets it passed over."""
     inventory: 'InventoryView'
     assigned: dict[str, deque['str | None']] = field(default_factory=dict)
     taken: list[BeamSet] = field(default_factory=list)
     returned: list[BeamSet] = field(default_factory=list)
     taken_ids: set[str] = field(default_factory=set)
+    passed: list[PassedOver] = field(default_factory=list)
+    # The set most recently taped out of each bar in this plan — the set a
+    # changeover's hang replaces, for the continuity rule in `pick`.
+    removed: dict[str, BeamSet] = field(default_factory=dict)
+    # The changeover ration the plan's tape-outs and pattern changes are
+    # placed against (None: unrationed), and the slots it has taken.
+    capacity: 'ChangeoverCapacity | None' = None
+    slots: list['Slot'] = field(default_factory=list)
+    # The fill the caller allowed (None: a slot wait is idle), the rolls of
+    # it still unused, and the rolls and activities the fill has produced —
+    # one budget across every wait in the preamble.
+    fill: 'Fill | None' = None
+    fill_left: int = 0
+    fill_rolls: list[Roll] = field(default_factory=list)
+    fill_acts: list[Activity] = field(default_factory=list)
 
     def pick(self, desc: BeamSetDesc, at: datetime, bar: str,
-             working: 'Status | None' = None) -> BeamSet:
+             working: 'Status | None' = None,
+             prev: 'BeamSet | None' = None) -> BeamSet:
         """The set to hang on `bar` for `desc` at `at`, in order of
         precedence: (1) the front of the bar's **queue** on `working` — the
         set the plant has already assigned to that bar and not yet threaded
@@ -64,10 +171,12 @@ class _PlanCtx:
         in, so a caller assignment for this hang must be None or that set's
         number (else `ValueError`); (2) a set number the caller assigned for
         `bar` (`plan_production(assign=)`; must be in stock under `desc`,
-        available and not already taken — else `ValueError`); (3) the stock
-        set that is available, not already taken in this plan and has the
-        most lbs; (4) an invented set. See "Beam-set inventory" in
-        DESIGN.md."""
+        available and not already taken — else `ValueError`); (3) a stock
+        set that is available and not already taken in this plan, chosen
+        by `choose_stock` for continuity with `prev`, the set coming off the
+        bar; (4) an invented set. See "Beam-set inventory" in DESIGN.md.
+        A queue front that does not fit `desc` is expected to have been
+        passed over already (`pass_over`), so it is never hung here."""
         queue = self.assigned.get(bar)
         set_no = queue.popleft() if queue else None   # None = "not this hang"
         if working is not None:
@@ -86,8 +195,25 @@ class _PlanCtx:
         cands = [b for b in self.inventory.get(desc.physical, ())
                  if b.available_at(at) and b.id not in self.taken_ids]
         if cands:
-            return self._take(max(cands, key=lambda b: b.lbs))
+            return self._take(choose_stock(cands, prev))
         return BeamSet.new(desc, fresh_beam_lbs(desc), at)
+
+    def pass_over(self, working: 'Status', bar: Literal['top', 'btm'],
+                  desc: BeamSetDesc, at: datetime) -> 'Status':
+        """Drop from `bar`'s queue on `working` every front set that does not
+        fit `desc` — the plant staged it for a bar that now needs other
+        yarn, or its merge is blacklisted and it fits nothing — recording
+        each as a `PassedOver` with the reason; returns the status with the
+        queue so trimmed (unchanged when the front fits or the queue is
+        empty). The set stays at the machine physically, so it does not
+        return to stock."""
+        while working.queue(bar) and not working.queue(bar)[0].fits(desc):
+            front = working.queue(bar)[0]
+            self.passed.append(PassedOver(
+                bar, front, desc, at,
+                reason='blacklisted' if front.blacklisted else 'does not fit'))
+            working = working.drop_queued(bar)
+        return working
 
     def _take(self, beam_set: BeamSet) -> BeamSet:
         self.taken.append(beam_set)
@@ -157,6 +283,14 @@ class ProductionPlan:
     # the schedule (see "Job activities" in DESIGN.md). Committing the plan
     # swaps it in for the original (`Machine.replace_last_job`).
     replaced_job: Job | None = None
+    # The changeover-ration slots the plan's tape-outs and pattern changes
+    # occupy — `(kind, period day, units, start)` each; committing books
+    # them (see "Changeover capacity" in DESIGN.md).
+    capacity_taken: tuple['Slot', ...] = ()
+    # Plant-assigned sets a hang in this plan dropped from a bar's queue
+    # because they did not fit; committing keeps them on the machine
+    # (`Machine.queue_passed_over`) for the planners to report.
+    queue_passed_over: tuple[PassedOver, ...] = ()
 
 
 class Machine(HasID[str]):
@@ -194,7 +328,13 @@ class Machine(HasID[str]):
         self._variant_map = variant_map
         # A machine begins threaded and running the init item on both bars,
         # possibly part-way through a roll (`init_roll_lbs_remaining` still
-        # to knit on it; 0 = between rolls).
+        # to knit on it; 0 = between rolls). A bar whose reported set does
+        # not fit the item is *foreign* (the plant reported the machine
+        # mid-change): no roll can be in progress across it, so the roll is
+        # taken as finished — see "Foreign bars" in DESIGN.md.
+        cfg = init_item.configuration
+        foreign = (not init_top_beam.fits(BeamSetDesc(cfg.top_beam))
+                   or not init_btm_beam.fits(BeamSetDesc(cfg.btm_beam)))
         self._initial_status = Status.create(
             as_of=start,
             current_item=init_item,
@@ -205,11 +345,13 @@ class Machine(HasID[str]):
             btm_beam=init_btm_beam,
             btm_lbs_remaining=init_btm_lbs,
             btm_threaded=True,
-            roll_lbs_remaining=min(init_roll_lbs_remaining, init_item.tgt_wt),
+            roll_lbs_remaining=(0.0 if foreign
+                                else min(init_roll_lbs_remaining, init_item.tgt_wt)),
             top_queue=init_top_queue, btm_queue=init_btm_queue,
         )
         self._activities: list[Activity] = []
         self._jobs: list[Job] = []
+        self._passed_over: list[PassedOver] = []
         self._current_status: Status = self._initial_status
 
     @property
@@ -256,6 +398,48 @@ class Machine(HasID[str]):
         effect (they record the rolls produced, not machine time)."""
         return tuple(self._jobs)
 
+    def rebind_sets(self, mapping: Mapping[str, BeamSet]) -> None:
+        """Relabel every set whose id is in `mapping` — a placeholder a plan
+        invented — throughout the committed schedule with the mapped set's
+        identity under the plan's pounds (`BeamSet.relabelled`): the
+        activities (`activity.rebind_sets`), the jobs and rolls that
+        reference them (same objects, same ids) and the initial and current
+        statuses. Lbs and times are untouched, so the statuses re-derive as
+        before. See "Assigning sets after planning" in DESIGN.md."""
+        if not mapping:
+            return
+
+        def relabel(bs: 'BeamSet | None') -> 'BeamSet | None':
+            if bs is None or bs.id not in mapping:
+                return bs
+            return bs.relabelled(mapping[bs.id])
+
+        rebound: dict[int, Activity] = {}
+
+        def act(a: Activity) -> Activity:
+            key = id(a)
+            if key not in rebound:
+                rebound[key] = rebind_sets(a, relabel)
+            return rebound[key]
+
+        self._activities = [act(a) for a in self._activities]
+        self._jobs = [
+            replace(job,
+                    activities=tuple(act(a) for a in job.activities),
+                    rolls=tuple(replace(r, knits=tuple(act(k) for k in r.knits))
+                                for r in job.rolls))
+            for job in self._jobs
+        ]
+        self._initial_status = self._initial_status.rebind_sets(relabel)
+        self._current_status = self._current_status.rebind_sets(relabel)
+
+    @property
+    def queue_passed_over(self) -> tuple[PassedOver, ...]:
+        """Every plant-assigned set a committed plan dropped from a bar's
+        queue because it did not fit the bar's requirement at the hang, in
+        commit order (see "Assigned sets and bar queues" in DESIGN.md)."""
+        return tuple(self._passed_over)
+
     @property
     def schedule_tail(self) -> datetime:
         """End time of the last scheduled activity, or `initial_status.as_of`
@@ -292,8 +476,49 @@ class Machine(HasID[str]):
         # where the walk's final Doff lands on the next day's start (the same
         # work moment, a different datetime), and this must equal the run-up's
         # last `Doff.end` exactly.
-        t = self._workcal.offset_work_hours(s.as_of, hours - DOFF_DURATION)
-        return self._workcal.offset_work_hours(t, DOFF_DURATION)
+        t = self._workcal.offset_work_hours(s.as_of, hours - _doff_hours())
+        return self._workcal.offset_work_hours(t, _doff_hours())
+
+    def _rate(self, item: 'Greige') -> float:
+        """`item`'s working rate on this machine, lbs per hour: its nominal
+        `machine_rates` entry scaled by the running efficiency."""
+        return effective_rate(item.get_rate_on_mchn(self._id), 'new' if self.is_new else 'old')
+
+    def run_until(
+        self, t: datetime, inventory: 'InventoryView | None' = None,
+    ) -> 'ProductionPlan | None':
+        """Keep the machine on its current item up to `t` — the moment the
+        plant can first change it over: a plan (via `plan_production` in
+        `'schedule_tail'` mode) that finishes the roll in progress and every
+        whole roll that *starts* before `t`, so the last roll may run past
+        `t`. A machine with nothing to run (the `NONE` item, or no rate on
+        this machine) gets one `Idle` up to `t` instead, so no changeover
+        can be placed before it. `None` when `t` is not after the schedule
+        tail. The caller commits the plan (`commit_plan` / the planner's
+        `State.commit_move`)."""
+        s = self._current_status
+        if t <= s.as_of:
+            return None
+        item = s.current_item
+        rate = (self._rate(item)
+                if item.id != 'NONE' and item.can_run_on_mchn(self._id) else 0.0)
+        if rate <= 0.0:
+            hours = self._workcal.get_work_hours_between(s.as_of, t)
+            if hours <= 0.0:
+                return None
+            emitted: list[Activity] = []
+            self._emit_idle(emitted, s, timedelta(hours=hours))
+            return ProductionPlan(activities=tuple(emitted), jobs=())
+        now = s.as_of
+        if s.roll_lbs_remaining > _FLOAT_EPS:            # the roll in progress
+            now = self._workcal.offset_work_hours(
+                now, s.roll_lbs_remaining / rate + _doff_hours())
+        n = 0
+        while now < t:                                   # rolls starting before t
+            n += 1
+            now = self._workcal.offset_work_hours(now, item.tgt_wt / rate + _doff_hours())
+        return self.plan_production(item, n * item.tgt_wt, 'schedule_tail',
+                                    inventory=inventory)
 
     @property
     def whole_rolls_before_runout(self) -> int:
@@ -316,8 +541,8 @@ class Machine(HasID[str]):
         s = self._current_status
         item = s.current_item
         cfg = item.configuration
-        rate = item.get_rate_on_mchn(self._id)
-        top_lbs, btm_lbs = s.lbs_remaining('top'), s.lbs_remaining('btm')
+        rate = self._rate(item)
+        top_lbs, btm_lbs = self._run_up_lbs(s)
         hours = 0.0
         n_rolls = 0
 
@@ -339,7 +564,7 @@ class Machine(HasID[str]):
                     scratch, s, [], _PlanCtx({}), whole_rolls=True,
                 )
                 return sum(isinstance(a, Doff) for a in scratch), 0.0, working.as_of
-            hours += remaining / rate + DOFF_DURATION
+            hours += remaining / rate + _doff_hours()
             n_rolls += 1
             top_lbs -= remaining * cfg.top_pct
             btm_lbs -= remaining * cfg.btm_pct
@@ -348,16 +573,36 @@ class Machine(HasID[str]):
             top_lbs, cfg.top_pct, btm_lbs, cfg.btm_pct, item.tgt_wt,
         )
         # Each whole roll costs its knit time plus a Doff.
-        hours += whole * (item.tgt_wt / rate + DOFF_DURATION)
+        hours += whole * (item.tgt_wt / rate + _doff_hours())
         return n_rolls + whole, hours, None
+
+    @staticmethod
+    def _run_up_lbs(working: Status) -> tuple[float, float]:
+        """`(top, btm)` lbs the run-up may draw on for `working.current_item`:
+        each bar's remaining lbs, or 0 for a **foreign** bar — one whose set
+        does not fit the item (a machine the plant reported mid-change), which
+        holds no usable yarn for the item and so allows no whole roll of it;
+        the preamble meets the set with its real lbs (see "Foreign bars" in
+        DESIGN.md)."""
+        cfg = working.current_item.configuration
+        out = []
+        for bar, label in (('top', cfg.top_beam), ('btm', cfg.btm_beam)):
+            beam = working.beam(bar)
+            fits = beam is not None and beam.fits(BeamSetDesc(label))
+            out.append(working.lbs_remaining(bar) if fits else 0.0)
+        return out[0], out[1]
 
     def producible_lbs_through(
         self, item: 'Greige', end: datetime,
         start: datetime | None = None,
         inventory: 'InventoryView | None' = None,
+        capacity: 'ChangeoverCapacity | None' = None,
+        fill: 'Fill | None' = None,
     ) -> float:
         """Returns the lbs of `item` the machine could produce in the
-        window `[start, end)`.
+        window `[start, end)`. `fill` is passed through to `plan_production`
+        so a slot wait filled with the current item counts against the
+        window the way it will in the plan.
 
         `start` is the earliest moment at which production may begin.
         Defaults to `current_status.as_of`. Passing a later datetime
@@ -388,7 +633,7 @@ class Machine(HasID[str]):
         if effective_start >= end:
             return 0.0
 
-        rate = item.get_rate_on_mchn(self._id)
+        rate = self._rate(item)
         # Upper bound on plan_production's lbs argument: max producible
         # if the entire `[as_of, end]` span were work hours at full
         # rate, plus one roll of headroom. plan_production will simply
@@ -411,7 +656,8 @@ class Machine(HasID[str]):
         idle_for = timedelta(hours=bridge_hours)
         plan = self.plan_production(
             item, upper_lbs_bound, start_at='schedule_tail',
-            idle_for=idle_for, inventory=inventory,
+            idle_for=idle_for, inventory=inventory, capacity=capacity,
+            fill=fill,
         )
 
         # Tally lbs of `Knit`s for `item` that overlap
@@ -536,6 +782,7 @@ class Machine(HasID[str]):
         if plan.replaced_job is not None:
             self.replace_last_job(plan.replaced_job)
         self.add_jobs(plan.jobs)
+        self._passed_over.extend(plan.queue_passed_over)
 
     # ----- plan_production --------------------------------------------
 
@@ -548,9 +795,28 @@ class Machine(HasID[str]):
         tgt_order: str | None = None,
         inventory: 'InventoryView | None' = None,
         assign: 'Mapping[str, Sequence[str | None]] | None' = None,
+        capacity: 'ChangeoverCapacity | None' = None,
+        prior_job: str | None = None,
+        fill: 'Fill | None' = None,
     ) -> 'ProductionPlan':
         """Plan production of `lbs` of `item` on this machine. Pure — does
-        not mutate state, nor the `inventory` it reads.
+        not mutate state, nor the `inventory` or `capacity` it reads.
+
+        `capacity` is the plant's changeover ration (`schedule.capacity`):
+        the preamble takes one `change` unit when it changes the machine at
+        all (a tape-out or a changeover activity), and places each
+        `TapeOut` (one unit per bar) and each old machine's `PatternChange`
+        (one unit) at the next slot the ration allows, emitting an `Idle`
+        (with its `reason`) while the machine waits, and reports the slots
+        as `capacity_taken` for the caller to book when it commits. None
+        (or an unrationed kind) never waits.
+
+        `fill` lets a wait be spent knitting: whole rolls of the machine's
+        current item, up to `fill.rolls` across the preamble's waits, as
+        long as the beams can finish one and the roll starts before the
+        slot (see "Filling a slot wait" in DESIGN.md). They go on the
+        current item's job — the run-up job, extended, or a new job raised
+        against `fill.tgt_order` — marked `fill`.
 
         `assign` (manual scheduling) queues set numbers per bar (`'top'` /
         `'btm'`): each hang on that bar takes the next queued set from the
@@ -627,9 +893,13 @@ class Machine(HasID[str]):
         emitted: list[Activity] = []
         jobs: list[Job] = []
         working = self._current_status
+        if fill is not None and fill.rolls < 0:
+            raise ValueError(f'fill.rolls must be non-negative, got {fill.rolls}')
         ctx = _PlanCtx(
             inventory if inventory is not None else {},
             assigned={bar: deque(sets) for bar, sets in (assign or {}).items()},
+            capacity=capacity,
+            fill=fill, fill_left=fill.rolls if fill is not None else 0,
         )
 
         # 0. Optional idle gap at the head of the plan (belongs to no job).
@@ -645,10 +915,27 @@ class Machine(HasID[str]):
         # 2. Changeover preamble. Its TapeOut (if any) ends the *previous*
         #    item's job; the re-thread and changeover open the new item's.
         pre_start = len(emitted)
+        cur = working.current_item
         working = self._emit_preamble(emitted, working, item, ctx)
         preamble = emitted[pre_start:]
         tape_outs = [a for a in preamble if isinstance(a, TapeOut)]
-        setup = [a for a in preamble if not isinstance(a, (TapeOut, Waste))]
+        # A slot wait (`Idle`) belongs to no job, like the head idle; the
+        # only `Knit`s / `Doff`s a preamble holds are a fill's, which are
+        # the current item's (below).
+        setup = [a for a in preamble
+                 if not isinstance(a, (TapeOut, Waste, Idle, Knit, Doff))]
+
+        # The fill's rolls join the current item's job: the run-up job, or a
+        # new one when the run-up produced nothing.
+        if ctx.fill_rolls:
+            if jobs:
+                jobs[0] = replace(
+                    jobs[0], rolls=jobs[0].rolls + tuple(ctx.fill_rolls),
+                    activities=jobs[0].activities + tuple(ctx.fill_acts), fill=True)
+            else:
+                jobs.append(Job(item=cur, rolls=tuple(ctx.fill_rolls),
+                                tgt_order=ctx.fill.tgt_order,
+                                activities=tuple(ctx.fill_acts), fill=True))
 
         replaced_job = None
         if tape_outs:
@@ -661,17 +948,18 @@ class Machine(HasID[str]):
         # 3. Production loop for the new item.
         self._emit_production_loop(
             emitted, working, item, lbs, jobs, ctx, tgt_order, setup=setup,
+            prior_job=prior_job,
         )
         leftover = ctx.unused_assignments()
         if leftover:
-            raise ValueError(
-                f'assigned sets never hung by this plan: {leftover}'
-            )
+            raise UnhungAssignments(leftover)
         return ProductionPlan(
             activities=tuple(emitted), jobs=tuple(jobs),
             beam_sets_taken=tuple(ctx.taken),
             beam_sets_returned=tuple(ctx.returned),
             replaced_job=replaced_job,
+            capacity_taken=tuple(ctx.slots),
+            queue_passed_over=tuple(ctx.passed),
         )
 
     # ----- private plan_production helpers -----
@@ -716,9 +1004,9 @@ class Machine(HasID[str]):
             rethreaded = any(isinstance(a, Hanging) for a in emitted[first:])
 
         if whole_rolls and not rethreaded:
+            top_lbs, btm_lbs = self._run_up_lbs(working)   # 0 for a foreign bar
             n_rolls = _whole_rolls_before_floor(
-                working.lbs_remaining('top'), cfg.top_pct,
-                working.lbs_remaining('btm'), cfg.btm_pct, cur.tgt_wt,
+                top_lbs, cfg.top_pct, btm_lbs, cfg.btm_pct, cur.tgt_wt,
             )
             for _ in range(n_rolls):
                 working = self._emit_knit(emitted, working, cur, cur.tgt_wt)
@@ -773,6 +1061,17 @@ class Machine(HasID[str]):
         top_action = bar_action('top', cfg.top_beam)
         btm_action = bar_action('btm', cfg.btm_beam)
 
+        # A preamble that changes the machine — a tape-out or a changeover
+        # activity — is one unit of the plant-wide change ration, taken
+        # before any beam work (see "Changeover capacity slots" in
+        # DESIGN.md). A fill while waiting draws the bars down, so the
+        # actions are read again after it.
+        if ('tape' in (top_action, btm_action)
+                or item != working.current_item):
+            working = self._wait_for_slot(emitted, working, ctx, 'change', 1, 0.0)
+            top_action = bar_action('top', cfg.top_beam)
+            btm_action = bar_action('btm', cfg.btm_beam)
+
         # Tape-out phase — batch into one 'both' when both bars tape out.
         if top_action == 'tape' and btm_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'both', ctx)
@@ -807,13 +1106,14 @@ class Machine(HasID[str]):
 
         # Changeover phase — the right changeover type when the item changes.
         if item != working.current_item:
-            working = self._emit_changeover(emitted, working, item)
+            working = self._emit_changeover(emitted, working, item, ctx)
         return working
 
     def _emit_production_loop(
         self, emitted: list[Activity], working: Status,
         item: 'Greige', lbs: float, jobs: list[Job], ctx: _PlanCtx,
         tgt_order: str | None = None, setup: Iterable[Activity] = (),
+        prior_job: str | None = None,
     ) -> None:
         """Wind `lbs` of `item` (a whole multiple of `tgt_wt`) as whole rolls
         (`_wind_rolls`) and record them on one straddle-aware `Job` whose
@@ -829,6 +1129,7 @@ class Machine(HasID[str]):
                 a for a in emitted[loop_start:] if not isinstance(a, Waste)
             )
             jobs.append(Job(item=item, rolls=tuple(rolls), tgt_order=tgt_order,
+                            prior_job=prior_job,
                             activities=acts))
 
     def _wind_rolls(
@@ -924,11 +1225,12 @@ class Machine(HasID[str]):
         bars' merges identify (see `_variant_for`). Roll tracking is the
         caller's job: the run-up and production loop record each `Roll`
         after its `Doff`. See DESIGN.md."""
-        rate = item.get_rate_on_mchn(self._id)
+        rate = self._rate(item)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, lbs / rate)
         emitted.append(Knit(start=start, end=end, item=item, lbs=lbs,
-                            variant=self._variant_for(working, item)))
+                            variant=self._variant_for(working, item),
+                            top_beam=working.beam('top'), btm_beam=working.beam('btm')))
         return working.apply_activity(emitted[-1])
 
     def _variant_for(self, working: Status, item: 'Greige') -> 'str | None':
@@ -962,7 +1264,7 @@ class Machine(HasID[str]):
         roll's `completion_time` is this `Doff`'s end (the returned status's
         `as_of`)."""
         start = working.as_of
-        end = self._workcal.offset_work_hours(start, DOFF_DURATION)
+        end = self._workcal.offset_work_hours(start, _doff_hours())
         emitted.append(Doff(start=start, end=end))
         return working.apply_activity(emitted[-1])
 
@@ -992,6 +1294,8 @@ class Machine(HasID[str]):
         stocking is recorded on the activity but not returned to stock."""
         duration = (TAPE_OUT_BOTH_DURATION if bars == 'both'
                     else TAPE_OUT_SINGLE_DURATION)
+        working = self._wait_for_slot(
+            emitted, working, ctx, 'tape_out', 2 if bars == 'both' else 1, duration)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, duration)
 
@@ -1001,8 +1305,9 @@ class Machine(HasID[str]):
                 return None
             lbs = working.lbs_remaining(bar)
             back = beam.returned(lbs, end)
-            if lbs - BEAM_FLOOR_LBS >= MAX_BEAM_WASTE_LBS:
+            if worth_stocking(back):
                 ctx.returned.append(back)
+            ctx.removed[bar] = beam
             return back
 
         top_beam = off('top') if bars in ('top', 'both') else None
@@ -1016,21 +1321,39 @@ class Machine(HasID[str]):
         bars: Literal['top', 'btm', 'both'], item: 'Greige', ctx: _PlanCtx,
     ) -> Status:
         """Mount a beam set on the named bar(s) — for each, the stock set
-        `ctx.pick` chooses for `item`'s beam-set requirement, or an invented
-        one — loading the bar with the set and its lbs and leaving it
-        un-threaded. Pairs with a `_emit_threading`."""
+        `ctx.pick` chooses for `item`'s beam-set requirement (for continuity
+        with the set coming off that bar), or an invented one — loading the
+        bar with the set and its lbs and leaving it un-threaded. Pairs with
+        a `_emit_threading`."""
         cfg = item.configuration
         start = working.as_of
-        duration = (HANGING_BOTH_DURATION if bars == 'both'
-                    else HANGING_SINGLE_DURATION)
+        duration = planning_mode.handling_hours(
+            HANGING_BOTH_DURATION if bars == 'both' else HANGING_SINGLE_DURATION)
         end = self._workcal.offset_work_hours(start, duration)
-        top_beam = (ctx.pick(BeamSetDesc(cfg.top_beam), start, 'top', working)
+        # The set each hang replaces: what is (or was, before a tape-out
+        # earlier in this preamble) on the bar — `pick` keeps its merge or
+        # vendor when stock allows.
+        def prev(bar: Literal['top', 'btm']) -> 'BeamSet | None':
+            return working.beam(bar) or ctx.removed.get(bar)
+
+        # Queued sets that do not fit the bar's requirement are passed over
+        # (dropped from the queue and recorded) before the pick; the hang
+        # carries them so applying it drops them from any status too.
+        first = len(ctx.passed)
+        if bars in ('top', 'both'):
+            working = ctx.pass_over(working, 'top', BeamSetDesc(cfg.top_beam), start)
+        if bars in ('btm', 'both'):
+            working = ctx.pass_over(working, 'btm', BeamSetDesc(cfg.btm_beam), start)
+        passed = tuple((p.bar, p.beam_set) for p in ctx.passed[first:])
+        top_beam = (ctx.pick(BeamSetDesc(cfg.top_beam), start, 'top', working,
+                             prev('top'))
                     if bars in ('top', 'both') else None)
-        btm_beam = (ctx.pick(BeamSetDesc(cfg.btm_beam), start, 'btm', working)
+        btm_beam = (ctx.pick(BeamSetDesc(cfg.btm_beam), start, 'btm', working,
+                             prev('btm'))
                     if bars in ('btm', 'both') else None)
         emitted.append(Hanging(
             start=start, end=end, bars=bars,
-            top_beam=top_beam, btm_beam=btm_beam,
+            top_beam=top_beam, btm_beam=btm_beam, passed_over=passed,
         ))
         return working.apply_activity(emitted[-1])
 
@@ -1042,8 +1365,8 @@ class Machine(HasID[str]):
         threaded. The beam/lbs were already loaded by the preceding
         `_emit_hanging`."""
         start = working.as_of
-        duration = (THREADING_BOTH_DURATION if bars == 'both'
-                    else THREADING_SINGLE_DURATION)
+        duration = planning_mode.handling_hours(
+            THREADING_BOTH_DURATION if bars == 'both' else THREADING_SINGLE_DURATION)
         end = self._workcal.offset_work_hours(start, duration)
         emitted.append(Threading(start=start, end=end, bars=bars))
         return working.apply_activity(emitted[-1])
@@ -1068,8 +1391,66 @@ class Machine(HasID[str]):
         emitted.append(Idle(start=start, end=end))
         return working.apply_activity(emitted[-1])
 
+    def _wait_for_slot(
+        self, emitted: list[Activity], working: Status, ctx: _PlanCtx,
+        kind: str, units: int, duration: float,
+    ) -> Status:
+        """Place a rationed activity: find the next `kind` slot for `units`
+        at or after `working.as_of` (the plan's capacity, if any), spend the
+        wait knitting the current item while the plan's fill allows it (a
+        whole roll at a time, each started before the slot, the slot looked
+        up again after each), emit an `Idle(reason=f'{kind} slot')` for what
+        is left of the wait, and record the slot on the context for the plan
+        to report. Unrationed (no capacity, or the kind has no limit):
+        returns `working` as is."""
+        cap = ctx.capacity
+        if cap is None or cap.limits(kind) is None:
+            return working
+        while True:
+            slot = cap.next_slot(kind, units, working.as_of, duration)
+            if slot <= working.as_of:
+                break
+            if ctx.fill_left > 0 and self._can_fill_roll(working):
+                working = self._emit_fill_roll(emitted, working, ctx)
+                continue
+            emitted.append(Idle(start=working.as_of, end=slot,
+                                reason=f'{kind} slot'))
+            working = working.apply_activity(emitted[-1])
+            break
+        period = cap.period_of(kind, slot)
+        ctx.slots.append((kind, period.day, units, slot))
+        return working
+
+    def _can_fill_roll(self, working: Status) -> bool:
+        """Whether the bars as they stand can finish one more whole roll of
+        the current item above the floor (a foreign bar counts 0 lbs; a
+        machine with no item cannot fill)."""
+        cur = working.current_item
+        if cur.id == 'NONE':
+            return False
+        cfg = cur.configuration
+        top_lbs, btm_lbs = self._run_up_lbs(working)
+        return _whole_rolls_before_floor(
+            top_lbs, cfg.top_pct, btm_lbs, cfg.btm_pct, cur.tgt_wt) >= 1
+
+    def _emit_fill_roll(
+        self, emitted: list[Activity], working: Status, ctx: _PlanCtx,
+    ) -> Status:
+        """Knit and doff one whole roll of the current item against the
+        plan's fill, recording it on the context."""
+        cur = working.current_item
+        working = self._emit_knit(emitted, working, cur, cur.tgt_wt)
+        knit = emitted[-1]
+        working = self._emit_doff(emitted, working)
+        ctx.fill_rolls.append(Roll(lbs=cur.tgt_wt, completion_time=working.as_of,
+                                   knits=(knit,)))
+        ctx.fill_acts.extend((knit, emitted[-1]))
+        ctx.fill_left -= 1
+        return working
+
     def _emit_changeover(
         self, emitted: list[Activity], working: Status, to_item: 'Greige',
+        ctx: '_PlanCtx | None' = None,
     ) -> Status:
         """Emit the changeover activity for switching to `to_item`, selected
         from `is_new` and the pattern-family comparison (see "Beam-swap
@@ -1084,6 +1465,9 @@ class Machine(HasID[str]):
             cls, duration = RunnerChange, RUNNER_CHANGE_DURATION
         else:
             cls, duration = PatternChange, PATTERN_CHANGE_DURATION
+            if ctx is not None:
+                working = self._wait_for_slot(
+                    emitted, working, ctx, 'pattern_change', 1, duration)
         start = working.as_of
         end = self._workcal.offset_work_hours(start, duration)
         emitted.append(cls(

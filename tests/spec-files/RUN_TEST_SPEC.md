@@ -35,3 +35,30 @@ actually launched.
 
 (The `--label`-required-in-verbose guard in `run()` is a one-line precondition
 verified by inspection; testing it would require a full `run()` invocation.)
+
+
+## 4. `_parse_duration` / `_parse_state_block`
+
+The config's `state` block spells durations as hours or unit strings (see
+"Run-config JSON" in the planner design).
+
+1. **Numbers are hours** — `24` and `1.5` give 24 h and 1 h 30 min.
+2. **Unit strings** — `"48h"`, `"3d"`, `"2w"`, `"90m"` give 48 h, 3 days,
+   14 days, 1 h 30 min; whitespace and case are ignored (`" 2 D "`).
+3. **Clock form** — `"36:30"` gives 36 h 30 min.
+4. **Negative** — `"-2w"` and `-14` give negative durations.
+5. **Already a timedelta** passes through unchanged.
+6. **Rejects** — `"soon"`, `""`, `True` raise `typer.BadParameter` naming
+   the field.
+7. **`_parse_state_block`** converts exactly the three duration fields
+   (`window_advance_amount`, `carrying_avoidance_margin`,
+   `planning_horizon_buffer`), leaves integer fields untouched, and does
+   not mutate its input.
+
+## 5. `blacklisted_on_machines`
+
+1. **Lines** — one line per blacklisted set found at a machine, in machine
+   order: a set mounted on a bar (`mounted set … is blacklisted: the first
+   plan tapes it out`) or queued at one (`queued set … passed over at the
+   hang`), naming the machine, bar, set number and merge.
+2. **Nothing** — machines with no blacklisted set give an empty list.

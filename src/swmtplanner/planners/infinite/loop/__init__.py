@@ -7,10 +7,10 @@ from .candidates import (
     DecisionPoint,
     eligible_decision_points, enumerate_candidates,
 )
-from .plan import PlanReport, plan
+from .plan import PlanReport, plan, build_report, recommit_prior
 
 __all__ = [
     'DecisionPoint', 'RegularOrder', 'SafetyOrder',
     'eligible_decision_points', 'eligible_orders', 'enumerate_candidates',
-    'PlanReport', 'plan',
+    'PlanReport', 'plan', 'build_report', 'recommit_prior',
 ]

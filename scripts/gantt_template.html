@@ -1,0 +1,304 @@
+<title>Knit Plan Gantt</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky control bar (overlay choice, legend, marker layers); below it a
+   label column pinned left and a horizontally scrolling time grid, one row per
+   machine (new machines, then old), every activity its own segment, weekends
+   shaded. */
+:root {
+  --bg: #f7f6f2; --panel: #ffffff; --fg: #1d1f24; --muted: #6b6f78; --line: #d9d7d0;
+  --off: #e6e4de; --off-text: #8a8781; --neutral: #cfcbc2;
+  --accent: #c8541a;            /* yarn change */
+  --tape: #b4232c;              /* tape-out */
+  --pattern: #6d3fb5;           /* pattern change */
+  --runner: #1d7f78;            /* runner change */
+  --style: #8a8d94;             /* style change */
+  --new: #d9a400;               /* invented set */
+  --a-knit: #5b8fd6; --a-doff: #2f3340; --a-hang: #e0a23a; --a-thread: #f0cf88;
+  --a-waste: #d2679a; --a-idle: #9aa0a6;
+  --font: 'IBM Plex Sans', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #16181d; --panel: #1f2228; --fg: #e8e7e2; --muted: #9a9ea8; --line: #363a43;
+  --off: #262a31; --off-text: #6f737c; --neutral: #4a4e57; --accent: #f08a4b; --tape: #f05a63; --pattern: #b48cf0;
+  --runner: #4fc3b8; --style: #7c8088; --new: #f2c84b;
+  --a-knit: #5f93d8; --a-doff: #c9ccd4; --a-hang: #d9a24a; --a-thread: #8f7a4a;
+  --a-waste: #c86a95; --a-idle: #6f737c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #16181d; --panel: #1f2228; --fg: #e8e7e2; --muted: #9a9ea8; --line: #363a43;
+  --off: #262a31; --off-text: #6f737c; --neutral: #4a4e57; --accent: #f08a4b; --tape: #f05a63; --pattern: #b48cf0;
+  --runner: #4fc3b8; --style: #7c8088; --new: #f2c84b;
+  --a-knit: #5f93d8; --a-doff: #c9ccd4; --a-hang: #d9a24a; --a-thread: #8f7a4a;
+  --a-waste: #c86a95; --a-idle: #6f737c; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 13px; padding-inline: 16px; padding-block: 0 24px; }
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); padding-block: 12px 8px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 2px; text-wrap: balance; }
+.sub { color: var(--muted); margin: 0 0 10px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+.chip { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.chip b { color: var(--fg); font-weight: 500; }
+.modes { display: inline-flex; gap: 2px; border: 1px solid var(--line); border-radius: 4px; padding: 2px; }
+.modes label { padding: 3px 9px; border-radius: 3px; cursor: pointer; user-select: none; }
+.modes input { display: none; }
+.modes input:checked + span { background: var(--fg); color: var(--bg); border-radius: 3px; padding: 3px 9px; margin: -3px -9px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.leg { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.leg input { margin: 0; }
+.leg.dim { opacity: .45; }
+.sw { width: 14px; height: 14px; border-radius: 2px; display: inline-block; border: 1px solid rgba(0,0,0,.15); }
+.mk { width: 14px; height: 14px; display: inline-block; }
+.ctl { display: flex; align-items: center; gap: 8px; }
+.ctl input[type=range] { width: 120px; }
+.wrap { display: flex; margin-top: 10px; }
+.labels { flex: 0 0 126px; }
+.labels .hdr { box-sizing: border-box; height: 58px; }
+.labels, .grid { line-height: 0; }
+.lab { line-height: 1; }
+.lab { box-sizing: border-box; height: 30px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); padding-right: 8px; font-family: var(--mono); font-size: 12px; line-height: 1; }
+.lab.group { box-sizing: border-box; height: 22px; font-family: var(--font); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); border-top: 2px solid var(--line); }
+.lab .cnt { color: var(--muted); font-size: 11px; }
+.lab .cnt b { color: var(--accent); font-weight: 500; }
+.lab .cnt i { color: var(--pattern); font-style: normal; }
+.lab .nm b { font-weight: 600; }
+.grid { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+svg text { font-family: var(--mono); }
+.tip { position: fixed; z-index: 10; pointer-events: none; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; font-size: 12px; max-width: 340px; box-shadow: 0 4px 16px rgba(0,0,0,.18); line-height: 1.4; }
+.tip b { font-weight: 600; }
+.tip .k { color: var(--muted); }
+.note { color: var(--muted); margin-top: 10px; max-width: 72ch; }
+@media (max-width: 600px) { .labels { flex-basis: 76px; } .lab .cnt { display: none; } }
+</style>
+
+<div class="top">
+  <h1>Knit Plan Gantt</h1>
+  <p class="sub">__SOURCE__ · plant local time · weekends and Columbus Day shaded, nothing runs then</p>
+  <div class="bar">
+    <span class="modes" id="modes">
+      <label><input type="radio" name="mode" value="activity"><span>Activity</span></label>
+      <label><input type="radio" name="mode" value="yarn" checked><span>Yarn</span></label>
+      <label><input type="radio" name="mode" value="fam"><span>Yarn + pattern</span></label>
+      <label><input type="radio" name="mode" value="style"><span>Style</span></label>
+    </span>
+    <span class="chip">Yarn changes <b id="c-yarn"></b></span>
+    <span class="chip">Tape-outs <b id="c-tape"></b></span>
+    <span class="chip">Pattern changes <b id="c-pat"></b></span>
+    <span class="chip">Invented sets <b id="c-new"></b></span>
+    <span class="ctl"><label for="zoom">Zoom</label><input id="zoom" type="range" min="2" max="14" step="1" value="4"></span>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="legend" id="layers">
+    <label class="leg"><input type="checkbox" id="l-yarn" checked><span class="mk"><svg viewBox="0 0 14 14"><path d="M7 1 L13 13 L1 13 Z" fill="var(--accent)"/></svg></span>yarn change (hang of a different yarn)</label>
+    <label class="leg"><input type="checkbox" id="l-reload" checked><span class="mk"><svg viewBox="0 0 14 14"><path d="M7 3 L11 11 L3 11 Z" fill="none" stroke="var(--muted)" stroke-width="1.5"/></svg></span>runout reload (same yarn)</label>
+    <label class="leg"><input type="checkbox" id="l-tape" checked><span class="mk"><svg viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="10" fill="var(--tape)"/></svg></span>tape-out</label>
+    <label class="leg"><input type="checkbox" id="l-pat" checked><span class="mk"><svg viewBox="0 0 14 14"><path d="M7 1 L13 7 L7 13 L1 7 Z" fill="var(--pattern)"/></svg></span>pattern change</label>
+    <label class="leg"><input type="checkbox" id="l-new" checked><span class="mk"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="4" fill="var(--new)"/></svg></span>invented set (no stock)</label>
+    <label class="leg"><input type="checkbox" id="l-wait" checked><span class="mk"><svg viewBox="0 0 14 14"><rect x="1" y="4" width="12" height="6" fill="var(--tape)" opacity=".4"/></svg></span>slot wait</label>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="labels" id="labels"><div class="hdr"></div></div>
+  <div class="grid" id="grid"></div>
+</div>
+<p class="note" id="note"></p>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const ROW = 30, GROUP = 22, HDR = 58, BAR = 20;
+let pxh = 4;                       // px per hour
+let mode = 'yarn';
+const hidden = { yarn: new Set(), fam: new Set(), style: new Set(), activity: new Set() };
+const layers = { yarn: true, reload: true, tape: true, pat: true, new: true, wait: true };
+
+// A categorical palette with enough distinct hues for the style overlay;
+// keys are assigned in sorted order so the same key keeps its colour across
+// overlays of the same plan.
+const PALETTE = ['#4e79a7','#f28e2b','#59a14f','#e15759','#76b7b2','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac',
+                 '#1f77b4','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf','#aec7e8',
+                 '#ffbb78','#98df8a','#ff9896','#c5b0d5','#c49c94','#f7b6d2','#dbdb8d','#9edae5','#393b79','#637939'];
+const DARK_TEXT = new Set(['#f28e2b','#59a14f','#76b7b2','#edc948','#ff9da7','#bab0ac','#2ca02c','#bcbd22','#17becf','#aec7e8',
+                           '#ffbb78','#98df8a','#ff9896','#c5b0d5','#c49c94','#f7b6d2','#dbdb8d','#9edae5','#e377c2']);
+const colorOf = {};
+['yarn', 'fam', 'style'].forEach(k => { colorOf[k] = {}; DATA.keys[k].forEach((key, i) => colorOf[k][key] = PALETTE[i % PALETTE.length]); });
+const ACT = {
+  Knit: ['var(--a-knit)', 'knit'], Doff: ['var(--a-doff)', 'doff'], Hanging: ['var(--a-hang)', 'hanging'],
+  Threading: ['var(--a-thread)', 'threading'], TapeOut: ['var(--tape)', 'tape-out'], Waste: ['var(--a-waste)', 'waste'],
+  StyleChange: ['var(--style)', 'style change'], RunnerChange: ['var(--runner)', 'runner change'],
+  PatternChange: ['var(--pattern)', 'pattern change'], Idle: ['var(--a-idle)', 'idle'],
+};
+
+const $ = s => document.querySelector(s);
+const x = m => m / 60 * pxh;
+const fmt = m => { const d = new Date(2026, 9, 1, 0, m); return d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hrs = (a, b) => ((b - a) / 60).toFixed(1) + 'h';
+
+function groups() {
+  // [label, machines] in display order: new machines, then old
+  const g = [['New machines', DATA.machines.filter(m => m.new)],
+             ['Old machines', DATA.machines.filter(m => !m.new)]];
+  return g.filter(([_, ms]) => ms.length);
+}
+
+function init() {
+  const t = DATA.totals;
+  $('#c-yarn').textContent = t.yarn_changes; $('#c-tape').textContent = t.tapeouts;
+  $('#c-pat').textContent = t.pattern; $('#c-new').textContent = t.invented;
+  $('#zoom').addEventListener('input', e => { pxh = +e.target.value; draw(); });
+  document.querySelectorAll('#modes input').forEach(r => r.addEventListener('change', () => { mode = r.value; try { localStorage.setItem('gantt-mode', mode); } catch (e) {} draw(); }));
+  Object.keys(layers).forEach(k => { const el = $('#l-' + k); el.checked = layers[k]; el.addEventListener('change', () => { layers[k] = el.checked; draw(); }); });
+  try {
+    const z = localStorage.getItem('gantt-zoom'); if (z) { pxh = +z; $('#zoom').value = z; }
+    const m = localStorage.getItem('gantt-mode'); if (m && colorOf[m] || m === 'activity') { mode = m; document.querySelector(`#modes input[value="${m}"]`).checked = true; }
+  } catch (e) {}
+  draw();
+}
+
+function legend() {
+  const leg = $('#legend'); leg.innerHTML = '';
+  const add = (key, color, label) => {
+    const l = document.createElement('label'); l.className = 'leg' + (hidden[mode].has(key) ? ' dim' : '');
+    l.innerHTML = `<input type="checkbox" ${hidden[mode].has(key) ? '' : 'checked'}><span class="sw" style="background:${color}"></span>${esc(label)}`;
+    l.querySelector('input').addEventListener('change', e => { e.target.checked ? hidden[mode].delete(key) : hidden[mode].add(key); draw(); });
+    leg.appendChild(l);
+  };
+  if (mode === 'activity') Object.entries(ACT).forEach(([k, [c, label]]) => add(k, c, label));
+  else DATA.keys[mode].forEach(k => add(k, colorOf[mode][k], k));
+  $('#note').textContent = {
+    activity: 'Every schedule activity in its own colour. Hover a segment for its detail; the markers above and below the bars still flag yarn changes, tape-outs and pattern changes.',
+    yarn: 'Knits are coloured by the yarn pair the item needs on its top and bottom beams; other activities stay neutral. A colour change along a row is a yarn change.',
+    fam: 'Knits are coloured by yarn pair and pattern family together, so a pattern change on the same yarn also changes colour.',
+    style: 'Knits are coloured by style. Other activities stay neutral.',
+  }[mode];
+}
+
+function knitColor(a) {
+  if (mode === 'activity') return ACT.Knit[0];
+  const key = mode === 'yarn' ? a.yarn : mode === 'fam' ? a.fam : a.item;
+  return colorOf[mode][key];
+}
+function knitKey(a) { return mode === 'yarn' ? a.yarn : mode === 'fam' ? a.fam : mode === 'style' ? a.item : 'Knit'; }
+
+function draw() {
+  try { localStorage.setItem('gantt-zoom', pxh); } catch (e) {}
+  legend();
+  const gs = groups();
+  const nRows = gs.reduce((n, [_, ms]) => n + ms.length, 0);
+  const W = Math.ceil(x(DATA.t_end)) + 20, H = HDR + ROW * nRows + GROUP * gs.length;
+  // left labels
+  const labels = $('#labels'); labels.innerHTML = '<div class="hdr"></div>';
+  gs.forEach(([name, ms]) => {
+    const g = document.createElement('div'); g.className = 'lab group'; g.textContent = name; labels.appendChild(g);
+    ms.forEach(m => {
+      const d = document.createElement('div'); d.className = 'lab';
+      const yc = m.hangs.filter(h => h.change).length;
+      d.innerHTML = `<span class="nm">${m.new ? '<b>' + esc(m.id) + '</b>' : esc(m.id)}</span>` +
+        `<span class="cnt" title="yarn changes / pattern changes"><b>${yc}</b> / <i>${m.pattern.length}</i></span>`;
+      labels.appendChild(d);
+    });
+  });
+
+  const parts = [];
+  parts.push(`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block">`);
+  parts.push(`<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--tape)" opacity=".55"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--panel)" stroke-width="2"/></pattern></defs>`);
+  DATA.offwork.forEach(([a, b, lab]) => {
+    parts.push(`<rect x="${x(a)}" y="0" width="${x(b) - x(a)}" height="${H}" fill="var(--off)"/>`);
+    if (x(b) - x(a) > 40) parts.push(`<text x="${x(a) + 4}" y="${HDR - 44}" font-size="10" fill="var(--off-text)">${lab}</text>`);
+  });
+  DATA.days.forEach(([t, wd, md]) => {
+    parts.push(`<line x1="${x(t)}" y1="0" x2="${x(t)}" y2="${H}" stroke="var(--line)" stroke-width="1"/>`);
+    parts.push(`<text x="${x(t) + 4}" y="${HDR - 30}" font-size="11" fill="var(--fg)">${wd}</text><text x="${x(t) + 4}" y="${HDR - 18}" font-size="11" fill="var(--muted)">${md}</text>`);
+    const dk = new Date(2026, 9, 1, 0, t); const key = `${dk.getFullYear()}-${String(dk.getMonth()+1).padStart(2,'0')}-${String(dk.getDate()).padStart(2,'0')}`;
+    const u = DATA.cap_used[key]; const L = DATA.cap_limits;
+    if (L && (L.tape_out || L.pattern_change || L.change)) {
+      const to = u ? u.tape_out : 0, pc = u ? u.pattern_change : 0, ch = u ? (u.change || 0) : 0;
+      const full = (L.tape_out && to >= L.tape_out) || (L.pattern_change && pc >= L.pattern_change) || (L.change && ch >= L.change);
+      const label = [L.change ? `C ${ch}/${L.change}` : '', L.tape_out ? `T ${to}/${L.tape_out}` : '', L.pattern_change ? `P ${pc}/${L.pattern_change}` : ''].filter(Boolean).join(' ');
+      parts.push(`<text x="${x(t) + 4}" y="${HDR - 5}" font-size="10" fill="${full ? 'var(--tape)' : 'var(--muted)'}" data-tip="${esc(`<b>Changeover ration</b><br>changes ${ch} of ${L.change || '∞'}<br>tape-out bars ${to} of ${L.tape_out || '∞'}<br>pattern changes ${pc} of ${L.pattern_change || '∞'}`)}">${label}</text>`);
+    }
+    if (pxh >= 8) for (let h = 6; h < 24; h += 6) parts.push(`<line x1="${x(t + h * 60)}" y1="${HDR}" x2="${x(t + h * 60)}" y2="${H}" stroke="var(--line)" stroke-width=".5" opacity=".6"/>`);
+  });
+
+  let y = HDR;
+  gs.forEach(([name, ms]) => {
+    parts.push(`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="var(--line)" stroke-width="2"/>`);
+    y += GROUP;
+    ms.forEach(m => {
+      const y0 = y, yb = y0 + (ROW - BAR) / 2;
+      parts.push(`<line x1="0" y1="${y0}" x2="${W}" y2="${y0}" stroke="var(--line)"/>`);
+      // activity segments
+      m.acts.forEach(a => {
+        const w = Math.max(x(a.e) - x(a.s), a.k === 'Waste' ? 2 : 1);
+        let fill, op = '', tip, key = a.k;
+        if (a.k === 'Knit') {
+          key = knitKey(a); fill = knitColor(a);
+          tip = `<b>Knit ${a.item}</b> ${a.lbs} lbs${a.variant ? ' · ' + a.variant : ''}<br><span class="k">yarn</span> ${a.yarn}<br><span class="k">pattern</span> ${a.pat}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+        } else if (a.k === 'Idle') {
+          const dim = (mode !== 'activity' || hidden[mode].has('Idle')) ? ' opacity=".18"' : '';
+          parts.push(`<rect x="${x(a.s)}" y="${yb + 6}" width="${w}" height="${BAR - 12}" fill="none" stroke="var(--a-idle)" stroke-dasharray="3 3"${dim} data-tip="${esc(`<b>${a.reason ? 'waiting for ' + a.reason : 'idle'}</b><br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`)}"/>`);
+          return;
+        } else {
+          fill = mode === 'activity' ? ACT[a.k][0] : 'var(--neutral)';
+          if (a.k === 'TapeOut') tip = `<b>Tape-out, ${a.bars}</b><br>${(a.off || []).join('<br>')}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+          else if (a.k === 'Hanging') tip = `<b>Hanging, ${a.bars}</b><br>${esc(a.sets || '')}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+          else if (a.k === 'Threading') tip = `<b>Threading, ${a.bars}</b><br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+          else if (a.k === 'Waste') tip = `<b>Waste</b> ${a.lbs} lbs of ${a.set} ${a.desc} on ${a.bar}<br>${fmt(a.s)}`;
+          else if (a.k === 'Doff') tip = `<b>Doff</b><br>${fmt(a.s)} → ${fmt(a.e)}`;
+          else tip = `<b>${ACT[a.k][1]}</b> ${a.frm} → ${a.to}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+        }
+        if (hidden[mode].has(key)) op = ' opacity=".15"';
+        const hgt = a.k === 'Knit' ? BAR : (a.k === 'Doff' ? BAR : BAR);
+        parts.push(`<rect x="${x(a.s)}" y="${yb}" width="${w}" height="${hgt}" fill="${fill}"${op} data-tip="${esc(tip)}"/>`);
+      });
+      // job labels on top of the segments
+      m.jobs.forEach(j => {
+        const w = x(j.e) - x(j.s);
+        if (w <= 54) return;
+        const col = (mode === 'activity') ? ACT.Knit[0] : colorOf[mode][mode === 'yarn' ? j.yarn : mode === 'fam' ? `${j.yarn} · ${j.pat}` : j.item];
+        const dark = (mode !== 'activity') && DARK_TEXT.has(col);
+        parts.push(`<text x="${x(j.s) + 4}" y="${yb + 14}" font-size="11" fill="${dark ? '#111' : '#fff'}" pointer-events="none">${j.pat} ${j.item}${w > 120 ? ' ×' + j.rolls : ''}</text>`);
+      });
+      // markers
+      if (layers.tape) m.tapeouts.forEach(t => {
+        const w = Math.max(x(t.t1) - x(t.t), 3);
+        if (mode !== 'activity') parts.push(`<rect x="${x(t.t)}" y="${yb}" width="${w}" height="${BAR}" fill="url(#hatch)" pointer-events="none"/>`);
+        parts.push(`<rect x="${x(t.t) - 1}" y="${yb - 4}" width="${w + 2}" height="3" fill="var(--tape)" pointer-events="none"/>`);
+      });
+      if (layers.pat) m.pattern.forEach(p => {
+        const cx = x(p.t), w = Math.max(x(p.t1) - x(p.t), 2);
+        parts.push(`<path d="M${cx + w / 2} ${yb - 9} l5 5 l-5 5 l-5 -5 z" fill="var(--pattern)" pointer-events="none"/>`);
+      });
+      if (layers.wait) m.waits.forEach(w => parts.push(`<rect x="${x(w[0])}" y="${yb + 6}" width="${Math.max(x(w[1]) - x(w[0]), 2)}" height="${BAR - 12}" fill="var(--tape)" opacity=".35" data-tip="${esc(`<b>waiting for a ${w[2].replace(' slot', '').replace('_', '-')} slot</b><br>${fmt(w[0])} → ${fmt(w[1])} (${hrs(w[0], w[1])})`)}"/>`));
+      m.hangs.forEach(h => {
+        if (h.change ? !layers.yarn : !layers.reload) return;
+        const cx = x(h.t), by = h.bar === 'top' ? yb - 1 : yb + BAR + 1;
+        const tri = h.bar === 'top' ? `M${cx} ${by} l-5 -8 l10 0 z` : `M${cx} ${by} l-5 8 l10 0 z`;
+        const tip = `<b>${h.change ? 'Yarn change' : 'Runout reload'}</b>, ${h.bar} bar<br>${h.frm ? h.frm + ' → ' : ''}${h.desc}<br><span class="k">set</span> ${h.set}${h.new ? ' (invented, no stock)' : ''} · ${h.lbs} lbs${h.merge ? '<br><span class="k">merge</span> ' + h.merge : ''}${h.vendor ? ' · ' + h.vendor : ''}<br>hang ${fmt(h.t)}`;
+        if (h.change) parts.push(`<path d="${tri}" fill="var(--accent)" stroke="var(--bg)" stroke-width="1" data-tip="${esc(tip)}"/>`);
+        else parts.push(`<path d="${tri}" fill="var(--bg)" stroke="var(--muted)" stroke-width="1.2" data-tip="${esc(tip)}"/>`);
+        if (layers.new && h.new) parts.push(`<circle cx="${cx}" cy="${h.bar === 'top' ? by - 12 : by + 12}" r="3" fill="var(--new)" pointer-events="none"/>`);
+      });
+      y += ROW;
+    });
+  });
+  parts.push('</svg>');
+  $('#grid').innerHTML = parts.join('');
+}
+
+const tip = $('#tip');
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (!t) { tip.hidden = true; return; }
+  tip.innerHTML = t.getAttribute('data-tip'); tip.hidden = false;
+});
+document.addEventListener('mousemove', e => {
+  if (tip.hidden) return;
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(e.clientX + pad, window.innerWidth - w - 8) + 'px';
+  tip.style.top = (e.clientY + pad + h > window.innerHeight ? e.clientY - h - pad : e.clientY + pad) + 'px';
+});
+document.addEventListener('mouseout', e => { if (e.target.closest && e.target.closest('[data-tip]')) tip.hidden = true; });
+init();
+</script>

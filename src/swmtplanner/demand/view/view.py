@@ -15,6 +15,23 @@ if TYPE_CHECKING:
 
 _SECONDS_PER_DAY = 86400.0
 
+# The lateness shape: linear through the first week late, doubling every
+# day beyond it. See "Costs — Raw view" in DESIGN.md.
+LINEAR_DAYS = 7.0
+
+
+def lateness_factor(days_late: float) -> float:
+    """Per-lb lateness multiplier for a delivery `days_late` days past due:
+    `days_late` itself up to `LINEAR_DAYS` (a week, linear), then
+    `LINEAR_DAYS × 2 ** (days_late − LINEAR_DAYS)` — doubling per day,
+    continuous at the boundary. Zero or negative days give zero."""
+    if days_late <= 0:
+        return 0.0
+    if days_late <= LINEAR_DAYS:
+        return days_late
+    return LINEAR_DAYS * 2.0 ** (days_late - LINEAR_DAYS)
+
+
 _EventQty = (tuple[Literal['chunk'], float, 'Roll | None']
              | tuple[Literal['drain'], 'Order'])
 
@@ -81,12 +98,17 @@ class RawView:
                 if avail_time > order.week.due_date:
                     order.late_lbs += take
                     days_late = (avail_time - order.week.due_date).total_seconds() / _SECONDS_PER_DAY
-                    contribution = take * (2.0 ** days_late)
+                    # Lateness is valued by the share of the gross order
+                    # (the week's demand before on-hand is netted) that
+                    # arrives late, not by the pounds: a small order late is
+                    # as serious as a big one. See "Costs" in DESIGN.md.
+                    share = take / order.week.qty_lbs
+                    contribution = share * lateness_factor(days_late)
                     self._lateness += contribution
                     if detail_sink is not None:
                         # One row per late delivery of material to an order.
                         detail_sink('lateness', self._rls_item.item.id,
-                                    days_late, take, contribution)
+                                    days_late, share, contribution)
 
                 chunk_remaining -= take
                 needed -= take

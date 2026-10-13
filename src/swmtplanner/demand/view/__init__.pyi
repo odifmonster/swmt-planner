@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, TYPE_CHECKING
 
 from swmtplanner.demand.order import (
@@ -9,7 +9,15 @@ if TYPE_CHECKING:
     from swmtplanner.demand.rlsitem import RlsItem
     from swmtplanner.schedule import Job, Roll
 
-__all__ = ['RawView', 'SafetyAwareView']
+__all__ = ['RawView', 'SafetyAwareView', 'lateness_factor', 'LINEAR_DAYS']
+
+LINEAR_DAYS: float
+"""Days past due over which lateness grows linearly (7) before doubling."""
+
+def lateness_factor(days_late: float) -> float:
+    """Per-lb lateness multiplier: `days_late` up to `LINEAR_DAYS`, then
+    `LINEAR_DAYS × 2 ** (days_late − LINEAR_DAYS)`; 0 when not late."""
+    ...
 
 
 class RawView:

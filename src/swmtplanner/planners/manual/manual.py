@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, TYPE_CHECKING
 
 from swmtplanner.products import BeamSetDesc
-from swmtplanner.schedule import Hanging
+from swmtplanner.schedule import Hanging, Idle, TAPE_OUT_BOTH_DURATION
 from swmtplanner.planners.infinite.state import Move, State
 from swmtplanner.planners.infinite.run import load_config
 from swmtplanner.planners.infinite.schedule_json import (
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 __all__ = ['Step', 'ManualSchedule']
 
 StartAt = Literal['schedule_tail', 'next_runout']
+StockMode = Literal['all', 'named', 'none']
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class Step:
     # machine's own queue / stock (JSON null).
     top: tuple[str | None, ...] = ()
     btm: tuple[str | None, ...] = ()
+    # The order the step is raised for — the new job's `tgt_order` (JSON
+    # `order`); None for a step that serves no particular order.
+    order: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {'machine': self.machine, 'item': self.item,
@@ -46,38 +50,53 @@ class Step:
             d['top'] = list(self.top)
         if self.btm:
             d['btm'] = list(self.btm)
+        if self.order is not None:
+            d['order'] = self.order
         return d
 
     @classmethod
     def from_json(cls, d: Mapping[str, Any]) -> 'Step':
+        order = d.get('order')
         return cls(
             machine=str(d['machine']), item=str(d['item']), rolls=int(d['rolls']),
             at=d.get('at', 'schedule_tail'),
             top=tuple(d.get('top', ())), btm=tuple(d.get('btm', ())),
+            order=None if order is None else str(order),
         )
 
 
 class ManualSchedule:
     """Build a schedule by hand on the planner's `State`: stage a move per
     machine with `rolls`, inspect the plans, `commit` (or `discard`) one or
-    all, and write the result as schedule JSON. See DESIGN.md."""
+    all, and write the result as schedule JSON. See DESIGN.md.
 
-    def __init__(self, state: State) -> None:
+    `stock` is what a staging's automatic picks may draw on ("Stock modes"
+    in DESIGN.md): `'all'` the committed inventory (the default), `'none'`
+    nothing — every automatic pick invents a placeholder and a named set
+    raises — and `'named'` only the sets the step itself names, so named
+    hangs mount them and every other hang invents a placeholder."""
+
+    def __init__(self, state: State, stock: StockMode = 'all') -> None:
+        if stock not in ('all', 'named', 'none'):
+            raise ValueError(f"stock must be 'all', 'named' or 'none', got {stock!r}")
         self._state = state
+        self._stock = stock
         self._steps: list[Step] = []
         # Staged plans by machine, in staging order (dicts keep insertion order).
         self._staged: dict[str, tuple[Step, Move]] = {}
 
     @classmethod
-    def from_config(cls, config: 'str | Path', *, quiet: bool = True) -> 'ManualSchedule':
+    def from_config(cls, config: 'str | Path', *, quiet: bool = True,
+                    change_date: datetime | None = None) -> 'ManualSchedule':
         """Load a run-config the way `plan infinite` does and start from its
-        machines, inventory and demand."""
+        machines, inventory and demand — the machines already run up to the
+        config's `change_date` (or `change_date` given here)."""
         echo = (lambda _s: None) if quiet else print
-        _cfg, inputs = load_config(Path(config), echo=echo)
+        _cfg, inputs = load_config(Path(config), change_date=change_date, echo=echo)
         state = State(
             machines=inputs.machines, rls_items=inputs.rls_items,
             start_date=inputs.start_date, window_end=inputs.start_date,
-            inventory=inputs.inventory,
+            inventory=inputs.inventory, capacity=inputs.capacity,
         )
         return cls(state)
 
@@ -119,6 +138,12 @@ class ManualSchedule:
                 'rolls_before_runout': m.whole_rolls_before_runout,
                 'roll_lbs_remaining': round(s.roll_lbs_remaining, 1),
                 'jobs': len(m.jobs), 'staged': m_id in self._staged,
+                # when a both-bar tape-out could next be done on this machine
+                # under the ration (None when tape-outs are unrationed)
+                'next_tape_out_slot': (
+                    self._capacity_view(exclude=m_id).next_slot(
+                        'tape_out', 2, m.schedule_tail, TAPE_OUT_BOTH_DURATION)
+                    if self._state.capacity.limits('tape_out') else None),
             }
             for bar in ('top', 'btm'):
                 b = s.beam(bar)
@@ -148,6 +173,7 @@ class ManualSchedule:
     def rolls(
         self, machine: str, item: str, n: int, at: StartAt = 'schedule_tail',
         top: Iterable[str | None] = (), btm: Iterable[str | None] = (),
+        order: str | None = None,
     ) -> 'ProductionPlan':
         """Plan `n` rolls of `item` on `machine` and stage it, replacing any
         earlier staging on that machine (other machines' stagings stay). The
@@ -156,7 +182,8 @@ class ManualSchedule:
         is taken even if another staging had picked it **automatically**:
         that staging is re-planned and its automatic pick moves on to the
         next set. Naming a set another staging assigned *by hand* raises.
-        Nothing is committed until `commit()`."""
+        `order` is stamped on the new job as its `tgt_order`. Nothing is
+        committed until `commit()`."""
         if n <= 0:
             raise ValueError(f'rolls must be positive, got {n}')
         greige = self._greige(item)
@@ -164,7 +191,7 @@ class ManualSchedule:
             raise KeyError(f'unknown machine {machine!r}')
         if not greige.can_run_on_mchn(machine):
             raise ValueError(f'{item!r} cannot run on machine {machine!r}')
-        step = Step(machine, greige.id, int(n), at, tuple(top), tuple(btm))
+        step = Step(machine, greige.id, int(n), at, tuple(top), tuple(btm), order)
         displaced = self._displaced_by(step)
         snapshot = dict(self._staged)
         try:
@@ -224,7 +251,14 @@ class ManualSchedule:
         idx = {'top': 0, 'btm': 0}
         status = mchn.current_status
         last_beam = {bar: status.beam(bar) for bar in ('top', 'btm')}
+        # A slot wait (`Idle` with a reason) just before this preamble's beam
+        # work is reported on the hangs it delayed.
+        waited_from = None
         for a in plan.activities:
+            if isinstance(a, Idle):
+                waited_from = a.start if a.reason else None
+            elif type(a).__name__ == 'Knit':
+                waited_from = None
             for bar in ('top', 'btm'):
                 if status.beam(bar) is not None:
                     last_beam[bar] = status.beam(bar)
@@ -263,6 +297,7 @@ class ManualSchedule:
                         'auto': bs.set_no, 'lbs': round(bs.lbs, 1), 'vendor': bs.vendor,
                         'assigned': named, 'source': source,
                         'locked': locked, 'queue_idx': i,
+                        'waited_from': waited_from,
                         'options': [(b.set_no, round(b.lbs, 1), b.merge, b.vendor)
                                     for b in options],
                         'held_elsewhere': {b.set_no: auto_held[b.id]
@@ -411,11 +446,29 @@ class ManualSchedule:
                 out[bs.id] = (m_id, bs.id in named)
         return out
 
+    def _capacity_view(self, exclude: str):
+        """The committed changeover bookings plus the slots every other
+        staged plan takes (see "Staging several machines" in DESIGN.md)."""
+        extra: dict = {}
+        for m_id, (_step, move) in self._staged.items():
+            if m_id == exclude:
+                continue
+            for kind, day, units, _start in move.plan.capacity_taken:
+                extra[(kind, day)] = extra.get((kind, day), 0) + units
+        cap = self._state.capacity
+        return cap.view(extra) if extra else cap
+
     def _stock_view(self, exclude: str, free: set[str]) -> 'InventoryView':
         """The committed inventory less the sets other staged plans hang,
         except those in `free` (sets this step names, which it may take from
-        another staging's automatic pick)."""
+        another staging's automatic pick). In stock mode `'none'` the view is
+        empty; in `'named'` it holds only the sets in `free`."""
+        if self._stock == 'none':
+            return {}
         taken = set(self._holds(exclude=exclude)) - free
+        if self._stock == 'named':
+            return {k: [b for b in v if b.id in free and b.id not in taken]
+                    for k, v in self._state.inventory.items()}
         if not taken:
             return self._state.inventory
         return {k: [b for b in v if b.id not in taken]
@@ -451,9 +504,10 @@ class ManualSchedule:
         assign = {bar: list(sets) for bar, sets in (('top', step.top), ('btm', step.btm)) if sets}
         lbs = step.rolls * greige.tgt_wt
         plan = mchn.plan_production(
-            greige, lbs, start_at=step.at,
+            greige, lbs, start_at=step.at, tgt_order=step.order,
             inventory=self._stock_view(exclude=step.machine, free=named),
             assign=assign or None,
+            capacity=self._capacity_view(exclude=step.machine),
         )
         move = Move(machine_id=step.machine, item=greige, lbs=lbs,
                     start_at=step.at, idle_for=timedelta(0), plan=plan)

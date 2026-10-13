@@ -14,7 +14,12 @@ if TYPE_CHECKING:
     from swmtplanner.schedule import Job
 
 def _due_date(start: 'datetime', idx: int):
-    return start + timedelta(weeks=idx)
+    """Week `idx`'s due date: the **Monday** that opens the planning start's
+    week (midnight), plus `idx` weeks — due dates fall on Mondays, not at an
+    offset from a start date that may be any day of the week."""
+    monday = (start - timedelta(days=start.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return monday + timedelta(weeks=idx)
 
 def _job_completion(job: 'Job') -> datetime:
     """Sort key for the production schedule: a job's final roll's

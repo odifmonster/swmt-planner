@@ -28,6 +28,8 @@ class CostWeights:
     priority: float
     level_loading: float
     old_machine: float
+    recovery: float
+    """Per whole stranded order per predicted day late (lateness units)."""
 
 
 class Costing:
@@ -35,6 +37,12 @@ class Costing:
     @property
     def weights(self) -> CostWeights: ...
     def score(self, state: State) -> float: ...
+    def recovery_detail(
+        self, state: State, move: Move, ctx: ScoringContext,
+    ) -> tuple[float, list[tuple[str, float]]]:
+        """Unweighted recovery quantity and its per-stranded-item breakdown
+        `[(item id, contribution)]`; 0 and [] when `ctx` has no cheap sets."""
+        ...
     def score_after_move(
         self, state: State, move: Move, ctx: ScoringContext,
         debuglog: DebugLog | None = ...,

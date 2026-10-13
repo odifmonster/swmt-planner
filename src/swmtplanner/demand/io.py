@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import json
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -26,17 +27,24 @@ def rls_items_from_list(
     the underlying `Greige`; item-side fields (yarn, tgt_wt, safety,
     machines) come from there. `start_date` is plant-wide and passed
     through to every `RlsItem` so week 0's `due_date` lands on it.
-    `lead_time_days` becomes a `timedelta`."""
+    `lead_time_days` becomes a `timedelta`. Demand for an item that is not
+    in `greige_by_id` — a style the plant no longer knits in-house, which
+    the demand pull still lists — is skipped with a warning rather than
+    stopping the run."""
     if not isinstance(cfg, list):
         raise TypeError(f'{source} must be a list of demand objects')
     out: dict[str, RlsItem] = {}
+    unknown: list[str] = []
     for entry in cfg:
         if not isinstance(entry, dict):
             raise TypeError(
                 f'each entry in {source} must be an object; got {entry!r}'
             )
         item_id = entry['item_id']
-        greige = greige_by_id[item_id]
+        greige = greige_by_id.get(item_id)
+        if greige is None:
+            unknown.append(str(item_id))
+            continue
         rls = RlsItem(
             item=greige,
             start_date=start_date,
@@ -45,6 +53,11 @@ def rls_items_from_list(
             weekly_lbs_needed=[float(lbs) for lbs in entry['weekly_dmnd']],
         )
         out[item_id] = rls
+    if unknown:
+        warnings.warn(
+            f'{source}: demand for item(s) not in the styles was skipped: '
+            f'{", ".join(unknown)}', stacklevel=2,
+        )
     return out
 
 

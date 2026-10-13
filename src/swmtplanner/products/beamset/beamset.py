@@ -109,7 +109,8 @@ class BeamSet(HasID[str]):
                  desc: BeamSetDesc, avail_date: datetime, *,
                  vendor: 'str | None' = None,
                  denier: 'int | None' = None, luster: str = '', ytype: str = '',
-                 known_merge: bool = False, assigned: bool = False):
+                 known_merge: bool = False, assigned: bool = False,
+                 blacklisted: bool = False):
         if desc.split_lease:
             raise ValueError(f'a physical beam set cannot be split lease: {desc.id!r}')
         self._id = set_no
@@ -123,6 +124,7 @@ class BeamSet(HasID[str]):
         self._ytype = ytype
         self._known_merge = known_merge
         self._assigned = assigned
+        self._blacklisted = blacklisted
 
     @classmethod
     def new(cls, desc: BeamSetDesc, lbs: float, avail_date: datetime) -> 'BeamSet':
@@ -132,13 +134,24 @@ class BeamSet(HasID[str]):
         physical description."""
         return cls(f'NEW{_NEW_SET_ID():06}', None, lbs, desc.physical, avail_date)
 
+    def relabelled(self, like: 'BeamSet') -> 'BeamSet':
+        """This set's lbs, description and availability under `like`'s
+        identity — set number, merge, vendor, the plant's yarn fields and
+        `known_merge` (never `assigned`). How a placeholder a plan invented is
+        replaced by the real set assigned to it afterwards (see "Assigning
+        sets after planning" in `schedule/DESIGN.md`)."""
+        return BeamSet(like.set_no, like.merge, self._lbs, self._desc, self._avail_date,
+                       vendor=like.vendor, denier=like.denier, luster=like.luster,
+                       ytype=like.ytype, known_merge=like.known_merge,
+                       blacklisted=like.blacklisted)
+
     def returned(self, lbs: float, at: datetime) -> 'BeamSet':
         """This set as it comes back off a machine: same id and merge, `lbs`
         now the pounds left on it, available again from `at`."""
         return BeamSet(self._id, self._merge, lbs, self._desc, at,
                        vendor=self._vendor, denier=self._denier,
                        luster=self._luster, ytype=self._ytype,
-                       known_merge=self._known_merge)
+                       known_merge=self._known_merge, blacklisted=self._blacklisted)
         # (a returned set is no longer assigned to anything)
 
     @property
@@ -213,9 +226,18 @@ class BeamSet(HasID[str]):
         that bar will hang — see the machines' bar queues."""
         return self._assigned
 
+    @property
+    def blacklisted(self) -> bool:
+        """The set's merge is on the run's blacklist of merges flagged for
+        quality (see "Blacklisted merges" in schedule/DESIGN.md): it fits
+        nothing and is never stock. False for an invented set."""
+        return self._blacklisted
+
     def fits(self, desc: BeamSetDesc) -> bool:
         """Whether this set can serve a style's beam-set requirement, split
-        lease or not."""
+        lease or not. Never for a blacklisted set."""
+        if self._blacklisted:
+            return False
         return self._desc.same_set(desc)
 
     def available_at(self, t: datetime) -> bool:

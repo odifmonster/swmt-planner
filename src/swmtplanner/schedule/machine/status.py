@@ -108,6 +108,28 @@ class Status:
         """Sets assigned to `bar` and not yet threaded, next up first."""
         return self._queues[bar]
 
+    def rebind_sets(self, relabel) -> 'Status':
+        """This status with each bar's set replaced by `relabel(set)` (lbs,
+        threading and queues untouched) — see "Assigning sets after
+        planning" in DESIGN.md. Pure."""
+        top, btm = self.beam('top'), self.beam('btm')
+        new_top, new_btm = relabel(top), relabel(btm)
+        if new_top is top and new_btm is btm:
+            return self
+        return self._evolve(self.as_of, is_idle=self.is_idle,
+                            top={'beam': new_top}, btm={'beam': new_btm})
+
+    def drop_queued(self, bar: Bar) -> 'Status':
+        """This status without the front set of `bar`'s queue — a set a hang
+        passed over because it did not fit the bar's requirement (see
+        "Assigned sets and bar queues" in DESIGN.md). Pure; `as_of` and
+        everything else unchanged. Raises on an empty queue."""
+        q = self._queues[bar]
+        if not q:
+            raise ValueError(f'drop_queued: nothing is queued on {bar}')
+        return self._evolve(self.as_of, is_idle=self.is_idle,
+                            queues={**self._queues, bar: q[1:]})
+
     @property
     def current_family(self) -> str:
         """Family of `current_item`. Derived rather than stored so the record
@@ -156,9 +178,13 @@ class Status:
         )
 
     def _popped(self, activity: Hanging) -> 'dict[str, tuple[BeamSet, ...]]':
-        """The queues after `activity`: a bar that hangs the front set of its
-        queue consumes it; hanging any other set leaves the queue alone."""
+        """The queues after `activity`: the sets the hang passed over
+        (`activity.passed_over`) leave their bar's queue, then a bar that
+        hangs the front set of its queue consumes it; hanging any other set
+        leaves the queue alone."""
         queues = dict(self._queues)
+        for bar, dropped in activity.passed_over:
+            queues[bar] = tuple(b for b in queues[bar] if b.id != dropped.id)
         for bar in ('top', 'btm'):
             if activity.bars not in (bar, 'both'):
                 continue

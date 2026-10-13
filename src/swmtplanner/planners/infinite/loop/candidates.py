@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Literal
 
+from swmtplanner.schedule import Fill
 from swmtplanner.planners.infinite.state import Move, State
 from swmtplanner.planners.infinite.coordination import (
-    RegularOrder, eligible_orders,
+    RegularOrder, eligible_orders, unique_setups,
 )
 
 
@@ -67,21 +68,23 @@ def enumerate_candidates(state: State) -> list[Move]:
     """For each combination of (decision point × order) where the
     machine can run the order's item, derive `lbs`, `start_at`,
     `idle_for`, and a cached `plan` from `Machine.plan_production`, then
-    bundle the result into a `Move`. Combinations whose producible cap
-    collapses to less than one full roll are filtered out — those can't
-    place anything and would just clutter the scorer.
+    bundle the result into a `Move`. A regular move is sized to the
+    item's open demand through the reference week (`_open_demand`), a
+    safety move to the safety gap, both capped at the machine's
+    producible lbs through the ISO week. Combinations whose producible
+    cap collapses to less than one full roll are filtered out — those
+    can't place anything and would just clutter the scorer.
 
     The Move's `plan` is computed once here so the same plan can be
     reused for scoring (via `Costing.score_after_move`) and committing
     (via `State.commit_move`) without re-running `plan_production`."""
     decision_points = eligible_decision_points(state)
     orders = eligible_orders(state)
+    unique = unique_setups(state)
 
     out: list[Move] = []
     for dp in decision_points:
         machine = state.machines[dp.machine_id]
-        if dp.machine_id == 'E7':
-            print('checking an E7 dp')
         for order in orders:
             if not order.item.can_run_on_mchn(dp.machine_id):
                 continue
@@ -128,14 +131,41 @@ def enumerate_candidates(state: State) -> list[Move]:
             # ISO week so a tightly-loaded machine doesn't get
             # artificially excluded from contention. The decision-
             # window mechanism still spreads work across machines.
+            # A move that changes the item may wait for a ration slot; it is
+            # planned to knit the current item meanwhile, as far as the plant
+            # still wants it (see "Filling a slot wait" in DESIGN.md).
+            fill = fill_for(state, machine, order.item)
+
             producible_cap = _producible_cap_with_bumpup(
                 machine, order.item, effective_start, state.inventory,
+                state.capacity, fill,
             )
 
-            # Round min(order_lbs, producible_cap) down to whole rolls.
+            # Open-demand sizing: a regular move is sized to the item's whole
+            # open demand (its unmet regular orders through the reference
+            # week), not just the one order it targets, whether it changes
+            # the machine's item or continues it — so a setup buys the
+            # backlog it is paid for, and a machine already on the right
+            # yarn brings the same backlog to the comparison. A safety order
+            # is its gap. See "Open-demand sizing" in DESIGN.md.
+            target_lbs = order.lbs
+            batched = False
+            if isinstance(order, RegularOrder):
+                target_lbs = max(order.lbs, _open_demand(state, order.item))
+                # Economic order quantity: a unique-setup item whose open
+                # demand is a few rolls is batched up with its later weeks,
+                # and the batch is not capped at the week (see "Economic
+                # order quantity for unique setups" in DESIGN.md).
+                if (order.item.id in unique
+                        and target_lbs <= state.eoq_threshold_rolls * order.item.tgt_wt + _FLOAT_EPS):
+                    target_lbs = _batched_demand(
+                        state, order.item, state.eoq_batch_rolls * order.item.tgt_wt)
+                    batched = True
+
+            # Round min(target_lbs, producible_cap) down to whole rolls.
             # Snap near-integer roll counts up to handle float drift
             # from chained division in the cap calculation.
-            lbs_uncapped = min(order.lbs, producible_cap)
+            lbs_uncapped = target_lbs if batched else min(target_lbs, producible_cap)
             n_rolls_exact = lbs_uncapped / order.item.tgt_wt
             n_rolls_rounded = round(n_rolls_exact)
             if abs(n_rolls_rounded - n_rolls_exact) < _FLOAT_EPS:
@@ -152,6 +182,8 @@ def enumerate_candidates(state: State) -> list[Move]:
                 idle_for=idle_for,
                 tgt_order=order.order_id,
                 inventory=state.inventory,
+                capacity=state.capacity,
+                fill=fill,
             )
 
             out.append(Move(
@@ -173,6 +205,62 @@ def enumerate_candidates(state: State) -> list[Move]:
     return out
 
 
+def fill_for(state: State, machine, item) -> Fill | None:
+    """The fill a move changing `machine` to `item` is planned with (see
+    "Filling a slot wait" in DESIGN.md): the current item's whole open
+    demand — every regular order's remaining lbs, any week, plus its safety
+    gap — rounded up to whole rolls, raised against its earliest open
+    regular order, else its safety order. None for a move that continues
+    the current item, a machine with no item, an item the run does not
+    have, or one with no open demand."""
+    cur = machine.current_status.current_item
+    if cur.id == 'NONE' or cur == item:
+        return None
+    rls = state.rls_items.get(cur.id)
+    if rls is None:
+        return None
+    view = rls.safety_view
+    open_orders = sorted((o for o in view.orders if o.remaining_lbs > 0),
+                         key=lambda o: o.week.week_idx)
+    gap = max(0.0, view.safety_target - view.safety_pool)
+    total = sum(o.remaining_lbs for o in open_orders) + gap
+    if total <= _FLOAT_EPS:
+        return None
+    tgt = open_orders[0].id if open_orders else view.safety.id
+    rolls = math.ceil(total / cur.tgt_wt - _FLOAT_EPS)
+    return Fill(rolls=rolls, tgt_order=tgt)
+
+
+def _open_demand(state: State, item) -> float:
+    """The item's open demand: the sum of `remaining_lbs` over its
+    safety-view orders with `week_idx <= state.reference_week_idx` — the
+    orders `eligible_orders` treats as urgent. A regular move is sized to
+    this rather than to the one order it targets (see "Open-demand
+    sizing" in DESIGN.md)."""
+    rls = state.rls_items[item.id]
+    return sum(
+        o.remaining_lbs for o in rls.safety_view.orders
+        if o.remaining_lbs > 0
+        and o.week.week_idx <= state.reference_week_idx
+    )
+
+
+def _batched_demand(state: State, item, at_least: float) -> float:
+    """The item's unmet regular demand in week order — the open orders and
+    then the later weeks — summed until it reaches `at_least` lbs or every
+    order on the schedule is in (the economic order quantity for a
+    unique-setup item; see "Move sizing" in DESIGN.md)."""
+    rls = state.rls_items[item.id]
+    total = 0.0
+    for o in sorted(rls.safety_view.orders, key=lambda o: o.week.week_idx):
+        if o.remaining_lbs <= 0:
+            continue
+        total += o.remaining_lbs
+        if total >= at_least - _FLOAT_EPS:
+            break
+    return total
+
+
 def _end_of_iso_week(t: datetime) -> datetime:
     """End of the ISO week containing `t` — i.e., the start of the
     following ISO week (Monday 00:00). Used as the default right edge
@@ -183,31 +271,25 @@ def _end_of_iso_week(t: datetime) -> datetime:
 
 
 def _producible_cap_with_bumpup(
-    machine, item, effective_start: datetime, inventory=None,
+    machine, item, effective_start: datetime, inventory=None, capacity=None,
+    fill=None,
 ) -> float:
-    """Producible lbs from `effective_start` through the end of its
-    ISO week, with one-week bump-up when that window can't fit a
-    single roll.
+    """Producible lbs from `effective_start` through the end of its ISO
+    week — or through the end of the *following* week when fewer than
+    three work days (`3 × workcal.hours_per_day` work hours) of the
+    current week remain at `effective_start`.
 
-    The default cap window is `[effective_start, end_of_iso_week)`.
-    If `producible_lbs_through` returns 0 for that window — i.e., the
-    remaining work hours (after preamble) aren't enough to produce
-    even one full roll of `item` — we extend the cap end by 7 days
-    so the schedule tail doesn't artificially exclude this
-    (machine, item) pair from contention. A machine ending its
-    schedule late on a Friday should still be able to commit a
-    sensible chunk of next week's work; the alternative (returning
-    0 here) would force the loop to advance the decision window past
-    this machine entirely."""
+    A tail late in the week would otherwise be offered only the week's
+    remnant, and the planner was seen committing a single roll of a very
+    large order there; sized through the next week the move is a run
+    worth its setup. See "Move sizing" in DESIGN.md."""
     current_week_end = _end_of_iso_week(effective_start)
-    cap = machine.producible_lbs_through(
-        item, end=current_week_end, start=effective_start,
-        inventory=inventory,
-    )
-    if cap > 0:
-        return cap
-    next_week_end = current_week_end + timedelta(days=7)
+    workcal = machine.workcal
+    remaining = workcal.get_work_hours_between(effective_start, current_week_end)
+    end = current_week_end
+    if remaining < 3 * workcal.hours_per_day:
+        end = current_week_end + timedelta(days=7)
     return machine.producible_lbs_through(
-        item, end=next_week_end, start=effective_start,
-        inventory=inventory,
+        item, end=end, start=effective_start,
+        inventory=inventory, capacity=capacity, fill=fill,
     )

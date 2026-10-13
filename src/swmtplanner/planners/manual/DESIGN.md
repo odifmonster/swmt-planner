@@ -29,9 +29,13 @@ Step                                      # one committed manual move
   at: 'schedule_tail' | 'next_runout'     # plan_production's start_at
   top: tuple[str | None, ...] = ()        # set numbers queued for top hangs
   btm: tuple[str | None, ...] = ()        # … and bottom hangs
+  order: str | None = None                # the order the step serves: the new
+                                          # job's tgt_order (JSON `order`)
   to_json() -> dict ; from_json(d) -> Step
 
-ManualSchedule
+ManualSchedule(state, stock='all' | 'named' | 'none')
+                                               # what automatic picks may draw on —
+                                               # see "Stock modes"
   from_config(config_path) -> ManualSchedule   # loads the run-config exactly as
                                                # `plan infinite` does (run.load_config)
   machines: Mapping[str, Machine]
@@ -40,17 +44,22 @@ ManualSchedule
   staged: Mapping[str, ProductionPlan]         # staged plans by machine, in
                                                # staging order
   pending() -> list[dict]                      # per machine: item, schedule_tail,
+                                               # next_tape_out_slot (under the ration,
+                                               # None when unrationed),
                                                # next_runout, rolls_before_runout
                                                # (Machine.whole_rolls_before_runout),
                                                # roll_lbs_remaining, per-bar set +
-                                               # lbs remaining + queue, whether a
-                                               # plan is staged
+                                               # lbs remaining + threaded (False for
+                                               # a bar hung but not threaded) +
+                                               # queue (each entry with its
+                                               # location: staged / inventory),
+                                               # whether a plan is staged
   stock(desc: str, at: datetime | None = None) -> list[BeamSet]
                                                # sets fitting a beam-set label,
                                                # available at `at` (default: start),
                                                # not hung by a staged plan; oldest
                                                # received first (the pull order)
-  rolls(machine, item, n, at='schedule_tail', top=(), btm=()) -> ProductionPlan
+  rolls(machine, item, n, at='schedule_tail', top=(), btm=(), order=None) -> ProductionPlan
                                                # plan (not commit) a step for
                                                # `machine`, replacing that machine's
                                                # earlier staging; other machines'
@@ -60,7 +69,9 @@ ManualSchedule
                                                # machine, bar, at, desc, the set
                                                # coming off, the set going on and
                                                # where it came from, whether it is
-                                               # locked, queue_idx, stock options
+                                               # locked, queue_idx, stock options,
+                                               # waited_from (a slot wait that
+                                               # delayed this preamble)
   assignments(machine=None, *, all_hangs=False) -> {'top': [...], 'btm': [...]}
                                                # a staged machine's set numbers per
                                                # bar in hang order: the hand
@@ -81,7 +92,8 @@ ManualSchedule
 ```
 
 `rolls` calls `machine.plan_production(item, n * item.tgt_wt, start_at=at,
-inventory=<stock view>, assign={'top': top, 'btm': btm})` and stages
+tgt_order=order, inventory=<stock view>, assign={'top': top, 'btm': btm})`
+and stages
 the resulting `Move` under that machine; nothing changes until `commit`,
 which goes through `State.commit_move` so activities, jobs (including the
 previous job's recreation with its tape-out), the inventory and the demand
@@ -142,6 +154,19 @@ anything is committed. Bars with no assignment get the automatic most-lbs
 pick, and a bar whose queue runs out mid-plan falls back to it too.
 `stock(desc)` lists what can be assigned.
 
+**Stock modes.** `ManualSchedule(state, stock='all')` is the default: a
+staging's automatic picks draw on the committed inventory as described
+above. Two restricted modes serve the retimer, which hands stock out in
+runout order *after* planning (`schedule.assign_sets`): `stock='none'`
+plans every automatic pick as a placeholder (`NEW…`, `source: 'new'` in
+`runouts()`) — a step naming a set raises, as there is nothing to name
+from — and `stock='named'` lets a step hang exactly the sets it names (a
+named set must still be in the committed inventory under the bar's
+requirement, available, and not held by hand elsewhere) while every
+unnamed hang invents a placeholder. In both modes the plant's queued sets
+are hung as usual, since the queue precedes stock. `stock()` and
+`runouts()`' `options` still list the committed inventory in every mode.
+
 **Locked hangs.** A set the plant has assigned to a machine bar (the bar's
 queue) is locked in: when it is next up for a hang — it fits the
 requirement and has been received — that hang takes it, and a manual
@@ -161,7 +186,15 @@ the *other* stagings and keeps the machine's place in the staging order, so
 a staging never depends on the commit order: `commit()` commits all of them
 in staging order, `commit(machine)` just the one, and the rest remain valid
 either way. Each machine's `at='next_runout'` is its own computed runout,
-so the staged plans' *times* are independent of one another.
+so the staged plans' *times* are independent of one another — except
+through the changeover ration: each staging is laid out against the
+committed tape-out and pattern-change bookings **plus the slots the other
+stagings take** (a `CapacityView`, see `schedule/DESIGN.md` "Changeover
+capacity"), so two staged tape-outs never share a day's last unit, and the
+second one staged waits for the next period. Re-staging re-plans against
+the current overlay like the inventory. `runouts()` reports a slot wait on
+the hang it delayed (`waited_from`), and `pending()` shows each machine's
+next free tape-out period.
 
 **A hand beats an automatic pick.** The exception to "less what the others
 hang" is a set the step names itself. If another staging picked that set

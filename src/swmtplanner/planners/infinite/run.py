@@ -11,23 +11,25 @@ Invoke as `python -m swmtplanner.planners.infinite.run <config.json>
 `pyproject.toml`."""
 
 import json
+import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Callable, Mapping
 
 import typer
 
 from swmtplanner.products import (
     read_greige_styles, greige_styles_from_list, read_variant_masters,
-    read_variant_map, read_beam_sets, beam_sets_from_list,
+    read_variant_map, read_beam_sets, beam_sets_from_list, normalize_blacklist,
 )
 from swmtplanner.demand import read_rls_items, rls_items_from_list
 from swmtplanner.schedule import (
     read_machines, machines_from_list, build_inventory,
+    capacity_from_dict,
 )
-from swmtplanner.support import load_workcal, workcal_from_dict
+from swmtplanner.support import load_workcal, workcal_from_dict, planning_mode
 from swmtplanner.debuglog import DebugLog
 
 from .costing import (
@@ -35,10 +37,10 @@ from .costing import (
 )
 from swmtplanner.dashboard import DatabaseConfigError, resolve_conn_config
 from .sqldump import PersistenceError, persist_run
-from .loop import plan
+from .loop import plan, PlanReport
 from .report import write_plan_report_xlsx
 from .schedule_json import write_schedule_json
-from .state import State
+from .state import PriorCommit, State
 
 
 _REQUIRED_KEYS = (
@@ -168,6 +170,12 @@ _StartDate = Annotated[datetime | None, typer.Option(
     formats=['%Y-%m-%d'],
     help='Override the config\'s start_date. YYYY-MM-DD.',
 )]
+_ChangeDate = Annotated[datetime | None, typer.Option(
+    '--change-date',
+    formats=['%Y-%m-%d', '%Y-%m-%d %H:%M:%S'],
+    help='Override the config\'s change_date: when the plant can first '
+         'change a machine over. Defaults to start_date.',
+)]
 _Products = Annotated[str | None, typer.Option(
     '--products', '-p',
     help='Override greige-styles. A path to a JSON file, or — for '
@@ -219,6 +227,7 @@ _Verbose = Annotated[bool, typer.Option(
 def run(
     config: _Config,
     start_date: _StartDate = None,
+    change_date: _ChangeDate = None,
     products: _Products = None,
     workcal: _Workcal = None,
     machines: _Machines = None,
@@ -244,7 +253,8 @@ def run(
     _validate_config(cfg, config)
     config_dir = config.parent
 
-    sd = start_date or _parse_start_date(cfg['start_date'])
+    sd = start_date or _parse_date(cfg['start_date'], 'start_date')
+    cd = change_date or _parse_date(cfg.get('change_date'), 'change_date', default=sd)
 
     # ---- Verbose-mode prerequisites (gathered up front) ----
     # A verbose run is persisted to SQL Server as a labelled, annotated run, so both
@@ -262,7 +272,7 @@ def run(
 
     # ---- Resolve inputs ----
     inputs = load_inputs(
-        cfg, config_dir, start_date=sd,
+        cfg, config_dir, start_date=sd, change_date=cd,
         overrides={'products': products, 'workcal': workcal, 'demand': demand,
                    'machines': machines, 'weights': weights},
     )
@@ -286,34 +296,59 @@ def run(
         inline_loader=lambda x, _: {} if x is None else x,
         label='state',
     )
+    statecfg = _parse_state_block(statecfg)
+    prior = prior_commits(inputs.prior_jobs)
+    if inputs.prior_jobs:
+        typer.echo(f'  starting from {sum(len(v) for v in prior.values())} prior job(s); '
+                   f'those filling urgent demand are recommitted first')
     state = State(
         machines=machine_dict,
         rls_items=rls_items,
         start_date=sd,
         window_end=sd,
         inventory=inventory,
+        capacity=inputs.capacity,
+        prior=prior,
         **statecfg
     )
     costing = Costing(cost_weights)
 
     debuglog = _build_debug_log() if verbose else None
 
+    # ---- Output names ----
+    # `knit_plan_<date>.xlsx` (and `.json`), or `knit_plan_<date>_<n>.xlsx`
+    # when that already exists; the tape-out report takes the same suffix
+    # (`tape_outs_<date>[_<n>].txt`) so one run's three files match.
+    stamp = sd.strftime('%Y%m%d')
+    output_path = output_dir / f'knit_plan_{stamp}.xlsx'
+    idx = 1
+    while output_path.exists():
+        idx += 1
+        stamp = f'{sd.strftime("%Y%m%d")}_{idx}'
+        output_path = output_dir / f'knit_plan_{stamp}.xlsx'
+    tape_out_report = output_dir / f'tape_outs_{stamp}.txt'
+    tape_out_report.unlink(missing_ok=True)     # the planner appends per decision
+
     typer.echo('Running planner...')
-    report = plan(state, costing, debuglog=debuglog)
+    report = plan(state, costing, debuglog=debuglog, tape_out_report=tape_out_report)
+    typer.echo(f'Tape-out decisions (alternatives + scores) in {tape_out_report}')
     typer.echo(f'  total_score: {report.total_score:.2f}')
     typer.echo(
         f'  unmet (item, week) pairs: '
         f'{len(report.unmet_lbs_by_item_week)}'
     )
+    for line in passed_over_lines(report):
+        typer.echo(line)
+    if report.prior:
+        by = {k: sum(1 for f in report.prior if f.status == k) for k in ('consumed', 'dropped', 'open')}
+        typer.echo(f'  prior jobs: {by["consumed"]} recommitted, {by["dropped"]} dropped, '
+                   f'{by["open"]} left to the loop')
+    filled = [j for jobs in report.jobs_by_machine.values() for j in jobs if j.fill]
+    if filled:
+        typer.echo(f'  slot waits filled: {len(filled)} jobs knit the current item '
+                   f'while waiting ({sum(j.total_rolls for j in filled)} rolls on them)')
 
     # ---- Write output ----
-    output_path = (
-        output_dir / f'knit_plan_{sd.strftime("%Y%m%d")}.xlsx'
-    )
-    idx = 1
-    while output_path.exists():
-        idx += 1
-        output_path = output_dir / f'knit_plan_{sd.strftime('%Y%m%d')}_{idx}.xlsx'
     typer.echo(f'Writing report to {output_path}')
     write_plan_report_xlsx(report, output_path)
     json_path = output_path.with_suffix('.json')
@@ -369,6 +404,9 @@ class Inputs:
     DESIGN.md) — shared by `plan infinite` and the manual scheduler
     (`planners/manual`), so both load a config identically."""
     start_date: datetime
+    change_date: datetime
+    """When the plant can first change a machine over (>= `start_date`); the
+    machines are already run up to it on their current items."""
     greige_by_id: dict[str, Any]
     variant_masters: dict[str, str] | None
     variant_map: Any
@@ -377,42 +415,100 @@ class Inputs:
     rls_items: dict[str, Any]
     machines: dict[str, Any]
     weights: Any
+    capacity: Any
+    """The plant's changeover ration (`schedule.ChangeoverCapacity`), from
+    the config's `changeover_capacity` block; constrains nothing without
+    one."""
+    prior_jobs: dict[str, list[Any]] = field(default_factory=dict)
+    """The config's `prior_plan` (a retimed schedule JSON) as
+    `retime.PriorJob`s per machine, in start order; empty without one.
+    `prior_commits` turns them into the planner's `PriorCommit`s."""
+    blacklist: frozenset[str] = frozenset()
+    """The config's `blacklist` of yarn merges flagged for quality, normalised
+    (`products.normalize_blacklist`); the loaded sets carrying one are
+    stamped `blacklisted` (see "Blacklisted merges" in schedule/DESIGN.md)."""
+
+
+def prior_commits(prior_jobs: 'Mapping[str, list[Any]]') -> 'dict[str, list[PriorCommit]]':
+    """The prior plan's jobs as `PriorCommit`s for the pre-pass (see
+    "Sticking to the prior plan" in DESIGN.md): per machine in start
+    order, every job with a target order and rolls left; run-up jobs are
+    left out."""
+    out: dict[str, list[PriorCommit]] = {}
+    for mid, jobs in prior_jobs.items():
+        kept = [PriorCommit(machine=mid, prior_job=j.job_id, item=j.item, rolls=j.rolls,
+                            order=j.order, due_date=j.due_date, start=j.start)
+                for j in sorted(jobs, key=lambda j: j.start)
+                if j.order is not None and j.rolls > 0]
+        if kept:
+            out[mid] = kept
+    return out
 
 
 def load_config(config: Path, *, start_date: datetime | None = None,
+                change_date: datetime | None = None,
                 echo: Callable[[str], Any] = typer.echo) -> tuple[dict, Inputs]:
     """Read + validate a run-config JSON and resolve every input in it. Returns
     the raw config (for its `state` / `database` blocks) and the `Inputs`."""
     with open(config) as f:
         cfg = json.load(f)
     _validate_config(cfg, config)
-    sd = start_date or _parse_start_date(cfg['start_date'])
-    return cfg, load_inputs(cfg, config.parent, start_date=sd, echo=echo)
+    sd = start_date or _parse_date(cfg['start_date'], 'start_date')
+    cd = change_date or _parse_date(cfg.get('change_date'), 'change_date', default=sd)
+    return cfg, load_inputs(cfg, config.parent, start_date=sd, change_date=cd,
+                            echo=echo)
 
 
-def _parse_start_date(value: str) -> datetime:
-    """The config's `start_date`: a date (`YYYY-MM-DD`, midnight) or a
-    date-time (`YYYY-MM-DD HH:MM[:SS]` / ISO 8601), in plant local time
-    like every timestamp the planner handles."""
+def _parse_date(value: Any, key: str, default: datetime | None = None) -> datetime:
+    """A config date (`start_date`, `change_date`): a date (`YYYY-MM-DD`,
+    midnight) or a date-time (`YYYY-MM-DD HH:MM[:SS]` / ISO 8601), in plant
+    local time like every timestamp the planner handles. `default` when the
+    key is absent."""
+    if value is None and default is not None:
+        return default
     try:
         return datetime.fromisoformat(str(value).strip())
     except ValueError as e:
         raise typer.BadParameter(
-            f"config['start_date'] must be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, "
+            f"config[{key!r}] must be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, "
             f'got {value!r}'
         ) from e
 
 
+_MODES = ('exact', 'planning')
+
+
 def load_inputs(
     cfg: dict, config_dir: Path, *, start_date: datetime,
+    change_date: datetime | None = None,
     overrides: Mapping[str, str | None] | None = None,
     echo: Callable[[str], Any] = typer.echo,
 ) -> Inputs:
     """Resolve a run-config's inputs (products, the optional variant files and
     beam-set inventory, workcal, demand, machines, weights). `overrides` maps
-    an input key to a CLI override (path or inline JSON) — see `_resolve`."""
+    an input key to a CLI override (path or inline JSON) — see `_resolve`.
+
+    Two things happen here beyond loading. The config's `mode` (`exact`, the
+    default, or `planning`) is applied process-wide **before** any input is
+    read (`support.planning_mode` — the loaders and the machine model consult
+    it). And once the machines and the inventory exist, every machine is
+    **run up to `change_date`** on its current item (`Machine.run_until`),
+    committing those rolls to the machine, to its item's demand and to the
+    inventory, so the planner's first changeover on any machine can be no
+    earlier than the plant can act on it."""
     overrides = overrides or {}
     sd = start_date
+    cd = change_date or sd
+    if cd < sd:
+        raise typer.BadParameter(
+            f'change_date ({cd}) must not be before start_date ({sd})')
+    mode = str(cfg.get('mode', 'exact')).lower()
+    if mode not in _MODES:
+        raise typer.BadParameter(f"config['mode'] must be one of {_MODES}, got {mode!r}")
+    planning_mode.enable(mode == 'planning')
+    if mode == 'planning':
+        echo('Planning mode: handling times 0.01 h, every beam set at '
+             f'{planning_mode.BEAM_LBS:,.0f} lbs')
     greige_by_id = _resolve(
         cli_value=overrides.get('products'), config_value=cfg['products'],
         config_dir=config_dir,
@@ -450,11 +546,34 @@ def load_inputs(
         echo(f'  loaded {len(variant_map.masters)} master(s), '
                    f'{len(variant_map.merges)} merge(s)')
 
+    # Optional: yarn merges flagged for quality. A set carrying one is never
+    # hung: it is kept out of stock, passed over in a queue, taped out off a
+    # bar (see "Blacklisted merges" in schedule/DESIGN.md).
+    blacklist: frozenset[str] = frozenset()
+    if cfg.get('blacklist') is not None:
+        codes = _resolve(
+            cli_value=None, config_value=cfg['blacklist'],
+            config_dir=config_dir,
+            file_loader=lambda p: json.load(open(p)),
+            inline_loader=lambda d, source: d,
+            label='blacklist', echo=echo,
+        )
+        if not isinstance(codes, list):
+            raise TypeError("config['blacklist'] must be a list of merge codes")
+        blacklist = normalize_blacklist(codes)
+        echo(f'  {len(blacklist)} blacklisted merge(s)')
+
     # Optional: the plant's beam-set export, available from the start date.
     # Becomes the stock inventory below, once the machines say which sets
     # are mounted (and so not in stock).
+    # Planning mode has no stock and no queues: every set a changeover needs
+    # is invented (at BEAM_LBS), and nothing taped out comes back.
     beam_sets = None
-    if cfg.get('beam_sets') is not None:
+    if mode == 'planning' and (cfg.get('beam_sets') is not None
+                               or cfg.get('assigned_sets') is not None):
+        echo('  planning mode: beam_sets / assigned_sets ignored — changeovers '
+             'invent their sets')
+    if cfg.get('beam_sets') is not None and mode != 'planning':
         if variant_map is None:
             raise ValueError(
                 "config['beam_sets'] requires config['variant_map'] (and "
@@ -463,20 +582,22 @@ def load_inputs(
         beam_sets = _resolve(
             cli_value=None, config_value=cfg['beam_sets'],
             config_dir=config_dir,
-            file_loader=lambda p: read_beam_sets(p, variant_map, sd),
+            file_loader=lambda p: read_beam_sets(p, variant_map, sd, blacklist),
             inline_loader=lambda d, source: beam_sets_from_list(
-                d, variant_map, sd, source=source,
+                d, variant_map, sd, source=source, blacklist=blacklist,
             ),
             label='beam_sets', echo=echo,
         )
-        echo(f'  loaded {len(beam_sets)} beam set(s)')
+        n_black = sum(1 for b in beam_sets.values() if b.blacklisted)
+        echo(f'  loaded {len(beam_sets)} beam set(s)'
+             + (f', {n_black} blacklisted' if n_black else ''))
 
     # Optional: sets the plant has assigned to a machine bar but not yet
     # threaded — each machine bar's queue (schedule/DESIGN.md, "Beam-set
     # inventory"). Also flagged `assigned` in the export, which keeps them
     # out of free stock.
     assigned_sets = None
-    if cfg.get('assigned_sets') is not None:
+    if cfg.get('assigned_sets') is not None and mode != 'planning':
         assigned_sets = _resolve(
             cli_value=None, config_value=cfg['assigned_sets'],
             config_dir=config_dir,
@@ -510,16 +631,19 @@ def load_inputs(
         file_loader=lambda p: read_machines(
             p, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
             variant_masters=variant_masters, variant_map=variant_map,
-            beam_sets=beam_sets, assigned_sets=assigned_sets,
+            beam_sets=beam_sets, assigned_sets=assigned_sets, blacklist=blacklist,
         ),
         inline_loader=lambda d, source: machines_from_list(
             d, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
             variant_masters=variant_masters, variant_map=variant_map,
             beam_sets=beam_sets, assigned_sets=assigned_sets, source=source,
+            blacklist=blacklist,
         ),
         label='machines', echo=echo,
     )
     echo(f'  loaded {len(machine_dict)} machine(s)')
+    for line in blacklisted_on_machines(machine_dict):
+        echo(line)
 
     # Stock = the export minus the sets the machines report as mounted.
     inventory = {}
@@ -554,12 +678,107 @@ def load_inputs(
         label='weights', echo=echo,
     )
 
+    cap_spec = cfg.get('changeover_capacity')
+    if isinstance(cap_spec, str):
+        with open(config_dir / cap_spec) as fh:
+            cap_spec = json.load(fh)
+    capacity = capacity_from_dict(cap_spec, wc)
+    if capacity.resources:
+        echo('Changeover ration: ' + ', '.join(
+            f'{k} {r.units_per_period}/day {r.window[0]:g}-{r.window[1]:g}h'
+            for k, r in capacity.resources.items()))
+    else:
+        echo('No changeover_capacity block: changes, tape-outs and pattern changes unrationed')
+
+    if cd > sd:
+        _advance_machines(machine_dict, rls_items, inventory, sd, cd, echo)
+
+    # Optional: the previous plan, already retimed to this status, whose
+    # jobs filling urgent demand the planner recommits before planning.
+    prior: dict[str, list[Any]] = {}
+    if cfg.get('prior_plan') is not None:
+        from swmtplanner.planners.retime import prior_jobs as _prior_jobs  # (retime imports this module)
+        prior_path = Path(cfg['prior_plan'])
+        if not prior_path.is_absolute():
+            prior_path = config_dir / prior_path
+        with open(prior_path) as fh:
+            plan_json = json.load(fh)
+        if not isinstance(plan_json, list):
+            raise typer.BadParameter(f'prior_plan {prior_path!r}: expected a schedule JSON list')
+        prior = _prior_jobs(plan_json, machine_dict)
+        n_jobs = sum(len(v) for v in prior.values())
+        n_dated = sum(1 for v in prior.values() for j in v if j.due_date is not None)
+        echo(f'  loaded prior plan: {n_jobs} job(s) on {sum(1 for v in prior.values() if v)} '
+             f'machine(s), {n_dated} with an order due date')
+
     return Inputs(
-        start_date=sd, greige_by_id=greige_by_id,
+        start_date=sd, change_date=cd, greige_by_id=greige_by_id,
         variant_masters=variant_masters, variant_map=variant_map,
         inventory=inventory, workcal=wc, rls_items=rls_items,
-        machines=machine_dict, weights=cost_weights,
+        machines=machine_dict, weights=cost_weights, capacity=capacity,
+        prior_jobs=prior, blacklist=blacklist,
     )
+
+
+def blacklisted_on_machines(machines: 'Mapping[str, Any]') -> list[str]:
+    """The load's listing of blacklisted sets found at the machines: one
+    line per set mounted on a bar (the bar is foreign — the machine's first
+    plan tapes it out) or queued at one (passed over at the hang). Empty
+    when there are none."""
+    lines = []
+    for mid, m in sorted(machines.items()):
+        s = m.initial_status
+        for bar in ('top', 'btm'):
+            beam = s.beam(bar)
+            if beam is not None and beam.blacklisted:
+                lines.append(f'  {mid:4} {bar:3} mounted set {beam.set_no} (merge {beam.merge}) '
+                             f'is blacklisted: the first plan tapes it out')
+            for q in s.queue(bar):
+                if q.blacklisted:
+                    lines.append(f'  {mid:4} {bar:3} queued set {q.set_no} (merge {q.merge}) '
+                                 f'is blacklisted: passed over at the hang')
+    return lines
+
+
+def passed_over_lines(report: 'PlanReport') -> list[str]:
+    """The run's listing of plant-assigned sets the plan passed over (see
+    "Assigned sets and bar queues" in schedule/DESIGN.md): a header and one
+    line per set — machine, bar, hang time, the set and its yarn, the
+    requirement it failed, the reason. Empty when nothing was passed over."""
+    rows = [(mid, p) for mid, ps in sorted(report.queue_passed_over.items()) for p in ps]
+    if not rows:
+        return []
+    lines = [f'  assigned sets passed over (did not fit the bar at the hang, or blacklisted): {len(rows)}']
+    for mid, p in rows:
+        lines.append(f'    {mid:4} {p.bar:3} {p.at:%m-%d %H:%M}  set {p.beam_set.set_no} '
+                     f'({p.beam_set.desc.id}, merge {p.beam_set.merge or "?"})  '
+                     f'bar needed {p.wanted.physical.id}  {p.reason}')
+    return lines
+
+
+def _advance_machines(machines: dict, rls_items: dict, inventory: dict,
+                      start_date: datetime, change_date: datetime,
+                      echo: Callable[[str], Any]) -> None:
+    """Run every machine up to `change_date` on its current item (see
+    `Machine.run_until`), committing the rolls exactly as the planner would
+    (`State.commit_move`: machine schedule, the item's demand, the beam-set
+    inventory)."""
+    from .state import Move, State
+    state = State(machines=machines, rls_items=rls_items, start_date=start_date,
+                  window_end=change_date, inventory=inventory)
+    echo(f'Running machines up to change_date {change_date}')
+    for m_id, m in machines.items():
+        plan = m.run_until(change_date, inventory=inventory)
+        if plan is None:
+            continue
+        item = m.current_status.current_item
+        lbs = sum(j.total_lbs for j in plan.jobs)
+        state.commit_move(Move(machine_id=m_id, item=item, lbs=lbs,
+                               start_at='schedule_tail', idle_for=timedelta(0),
+                               plan=plan))
+        rolls = sum(len(j.rolls) for j in plan.jobs)
+        what = f'{rolls} roll(s) of {item.id}' if rolls else 'idle'
+        echo(f'  {m_id:3} {what} until {m.schedule_tail}')
 
 
 def _resolve_db_block(cli_value: str | None, config_value: Any) -> Any:
@@ -610,6 +829,50 @@ def _gather_notes() -> str:
 
 
 # ----- helpers ------------------------------------------------------------
+
+
+# `State` fields that are durations. In the config's `state` block they are
+# written as a number of hours or as a string with a unit (`"48h"`, `"3d"`,
+# `"2w"`, `"90m"`, or `"HH:MM"`); JSON has no duration type.
+_STATE_DURATIONS = (
+    'window_advance_amount', 'carrying_avoidance_margin',
+    'planning_horizon_buffer', 'frozen_window',
+)
+_DURATION_UNITS = {'m': 1 / 60, 'h': 1.0, 'd': 24.0, 'w': 24.0 * 7}
+
+
+def _parse_duration(value: Any, key: str) -> timedelta:
+    """A `state` duration from its config spelling: a number is hours; a
+    string is `<n><unit>` with unit `m`/`h`/`d`/`w`, or `HH:MM`. Negative
+    values are allowed."""
+    if isinstance(value, timedelta):
+        return value
+    if isinstance(value, bool):
+        raise typer.BadParameter(f'state.{key}: a duration, not a boolean')
+    if isinstance(value, (int, float)):
+        return timedelta(hours=float(value))
+    if isinstance(value, str):
+        text = value.strip().lower()
+        m = re.fullmatch(r'(-?)(\d+):(\d{1,2})', text)
+        if m:
+            sign = -1 if m.group(1) else 1
+            return sign * timedelta(hours=int(m.group(2)), minutes=int(m.group(3)))
+        m = re.fullmatch(r'(-?\d+(?:\.\d+)?)\s*([mhdw])', text)
+        if m:
+            return timedelta(hours=float(m.group(1)) * _DURATION_UNITS[m.group(2)])
+    raise typer.BadParameter(
+        f'state.{key}: cannot read {value!r} as a duration — use hours as a '
+        f'number, "<n>h" / "<n>d" / "<n>w" / "<n>m", or "HH:MM"')
+
+
+def _parse_state_block(statecfg: dict) -> dict:
+    """The config's `state` block with its duration fields converted to
+    `timedelta` (see `_parse_duration`); other fields pass through."""
+    out = dict(statecfg)
+    for key in _STATE_DURATIONS:
+        if key in out:
+            out[key] = _parse_duration(out[key], key)
+    return out
 
 def _validate_config(cfg: Any, config_path: Path) -> None:
     """Cheap up-front shape check on the config JSON. Catches the

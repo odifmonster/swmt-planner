@@ -12,7 +12,7 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: pandas[excel]>=2.3.2
 Requires-Dist: typer>=0.17.3
-Requires-Dist: pymysql>=1.2.0
+Requires-Dist: pyodbc>=5.3.0
 Provides-Extra: dashboard
 Requires-Dist: pyqt6>=6.11.0; extra == "dashboard"
 

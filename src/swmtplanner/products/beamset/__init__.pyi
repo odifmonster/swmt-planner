@@ -49,10 +49,15 @@ class BeamSet(HasID[str]):
         avail_date: datetime, *, vendor: str | None = ...,
         denier: int | None = ..., luster: str = ...,
         ytype: str = ..., known_merge: bool = ..., assigned: bool = ...,
+        blacklisted: bool = ...,
     ) -> None: ...
     @classmethod
     def new(cls, desc: BeamSetDesc, lbs: float, avail_date: datetime) -> BeamSet:
         """A set the planner invents: ids `NEW000001`, …, no merge."""
+        ...
+    def relabelled(self, like: BeamSet) -> BeamSet:
+        """This set's lbs, description and availability under `like`'s
+        identity (number, merge, vendor, yarn fields, `known_merge`)."""
         ...
     def returned(self, lbs: float, at: datetime) -> BeamSet:
         """This set as it comes back off a machine: same id and merge, `lbs`
@@ -99,8 +104,13 @@ class BeamSet(HasID[str]):
         """Reserved for a specific machine and bar (export flag): not free
         stock; the next set that bar hangs."""
         ...
+    @property
+    def blacklisted(self) -> bool:
+        """The set's merge is on the run's blacklist of merges flagged for
+        quality: it fits nothing and is never stock."""
+        ...
     def fits(self, desc: BeamSetDesc) -> bool:
         """Whether this set can serve a style's beam-set requirement, split
-        lease or not."""
+        lease or not. Never for a blacklisted set."""
         ...
     def available_at(self, t: datetime) -> bool: ...

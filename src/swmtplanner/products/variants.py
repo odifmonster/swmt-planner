@@ -6,9 +6,10 @@ A short-term mapping tool (deliberately outside the design-first pipeline): it
 lets actual beam-set inventory be matched to the planner's items. In inventory a
 yarn "item" is a specific **merge**, so each master greige style is split into
 many *variants* — one per combination of merges on its bars. This module reads
-the plant's variant table (a TSV: one row per variant, per-bar construction in
-`bar{i}_*`, the yarn on that bar in `b{i}_*`) and builds three maps, plus a
-report of everything it could not place:
+the plant's variant table (a TSV: one row per variant, per bar its construction
+and the yarn on it in `bar{i}_*`) and the **master list** (`greige-master-
+styles.json`: each master style with its *representative variant*), and builds
+three maps plus a report of everything it could not place:
 
 - **merge -> beam-set descriptions** — a normalised yarn (`Merge`) to the
   planner beam-set strings it appears in (which sets a merge can feed);
@@ -24,40 +25,46 @@ table so an inventory beam set can be given its planner beam-set string. The
 reverse translation, variant name -> master, is a second flat JSON file
 (`write_variant_masters` / `read_variant_masters`).
 
+**A master is defined by its representative variant.** The master list names
+one variant per master; that variant's row supplies the master's construction
+— per bar the ends, split lease, **runner length** and yarn — and its planner
+beam-set labels. Another row is a variant of that master when it matches the
+representative on every bar: the same ends and split lease, the same beam
+count, the same **yarn** as the planner tells yarns apart — denier class,
+colour, cationic or recycled (Repreve) finish, textured or flat; a black
+yarn where the representative's is white, or recycled where it is plain, is
+a different product — and the same runner length — exactly, or failing an
+exact match anywhere, within
+`RL_TOLERANCE` (2) on every bar, the row then going to the **nearest** such
+master by summed runner-length distance (older constructions of a style share
+its number but sit further off, and are no longer used; two masters equally
+close is ambiguous and the row is excluded). Bars are paired with the
+representative's by construction and runner length, so no bar-position or
+yarn heuristic is needed to tell top from bottom (bar 1 is the bottom bar in
+the representative).
+
 Plant conventions applied (see `VariantMap.report()` for what actually occurred):
 
 - Our styles are 2-bar in the planner but appear as **3-bar rows**: one set runs
   **split lease** (`S/L`) across two half-bars — visible as the *same merge on two
   bars* — so bars sharing a merge are merged (ends / pct summed) and marked `S/L`.
 - Denier classes: 70/75 -> **75D**, 40/45 -> **40D** (others as-is: 50D, 80D).
-- Colour: a luster naming a colour (`BK`/`BLK` -> `BLK`, `GY`/`GRY` -> `GRY`)
-  else white; a `BLK ID` / `BK SOL DYE` yarn type is black too.
+- Colour: a luster naming a colour (`BK`/`BLK` -> `BLK`, `GY`/`GRY` -> `GRY`,
+  the recycled greener black `RGB` -> `GBK`) else white; a `BLK ID` /
+  `BK SOL DYE` yarn type is black too. `GBK` is its own colour — a style on
+  it does not run on regular black.
 - Yarn type: everything we plan is polyester, so `POLY` is implicit and a
   **non-polyester** merge is unusable; `TEXT`/`TX` marks a textured (`TX`) set;
   `CAT` -> `CAT` and `REPREVE` / `RECYCLE*` -> `REP` are the only modifiers
   kept — every other one (`NP`, `WD`, `LR`, `BIO-MEG`, …) is dropped, those
   yarns being interchangeable with the plain one for our purposes.
-- A **cationic or Repreve variant of a master whose own beamsets don't use that
-  yarn** is a version we no longer produce (many styles were switched off
-  cationic) and is excluded.
-- Constructions **1048** and **1472** (and their halves) are no longer used.
-- Masters in `NOT_KNIT_IN_HOUSE` (bought finished, e.g. `AU7368H`) are skipped;
-  their variants land in the exclusions.
-- Variant -> master: by the 4-digit style number (left-anchored, so `SR7368` and
-  `AUSR7368` count but `97980` does not), disambiguated among same-numbered
-  masters by the **nearest bar runlengths** (rack weight drifts with the merge;
-  runlength doesn't), then by which master's beamset yarns the variant's merges
-  match (`AU4782` vs `AU4782DREP` share runlengths and differ only in the REP
-  yarn), the plainer master winning a remaining tie. The letter after the
-  number is only a cross-check, reported when runlength didn't settle the choice.
-- Top/btm are assigned by matching each set's yarn to the master's `beam_cfg`;
-  only when the yarns don't identify the bars does bar position decide (bar 1
-  is the **bottom** bar; the highest-numbered bar is the top). Note that
-  styles differ in which yarn runs on which bar — the master's `beam_cfg` is
-  authoritative per style. The report cross-checks the two.
+- Variants are found by the 4-digit style number (left-anchored, so `SR7368`
+  and `AUSR7368` count but `97980` does not) and placed under whichever
+  same-numbered master's representative they match; a row matching none is
+  excluded, the report naming the nearest master and what differed.
 
-The master styles are the parsed **greige-styles JSON records** (they carry the
-per-bar `runlen` the `Greige` model drops).
+The optional `styles` (the greige-styles JSON records) are used only to
+cross-check the representative's beam-set labels against the styles file.
 """
 
 import csv
@@ -69,29 +76,27 @@ from typing import Any, Iterable, Mapping
 
 __all__ = [
     'Merge', 'RawYarn', 'BeamSetSpec', 'Variant', 'VariantMap', 'normalize_merge',
-    'denier_class', 'read_greige_variants', 'load_master_styles',
+    'denier_class', 'read_greige_variants', 'load_master_styles', 'load_master_list',
     'write_variant_map', 'read_variant_map', 'VariantMapFile', 'MasterVariants',
-    'Recipe', 'BarRecipe', 'MergeInfo',
-    'write_variant_masters', 'read_variant_masters',
-    'KNOWN_ENDS', 'OBSOLETE_ENDS', 'NOT_KNIT_IN_HOUSE', 'RL_TOLERANCE',
+    'Recipe', 'BarRecipe', 'MergeInfo', 'MasterSpec', 'MasterSetSpec',
+    'write_variant_masters', 'read_variant_masters', 'RL_TOLERANCE',
 ]
-
-# Merged (full-bar) end counts the masters use, and the retired constructions
-# (their halves — 524 / 736 — only ever appear as split-lease pairs).
-KNOWN_ENDS = frozenset({1172, 1300, 1340})
-OBSOLETE_ENDS = frozenset({1048, 1472})
-# Masters in the styles file that the knitting plant does not make itself.
-NOT_KNIT_IN_HOUSE = frozenset({'AU7368H'})
 
 _TEX_TOKENS = {'TEXT', 'TX', 'TEX'}
 _REP_TOKENS = {'REPREVE', 'RECYCLE', 'RECYCLED'}
 _KEEP_FINISH = {'CAT', 'REP'}
-# Summed |variant - master| bar runlength beyond which a row is taken to be a
-# sibling construction (a different letter version) rather than a variant.
-RL_TOLERANCE = 10.0
 _BLACK_LUSTER = ('BLK', 'BK')
 _GREY_LUSTER = ('GRY', 'GRAY', 'GY')
+# "Recycled greener black" — the plant's RGB luster. Its own colour, `GBK`:
+# a style knit on it is not interchangeable with one on regular black.
+_GREENER_BLACK_LUSTER = ('RGB',)
 _NUMBER = re.compile(r'\d{4}')
+_NULL = (None, '', 'NULL', 'None', 'none', 'null')
+_RL_EPS = 1e-6
+# A row that matches no representative exactly still belongs to the nearest
+# master whose construction it shares when every bar's runlength is within
+# this much of the representative's.
+RL_TOLERANCE = 2.0
 
 
 # ----- yarn normalisation --------------------------------------------------
@@ -121,6 +126,11 @@ def is_textured(ytype: str) -> bool:
     return bool(set(_tokens(ytype)) & _TEX_TOKENS)
 
 
+def is_recycled(ytype: str) -> bool:
+    """Repreve / recycled polyester."""
+    return bool(set(_tokens(ytype)) & _REP_TOKENS)
+
+
 def _finish_and_black(ytype: str) -> tuple[tuple[str, ...], bool]:
     """The yarn-type modifiers that survive normalisation — only `CAT` and
     `REP` (`REPREVE`/`RECYCLE*`); everything else is dropped — and whether the
@@ -132,10 +142,12 @@ def _finish_and_black(ytype: str) -> tuple[tuple[str, ...], bool]:
     while i < len(toks):
         t = toks[i]
         if t in _REP_TOKENS:
-            out.append('REP')
+            if 'REP' not in out:
+                out.append('REP')
             i += 1
         elif t == 'CAT':
-            out.append('CAT')
+            if 'CAT' not in out:
+                out.append('CAT')
             i += 1
         elif t == 'BLK' and toks[i + 1:i + 2] == ['ID']:
             black = True
@@ -149,10 +161,13 @@ def _finish_and_black(ytype: str) -> tuple[tuple[str, ...], bool]:
 
 
 def color_of(luster: str, black_from_type: bool = False) -> str:
-    """`BLK` for a black luster (`SDBK`, `BLK`, …) or a black yarn type; `GRY`
-    for a grey luster; otherwise `WHT` — a luster that names no colour (`SD`,
-    `DULL`, `BRT`, `CL`, `SDIM`, …) is white."""
+    """`GBK` for the recycled greener-black luster (`RGB`); `BLK` for a black
+    luster (`SDBK`, `BLK`, …) or a black yarn type; `GRY` for a grey luster;
+    otherwise `WHT` — a luster that names no colour (`SD`, `DULL`, `BRT`,
+    `CL`, `SDIM`, …) is white."""
     lus = (luster or '').upper()
+    if any(k in lus for k in _GREENER_BLACK_LUSTER):
+        return 'GBK'
     if black_from_type or any(k in lus for k in _BLACK_LUSTER):
         return 'BLK'
     if any(k in lus for k in _GREY_LUSTER):
@@ -169,6 +184,10 @@ class Merge:
     color: str
     finish: tuple[str, ...]
     textured: bool
+
+    @property
+    def recycled(self) -> bool:
+        return 'REP' in self.finish
 
     @property
     def yarn_desc(self) -> str:
@@ -199,8 +218,8 @@ class RawYarn:
     """A yarn as the plant identifies it — the merge code is the inventory
     "item"; the rest describes it."""
     merge: str | None
+    vendor: str | None
     denier: str
-    flmnt: str
     luster: str
     ytype: str
 
@@ -228,15 +247,14 @@ class BeamSetSpec:
 @dataclass(frozen=True)
 class Variant:
     """One variant row, resolved. `issues` lists anything that makes it
-    unusable (non-polyester yarn, retired construction, no master, …) or merely
-    noteworthy (letter/runlength disagreement, yarn mismatch with the master)."""
+    unusable (non-polyester yarn, no master matching its construction and
+    yarns, …) or merely noteworthy (a runlength matched within tolerance)."""
     name: str
     number: str
     master: str | None
     top: 'BeamSetSpec | None'
     btm: 'BeamSetSpec | None'
     rack_wt: float | None
-    rl_distance: float | None       # sum |set runlen - master runlen| over both bars
     split_bars: tuple[int, ...]     # TSV bar numbers carrying the split-lease set
     split_is_top: bool | None       # whether the split set landed on the master's TOP
     issues: tuple[str, ...]
@@ -249,65 +267,137 @@ class Variant:
 # ----- masters -------------------------------------------------------------
 
 @dataclass(frozen=True)
-class _Bar:
-    beamset: str
-    pct: float
-    runlen: float
-    denier: int
-    textured: bool
-    yarn_desc: str       # the beamset's yarn part, denier folded (`45D BLK` -> `40D BLK`)
+class _RepSet:
+    """One of the representative variant's two sets: what a variant's set must
+    match exactly (runlength, construction, recycled) and the yarn label."""
+    ends: int
+    n_beams: int
+    split: bool
+    rl: float
+    merge: Merge
+    bars: tuple[int, ...]
+
+    @property
+    def beamset(self) -> str:
+        return _beamset_desc(self.merge.yarn_desc, self.ends, self.n_beams, self.split)
 
 
 @dataclass(frozen=True)
 class _Master:
     id: str
     number: str
-    suffix: str          # the letter right after the number ('' if none)
-    top: _Bar
-    btm: _Bar
+    rep: str             # the representative variant's name
+    top: _RepSet
+    btm: _RepSet
+    width: int
+    gauge: int
+    stitches: tuple[str, ...]    # bar1..bar4 stitch patterns, in bar order
+    pattern_key: tuple           # see `_pattern_key`
+    top_pct: float
+    btm_pct: float
 
 
-_BEAMSET = re.compile(r'^(\d+)D (.+?) (\d+)X(\d+)( S/L)?$')
+def _norm_stitch(s: str) -> str:
+    return re.sub(r'\s+', '', s or '')
 
 
-def _parse_bar(cfg: Mapping[str, Any]) -> _Bar:
-    beamset = cfg['beamset']
-    m = _BEAMSET.match(beamset)
-    if not m:
-        raise ValueError(f'unparseable beamset {beamset!r}')
-    denier = denier_class(int(m.group(1)))
-    yarn = f'{denier}D {m.group(2)}'
-    return _Bar(beamset, float(cfg['pct']), float(cfg['runlen']),
-                denier, yarn.endswith(' TX'), yarn)
+def _pattern_key(sets: list[dict], row: Mapping[str, str]) -> tuple:
+    """The pattern family key: the stitch patterns knit by each **set**, not
+    by bar position — a style that swaps which bar carries the 75D set and
+    which the split 40D set is the same pattern. The single-bar set's stitch
+    and the split set's two half-bar stitches **in bar order** (which
+    half-bar knits which matters); whitespace in the plant's strings is
+    ignored. When the two sets can't be told apart that way (both split or
+    neither) the sets' stitch tuples are compared unordered."""
+    per_set = []
+    for s in sets:
+        stitches = tuple(_norm_stitch(_str(row, f'bar{i}_stitch') or '')
+                         for i in sorted(s['bars']))
+        per_set.append((s['split'], stitches))
+    singles = [st for split, st in per_set if not split]
+    splits = [st for split, st in per_set if split]
+    if len(singles) == 1 and len(splits) == 1:
+        return ('single', singles[0], 'split', splits[0])
+    return ('sets', tuple(sorted(st for _, st in per_set)))
+
+
+@dataclass(frozen=True)
+class MasterSetSpec:
+    """One of a master's two beam sets as its representative defines it."""
+    beamset: str          # planner label, e.g. `40D WHT 1172X4 S/L`
+    ends: int
+    n_beams: int
+    split: bool
+    runlen: float
+    pct: float            # share of the fabric weight, %
+    denier: int           # planner denier class
+    textured: bool
+    yarn_desc: str
+    bars: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class MasterSpec:
+    """A master style as its representative variant defines it — what the
+    greige-styles file needs beyond the rates: construction, weight split,
+    stitch patterns (the family), width and gauge."""
+    id: str
+    representative: str
+    number: str
+    width: int
+    gauge: int
+    stitches: tuple[str, ...]    # bar1..bar4 stitch patterns, in bar order
+    pattern_key: tuple           # the pattern family: stitches per set, position-free
+    top: MasterSetSpec
+    btm: MasterSetSpec
+
+    @property
+    def wide(self) -> bool:
+        """Over 200 inches: only wide machines, at their wide rpm."""
+        return self.width > 200
+
+    @property
+    def heavy_on_top(self) -> bool:
+        """The 75-denier (textured) set on the top bar: only tall machines."""
+        return self.top.denier == 75
 
 
 def load_master_styles(path: 'str | Path') -> list[dict]:
-    """The greige-styles JSON records (the raw list — they carry `runlen`)."""
+    """The greige-styles JSON records (used only to cross-check labels)."""
     with open(path) as fh:
         return json.load(fh)
 
 
-def _masters(styles: Iterable[Mapping[str, Any]]) -> dict[str, list[_Master]]:
-    by_number: dict[str, list[_Master]] = {}
-    for s in styles:
-        m = _NUMBER.search(s['id'])
-        if not m:                                   # e.g. the NONE placeholder
-            continue
-        rest = re.sub(r'[^A-Z]', '', s['id'][m.end():].upper())
-        by_number.setdefault(m.group(0), []).append(_Master(
-            s['id'], m.group(0), rest[:1],
-            _parse_bar(s['beam_cfg']['top']), _parse_bar(s['beam_cfg']['btm']),
-        ))
-    return by_number
+def load_master_list(path: 'str | Path') -> list[dict]:
+    """The master list: `[{"master": <id>, "variant": <representative>, …}, …]`
+    (other keys, such as the `safety` target the styles generator reads, are
+    passed through)."""
+    with open(path) as fh:
+        data = json.load(fh)
+    if not isinstance(data, list) or not all(
+            isinstance(d, dict) and 'master' in d and 'variant' in d for d in data):
+        raise ValueError(f'{path}: expected a list of {{master, variant}} objects')
+    return data
 
 
 # ----- rows -> sets ----------------------------------------------------------
 
 def _num(s: Any) -> 'float | None':
+    if s in _NULL:
+        return None
     try:
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def _str(row: Mapping[str, str], *names: str) -> str | None:
+    """The first of `names` the row has a value for (old and new column names)."""
+    for n in names:
+        v = row.get(n)
+        if v not in _NULL:
+            return str(v)
+    return None
 
 
 def _bars(row: Mapping[str, str]) -> list[dict]:
@@ -316,13 +406,14 @@ def _bars(row: Mapping[str, str]) -> list[dict]:
         ends = _num(row.get(f'bar{i}_ends'))
         if not ends or ends <= 0:
             continue
-        merge = row.get(f'b{i}_merge') or None
         out.append({
             'i': i, 'ends': int(ends), 'pct': _num(row.get(f'bar{i}_pct')) or 0.0,
             'rl': _num(row.get(f'bar{i}_rl')),
-            'merge': None if merge in (None, '', 'NULL') else merge,
-            'den': row.get(f'b{i}_denier', ''), 'flm': row.get(f'b{i}_flmnt', ''),
-            'lus': row.get(f'b{i}_luster', ''), 'yt': row.get(f'b{i}_ytype', ''),
+            'merge': _str(row, f'bar{i}_merge', f'b{i}_merge'),
+            'vendor': _str(row, f'bar{i}_vendor'),
+            'den': _str(row, f'bar{i}_denier', f'b{i}_denier') or '',
+            'lus': _str(row, f'bar{i}_luster', f'b{i}_luster') or '',
+            'yt': _str(row, f'bar{i}_desc', f'b{i}_ytype') or '',
         })
     return out
 
@@ -339,7 +430,7 @@ def _sets(bars: list[dict]) -> list[dict]:
         b0 = bs[0]
         sets.append({
             'den': b0['den'], 'lus': b0['lus'], 'yt': b0['yt'],
-            'yarn': RawYarn(b0['merge'], b0['den'], b0['flm'], b0['lus'], b0['yt']),
+            'yarn': RawYarn(b0['merge'], b0['vendor'], b0['den'], b0['lus'], b0['yt']),
             'bars': tuple(b['i'] for b in bs),
             'ends': sum(b['ends'] for b in bs),
             'pct': sum(b['pct'] for b in bs),
@@ -349,70 +440,126 @@ def _sets(bars: list[dict]) -> list[dict]:
     return sets
 
 
-def _assign(sets: list[dict], merges: list[Merge], m: _Master) -> tuple[dict, dict, int, bool]:
-    """Put the two sets on `m`'s top/btm. Prefer the ordering whose yarns match
-    the master's beamset yarns outright, then by denier class + textured, then
-    by bar position (bar 1 is the bottom bar, so the set on the higher bars is
-    the top). Returns `(top_set, btm_set, yarn_mismatches, identified_by_yarn)`."""
-    bars = (m.top, m.btm)
+def _n_beams(row: Mapping[str, str]) -> int:
+    return int(_num(_str(row, 'beams', 'n_beams')) or 0)
+
+
+def _build_master(mid: str, rep: str, row: Mapping[str, str]) -> _Master:
+    """The master's definition from its representative variant's row: two
+    polyester sets, the one holding bar 1 being the bottom."""
+    sets = _sets(_bars(row))
+    if len(sets) != 2:
+        raise ValueError(
+            f'master {mid!r}: representative {rep!r} has {len(sets)} distinct '
+            f'merge(s), need 2')
+    n_beams = _n_beams(row)
+    reps = []
+    for s in sets:
+        mg = normalize_merge(s['den'], s['lus'], s['yt'])
+        if mg is None:
+            raise ValueError(f'master {mid!r}: representative {rep!r} uses '
+                             f'non-polyester yarn {s["yt"]!r}')
+        if s['rl'] is None:
+            raise ValueError(f'master {mid!r}: representative {rep!r} has no '
+                             f'runlength on bars {s["bars"]}')
+        reps.append(_RepSet(s['ends'], n_beams, s['split'], s['rl'], mg, s['bars']))
+    btm = next(r for r in reps if 1 in r.bars)
+    top = next(r for r in reps if r is not btm)
+    num = _NUMBER.search(mid)
+    if not num:
+        raise ValueError(f'master {mid!r}: no 4-digit style number')
+    stitches = tuple(s for s in (_str(row, f'bar{i}_stitch') for i in (1, 2, 3, 4)) if s)
+    pct_of = {s['bars']: s['pct'] for s in sets}
+    return _Master(mid, num.group(0), rep, top, btm,
+                   int(_num(row.get('width')) or 0), int(_num(row.get('gauge')) or 0),
+                   stitches, _pattern_key(sets, row), pct_of[top.bars], pct_of[btm.bars])
+
+
+def _master_spec(m: _Master) -> MasterSpec:
+    def spec(r: _RepSet, pct: float) -> MasterSetSpec:
+        return MasterSetSpec(r.beamset, r.ends, r.n_beams, r.split, r.rl, pct,
+                             r.merge.denier, r.merge.textured, r.merge.yarn_desc, r.bars)
+    return MasterSpec(m.id, m.rep, m.number, m.width, m.gauge, m.stitches,
+                      m.pattern_key, spec(m.top, m.top_pct), spec(m.btm, m.btm_pct))
+
+
+# ----- matching --------------------------------------------------------------
+
+def _differences(s: dict, mg: Merge, r: _RepSet, n_beams: int, bar: str) -> list[str]:
+    """What keeps variant set `s` (normalised `mg`) from being the
+    representative's `r` on `bar`, other than runlength: empty when the
+    construction, beam count and recycled status all match."""
+    out = []
+    if s['ends'] != r.ends or s['split'] != r.split:
+        out.append(f'{bar} construction {s["ends"]}{" S/L" if s["split"] else ""} '
+                   f'vs {r.ends}{" S/L" if r.split else ""}')
+    if n_beams != r.n_beams:
+        out.append(f'{n_beams} beams vs {r.n_beams}')
+    if mg != r.merge:
+        # The yarn as the planner tells yarns apart: denier class, colour,
+        # cationic / recycled finish, textured or flat — all of it.
+        out.append(f'{bar} yarn {mg.yarn_desc} vs {r.merge.yarn_desc}')
+    return out
+
+
+@dataclass(frozen=True)
+class _Fit:
+    """How a variant's two sets fit a master's representative, for the best
+    pairing onto (top, btm): the non-runlength differences, and the
+    runlength gap per bar (`rl_gaps`, top then btm; None when a set has no
+    runlength)."""
+    order: tuple[int, int]
+    diffs: tuple[str, ...]
+    rl_gaps: tuple[float | None, float | None]
+
+    @property
+    def exact(self) -> bool:
+        return not self.diffs and all(g is not None and g <= _RL_EPS for g in self.rl_gaps)
+
+    def within(self, tol: float) -> bool:
+        """Same construction, every bar's runlength within `tol`."""
+        return not self.diffs and all(g is not None and g <= tol + _RL_EPS for g in self.rl_gaps)
+
+    @property
+    def rl_distance(self) -> float:
+        return sum(g for g in self.rl_gaps if g is not None)
+
+    def rl_text(self, m: '_Master', sets: list[dict]) -> str:
+        parts = []
+        for i, (bar, r) in enumerate((('top', m.top), ('btm', m.btm))):
+            s = sets[self.order[i]]
+            if self.rl_gaps[i] is None or self.rl_gaps[i] > _RL_EPS:
+                parts.append(f'{bar} runlength {s["rl"]} vs {r.rl}')
+        return '; '.join(parts)
+
+
+def _match(sets: list[dict], merges: list[Merge], n_beams: int, m: _Master) -> _Fit:
+    """The pairing of the variant's two sets onto `m`'s (top, btm) that fits
+    best: fewest non-runlength differences, then the smallest runlength
+    distance, then the pairing whose yarns read like the representative's."""
     best = None
     for order in ((0, 1), (1, 0)):
-        mg = [merges[order[0]], merges[order[1]]]
-        full = sum(mg[i].yarn_desc != bars[i].yarn_desc for i in range(2))
-        loose = sum((mg[i].denier, mg[i].textured) != (bars[i].denier, bars[i].textured)
-                    for i in range(2))
-        pos_ok = 0 if sets[order[0]]['bars'][0] > sets[order[1]]['bars'][0] else 1
-        key = (full, loose, pos_ok)
+        diffs = tuple(_differences(sets[order[0]], merges[order[0]], m.top, n_beams, 'top')
+                      + _differences(sets[order[1]], merges[order[1]], m.btm, n_beams, 'btm'))
+        gaps = tuple(
+            None if sets[order[i]]['rl'] is None else abs(sets[order[i]]['rl'] - r.rl)
+            for i, r in enumerate((m.top, m.btm)))
+        yarn_off = sum(merges[order[i]].yarn_desc != r.merge.yarn_desc
+                       for i, r in enumerate((m.top, m.btm)))
+        key = (len(diffs), sum(g if g is not None else float('inf') for g in gaps), yarn_off)
         if best is None or key < best[0]:
-            best = (key, order)
-    (full, loose, _), order = best
-    return sets[order[0]], sets[order[1]], full, loose == 0
+            best = (key, _Fit(order, diffs, gaps))
+    return best[1]
 
 
-def _pick_master(
-    sets: list[dict], merges: list[Merge], candidates: list[_Master],
-    rl_tolerance: float,
-) -> tuple[_Master, dict, dict, float | None, list[str]]:
-    """Choose among same-numbered masters by (1) summed runlength distance of
-    the two bars, (2) how many yarns differ from the master's beamsets (this is
-    what separates e.g. `AU4782` from `AU4782DREP`, which share runlengths),
-    (3) the plainer master (fewer CAT/REP yarns) when still tied. Returns the
-    best `(master, top_set, btm_set, distance, notes)`."""
-    best = None
-    for m in candidates:
-        top, btm, full, by_yarn = _assign(sets, merges, m)
-        dist = None
-        if top['rl'] is not None and btm['rl'] is not None:
-            dist = abs(top['rl'] - m.top.runlen) + abs(btm['rl'] - m.btm.runlen)
-        special = sum(t in _KEEP_FINISH for bar in (m.top, m.btm)
-                      for t in bar.yarn_desc.split())
-        score = (dist if dist is not None else float('inf'), full, special)
-        if best is None or score < best[0]:
-            best = (score, m, top, btm, dist, by_yarn)
-    _, m, top, btm, dist, by_yarn = best
-    notes = [] if by_yarn else ['yarn mismatch with master (assigned by bar position)']
-    if dist is not None and dist > rl_tolerance:
-        notes.append(f'!runlengths {dist:.1f} off {m.id} (a sibling construction?)')
-    return m, top, btm, dist, notes
-
-
-def _variant_letter(name: str, number: str) -> str:
-    """The letter immediately after the style number (`AU2958G-HA` -> `G`)."""
-    m = re.search(rf'(?<!\d){number}([A-Z])?', name.upper())
-    return (m.group(1) or '') if m else ''
-
-
-def _resolve(
-    row: Mapping[str, str], number: str, cands: list[_Master], skipped: list[str],
-    rl_tolerance: float,
-) -> Variant:
+def _resolve(row: Mapping[str, str], number: str, cands: list[_Master],
+             rl_tolerance: float) -> Variant:
     name = row['variant']
     issues: list[str] = []
     bars = _bars(row)
     sets = _sets(bars)
-    n_beams = int(_num(row.get('n_beams')) or 0)
-    if not cands:
-        issues.append(f"!master not knit in-house: {', '.join(skipped)}")
+    n_beams = _n_beams(row)
+    split_bars = tuple(b for s in sets if s['split'] for b in s['bars'])
 
     merges = []
     for s in sets:
@@ -422,41 +569,47 @@ def _resolve(
         merges.append(mg)
     if len(sets) != 2:
         issues.append(f'!{len(sets)} distinct merge(s) (need 2)')
-    for s in sets:
-        if s['ends'] in OBSOLETE_ENDS:
-            issues.append(f"!retired construction {s['ends']}")
-        elif s['ends'] not in KNOWN_ENDS:
-            issues.append(f"!unknown construction {s['ends']}")
-    if any(i.startswith('!') for i in issues) or any(m is None for m in merges):
+    if issues:
         return Variant(name, number, None, None, None, _num(row.get('rack_wt')),
-                       None, tuple(b for s in sets if s['split'] for b in s['bars']),
-                       None, tuple(issues))
+                       split_bars, None, tuple(issues))
 
-    letter = _variant_letter(name, number)
-    master, top_s, btm_s, dist, notes = _pick_master(sets, merges, cands, rl_tolerance)
-    issues += notes
-    # The letter is only worth flagging when runlength didn't settle it.
-    if (letter and letter != master.suffix and (dist is None or dist > 0.5)
-            and any(c.suffix == letter for c in cands)):
-        issues.append(f'letter {letter!r} disagrees with runlength choice {master.id!r}')
+    # The master whose representative this row matches exactly; failing that
+    # the nearest one within the runlength tolerance (same construction, every
+    # bar within `rl_tolerance`, smallest summed distance — a tie is
+    # ambiguous); failing that, excluded with the nearest master's differences.
+    fits = {m.id: (m, _match(sets, merges, n_beams, m)) for m in cands}
+    exact = [(m, f) for m, f in fits.values() if f.exact]
+    if exact:
+        if len(exact) > 1:
+            issues.append('several masters match exactly: ' + ', '.join(m.id for m, _ in exact))
+        master, fit = exact[0]
+    else:
+        close = sorted(((m, f) for m, f in fits.values() if f.within(rl_tolerance)),
+                       key=lambda mf: mf[1].rl_distance)
+        if not close:
+            m, f = min(fits.values(), key=lambda mf: (len(mf[1].diffs), mf[1].rl_distance))
+            what = '; '.join(list(f.diffs) + ([f.rl_text(m, sets)] if f.rl_text(m, sets) else []))
+            issues.append(f'!no master matched exactly; nearest {m.id} ({m.rep}): {what}')
+            return Variant(name, number, None, None, None, _num(row.get('rack_wt')),
+                           split_bars, None, tuple(issues))
+        if len(close) > 1 and abs(close[0][1].rl_distance - close[1][1].rl_distance) <= _RL_EPS:
+            names = ', '.join(f'{m.id} ({f.rl_distance:g})' for m, f in close[:2])
+            issues.append(f'!ambiguous: equally close within the runlength tolerance to {names}')
+            return Variant(name, number, None, None, None, _num(row.get('rack_wt')),
+                           split_bars, None, tuple(issues))
+        master, fit = close[0]
+        issues.append(f'runlength within tolerance of {master.id}: {fit.rl_text(master, sets)}')
+    order = fit.order
+    top_s, btm_s = sets[order[0]], sets[order[1]]
+    top_m, btm_m = merges[order[0]], merges[order[1]]
 
-    def spec(s: dict) -> BeamSetSpec:
-        return BeamSetSpec(merges[sets.index(s)], s['ends'], n_beams, s['split'], s['yarn'])
+    def spec(s: dict, mg: Merge) -> BeamSetSpec:
+        return BeamSetSpec(mg, s['ends'], n_beams, s['split'], s['yarn'])
 
-    top, btm = spec(top_s), spec(btm_s)
-    # A CAT / REP yarn on a bar whose master beamset isn't CAT / REP is a version
-    # of the style we no longer make.
-    for bs, mbar in ((top, master.top), (btm, master.btm)):
-        for f in bs.merge.finish:
-            if f not in mbar.yarn_desc.split():
-                what = 'cationic' if f == 'CAT' else 'Repreve'
-                issues.append(f'!{what} version of {master.id} (no longer produced)')
-
-    split_bars = tuple(b for s in sets if s['split'] for b in s['bars'])
+    top, btm = spec(top_s, top_m), spec(btm_s, btm_m)
     split_is_top = top_s['split'] if (top_s['split'] != btm_s['split']) else None
-    return Variant(name, number, master.id, top, btm,
-                   _num(row.get('rack_wt')), dist, split_bars, split_is_top,
-                   tuple(issues))
+    return Variant(name, number, master.id, top, btm, _num(row.get('rack_wt')),
+                   split_bars, split_is_top, tuple(issues))
 
 
 # ----- the map -------------------------------------------------------------
@@ -471,14 +624,26 @@ class VariantMap:
     excluded: dict[str, tuple[str, ...]]
     masters_without_variants: tuple[str, ...]
     master_beamsets: dict[str, tuple[str, str]]     # master id -> (top, btm) beamset
+    master_reps: dict[str, str]                      # master id -> representative variant
+    label_mismatches: dict[str, tuple[str, str]]     # master -> (ours, styles file's)
+    masters_skipped: dict[str, str]                  # master -> why it couldn't be defined
+    master_specs: dict[str, MasterSpec]              # master -> its representative's definition
+
+    def rack_wt(self, master: str) -> float | None:
+        """The master's rack weight: the average over its usable variants'
+        `rack_wt` (the representative included), None when none has one."""
+        wts = [v.rack_wt for v in self.variants.values()
+               if v.usable and v.master == master and v.rack_wt is not None]
+        return sum(wts) / len(wts) if wts else None
 
     def master_map(self) -> dict:
         """The per-master variant map, JSON-ready (see `write_variant_map`):
 
         ```
-        {"merges": {"<merge code>": {"denier", "flmnt", "luster", "ytype",
+        {"merges": {"<merge code>": {"denier", "vendor", "luster", "ytype",
                                      "yarn_desc"}},
          "masters": {"<master id>": {
+             "representative": "<variant>",
              "beamsets": {"top": "...", "btm": "..."},
              "recipes": [{"names": "A, B", "n_beams": 4,
                           "top": {"merge", "ends", "split", "beamset"},
@@ -498,7 +663,7 @@ class VariantMap:
             for bs in (v.top, v.btm):
                 if bs.yarn and bs.yarn.merge:
                     merges.setdefault(bs.yarn.merge, {
-                        'denier': bs.yarn.denier, 'flmnt': bs.yarn.flmnt,
+                        'denier': bs.yarn.denier, 'vendor': bs.yarn.vendor,
                         'luster': bs.yarn.luster, 'ytype': bs.yarn.ytype,
                         'yarn_desc': bs.merge.yarn_desc})
             key = (v.master,
@@ -510,6 +675,7 @@ class VariantMap:
         for key, names in groups.items():
             master, top, btm = specs[key]
             m = masters.setdefault(master, {
+                'representative': self.master_reps.get(master),
                 'beamsets': {'top': self.master_beamsets[master][0],
                              'btm': self.master_beamsets[master][1]},
                 'recipes': []})
@@ -544,8 +710,8 @@ class VariantMap:
 
     def report(self) -> str:
         """A human-readable audit: coverage, exclusions by reason, per-master
-        beam-set combinations / runlength fit / finish modifiers, the split-set
-        bar-position vs master-label check, and per-master yarn mismatches."""
+        representative / beam sets / combinations / yarn notes, the split-set
+        bar-position check, and label cross-checks against the styles file."""
         usable = [v for v in self.variants.values() if v.usable]
         lines = [
             f'variants carrying a master number: {len(self.variants)}',
@@ -556,11 +722,19 @@ class VariantMap:
         for iss in self.excluded.values():
             for i in iss:
                 if i.startswith('!'):
-                    reasons[re.sub(r"'.*'", "…", i[1:])] = reasons.get(re.sub(r"'.*'", "…", i[1:]), 0) + 1
+                    r = re.sub(r"'.*'", '…', i[1:])
+                    r = re.sub(r';.*', '', re.sub(r'nearest .*?\(.*?\)', 'nearest …', r))
+                    reasons[r] = reasons.get(r, 0) + 1
         for r, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
             lines.append(f'    - {n:4d}  {r}')
         if self.masters_without_variants:
             lines.append(f'  masters with NO usable variants: {", ".join(self.masters_without_variants)}')
+        for m, why in sorted(self.masters_skipped.items()):
+            lines.append(f'  master SKIPPED — {why}')
+        if self.label_mismatches:
+            lines.append('  beam-set labels differing from the styles file:')
+            for m, (ours, theirs) in sorted(self.label_mismatches.items()):
+                lines.append(f'    {m}: {ours}  (styles file: {theirs})')
 
         lines.append('\nper master (usable variants):')
         by_master: dict[str, list[Variant]] = {}
@@ -569,22 +743,29 @@ class VariantMap:
         for m, vs in sorted(by_master.items()):
             combos: dict[tuple[str, str], int] = {}
             fins: dict[str, int] = {}
-            dists = [v.rl_distance for v in vs if v.rl_distance is not None]
-            mism = sum('yarn mismatch' in ' '.join(v.issues) for v in vs)
-            letter_dis = sum('disagrees' in ' '.join(v.issues) for v in vs)
+            near = sum('within tolerance' in ' '.join(v.issues) for v in vs)
             for v in vs:
                 combos[(v.top.desc, v.btm.desc)] = combos.get((v.top.desc, v.btm.desc), 0) + 1
                 for spec in (v.top, v.btm):
                     for f in spec.merge.finish:
                         fins[f] = fins.get(f, 0) + 1
-            lines.append(f'  {m}: {len(vs)} variants; rl distance median='
-                         f'{sorted(dists)[len(dists)//2] if dists else "n/a"} '
-                         f'max={max(dists) if dists else "n/a"}'
-                         + (f'; yarn-mismatch={mism}' if mism else '')
-                         + (f'; letter-disagreements={letter_dis}' if letter_dis else '')
+            top, btm = self.master_beamsets[m]
+            lines.append(f'  {m} (rep {self.master_reps.get(m)}; top={top!r} btm={btm!r}): '
+                         f'{len(vs)} variants'
+                         + (f'; runlength-within-tolerance={near}' if near else '')
                          + (f'; finishes={dict(sorted(fins.items()))}' if fins else ''))
             for (t, b), n in sorted(combos.items(), key=lambda kv: -kv[1]):
                 lines.append(f'      {n:4d}  top={t!r:32} btm={b!r}')
+
+        lines.append('\nexcluded as not matching any master exactly (nearest master, what differed):')
+        near: dict[str, int] = {}
+        for iss in self.excluded.values():
+            for i in iss:
+                if i.startswith('!no master matched'):
+                    key = i.split('nearest ', 1)[1]
+                    near[key] = near.get(key, 0) + 1
+        for key, n in sorted(near.items(), key=lambda kv: -kv[1])[:60]:
+            lines.append(f'  {n:4d}  {key}')
 
         lines.append('\nsplit-lease set: TSV bar position vs the master label it landed on '
                      '(bar 1 is the bottom bar; styles differ in which yarn is split)')
@@ -600,30 +781,47 @@ class VariantMap:
 
 
 def read_greige_variants(
-    tsv_path: 'str | Path', styles: Iterable[Mapping[str, Any]], *,
-    skip_masters: Iterable[str] = NOT_KNIT_IN_HOUSE,
+    tsv_path: 'str | Path', masters: Iterable[Mapping[str, Any]], *,
+    styles: Iterable[Mapping[str, Any]] | None = None,
     rl_tolerance: float = RL_TOLERANCE,
 ) -> VariantMap:
-    """Build the maps from the variant TSV and the master greige-styles records
-    (the parsed JSON list — see `load_master_styles`). Variants of a master in
-    `skip_masters`, and rows whose bar runlengths are more than `rl_tolerance`
-    off their master, are recorded as excluded rather than mapped."""
-    skip = set(skip_masters)
-    all_masters = _masters(styles)
-    masters = {n: [m for m in ms if m.id not in skip] for n, ms in all_masters.items()}
-    skipped = {n: [m.id for m in ms if m.id in skip] for n, ms in all_masters.items()}
-    anchored = {n: re.compile(rf'(?<!\d){n}') for n in all_masters}
+    """Build the maps from the variant TSV and the master list (`{master,
+    variant}` records — see `load_master_list`). Each master is defined by its
+    representative variant's row; other rows sharing its style number are its
+    variants when they match that row exactly or, failing that, are the
+    nearest master with every bar's runlength within `rl_tolerance` (see the
+    module doc), else they are recorded as excluded. `styles` (the
+    greige-styles records) only cross-checks the representatives' beam-set
+    labels."""
+    master_list = list(masters)
+    with open(tsv_path, encoding='utf-8-sig', newline='') as fh:
+        rows = {r.get('variant', ''): r for r in csv.DictReader(fh, delimiter='\t')}
+
+    by_number: dict[str, list[_Master]] = {}
+    reps: dict[str, str] = {}
+    skipped: dict[str, str] = {}
+    for rec in master_list:
+        mid, rep = str(rec['master']), str(rec['variant'])
+        if rep not in rows:
+            raise ValueError(f'master {mid!r}: representative variant {rep!r} is not in {tsv_path}')
+        try:
+            m = _build_master(mid, rep, rows[rep])
+        except ValueError as e:
+            # A master the two-set model can't represent (one merge on both
+            # bars, non-polyester, no runlength): left out, reported.
+            skipped[mid] = str(e)
+            continue
+        by_number.setdefault(m.number, []).append(m)
+        reps[mid] = rep
+    anchored = {n: re.compile(rf'(?<!\d){n}') for n in by_number}
 
     variants: dict[str, Variant] = {}
-    with open(tsv_path, encoding='utf-8-sig', newline='') as fh:
-        for row in csv.DictReader(fh, delimiter='\t'):
-            name = row.get('variant', '')
-            hits = [n for n, rx in anchored.items() if rx.search(name)]
-            if not hits:
-                continue
-            number = hits[0]
-            variants[name] = _resolve(row, number, masters[number], skipped[number],
-                                      rl_tolerance)
+    for name, row in rows.items():
+        hits = [n for n, rx in anchored.items() if rx.search(name)]
+        if not hits:
+            continue
+        number = hits[0]
+        variants[name] = _resolve(row, number, by_number[number], rl_tolerance)
 
     merges: dict[Merge, set[str]] = {}
     combos: dict[tuple[str, str], list[str]] = {}
@@ -638,9 +836,20 @@ def read_greige_variants(
             merges.setdefault(spec.merge, set()).add(spec.desc)
         combos.setdefault((v.top.desc, v.btm.desc), []).append(v.name)
 
+    all_masters = [m for ms in by_number.values() for m in ms]
     covered = set(v2m.values())
-    missing = tuple(sorted(m.id for ms in masters.values() for m in ms
-                           if m.id not in covered))
+    missing = tuple(sorted(m.id for m in all_masters if m.id not in covered))
+    beamsets = {m.id: (m.top.beamset, m.btm.beamset) for m in all_masters}
+
+    label_mismatches: dict[str, tuple[str, str]] = {}
+    if styles is not None:
+        for s in styles:
+            if s.get('id') in beamsets:
+                theirs = (s['beam_cfg']['top']['beamset'], s['beam_cfg']['btm']['beamset'])
+                ours = beamsets[s['id']]
+                if ours != theirs:
+                    label_mismatches[s['id']] = (' | '.join(ours), ' | '.join(theirs))
+
     return VariantMap(
         variants=variants,
         merges_to_beamsets={k: frozenset(s) for k, s in merges.items()},
@@ -648,8 +857,11 @@ def read_greige_variants(
         variant_to_master=v2m,
         excluded=excluded,
         masters_without_variants=missing,
-        master_beamsets={m.id: (m.top.beamset, m.btm.beamset)
-                         for ms in all_masters.values() for m in ms},
+        master_beamsets=beamsets,
+        master_reps=reps,
+        label_mismatches=label_mismatches,
+        masters_skipped=skipped,
+        master_specs={m.id: _master_spec(m) for m in all_masters},
     )
 
 
@@ -681,7 +893,7 @@ class MergeInfo:
     """One inventory merge: the plant's description and the planner's yarn."""
     merge: str
     denier: str
-    flmnt: str
+    vendor: str | None
     luster: str
     ytype: str
     yarn_desc: str
@@ -722,6 +934,7 @@ class MasterVariants:
     btm_beamset: str
     recipes: tuple[Recipe, ...]
     by_merges: dict[tuple[str | None, str | None], tuple[Recipe, ...]]
+    representative: str | None = None
 
     def lookup(self, top_merge: str, btm_merge: str) -> tuple[Recipe, ...]:
         """Recipes using `top_merge` on the top bar and `btm_merge` on the
@@ -748,7 +961,12 @@ def read_variant_map(path: 'str | Path') -> VariantMapFile:
     """Load a file written by `write_variant_map`."""
     with open(path) as fh:
         data = json.load(fh)
-    merges = {code: MergeInfo(code, **info) for code, info in data['merges'].items()}
+    merges = {}
+    for code, info in data['merges'].items():
+        info = dict(info)
+        info.setdefault('vendor', None)
+        info.pop('flmnt', None)                 # older files
+        merges[code] = MergeInfo(code, **info)
     masters: dict[str, MasterVariants] = {}
     for mid, m in data['masters'].items():
         recipes = tuple(
@@ -763,5 +981,5 @@ def read_variant_map(path: 'str | Path') -> VariantMapFile:
             by.setdefault(r.key, []).append(r)
         masters[mid] = MasterVariants(
             mid, m['beamsets']['top'], m['beamsets']['btm'], recipes,
-            {k: tuple(v) for k, v in by.items()})
+            {k: tuple(v) for k, v in by.items()}, m.get('representative'))
     return VariantMapFile(merges, masters)

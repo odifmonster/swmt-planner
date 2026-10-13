@@ -40,8 +40,8 @@ no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **467 tests pass, 4 skip** (`python -m unittest discover -s
-> tests -p '*_tests.py'`). The 4 skips are the **SQL Server-gated** classes —
+> **Suite state:** **666 tests pass, 4 skip** (`python -m unittest discover -s
+> tests -p '*_tests.py'`; as of 2026-10-13 on branch `knit-only`). The 4 skips are the **SQL Server-gated** classes —
 > `persist_run` end-to-end plus the `sqlload` read layer against a live store —
 > which probe a `SWMT_TEST_*` SQL Server test database in `setUpClass` and skip
 > when the driver/server is unreachable. **No test database exists yet**, so they
@@ -283,7 +283,88 @@ This shrank the default planner run (fewer candidates / iterations), which is wh
 the dashboard read-layer tests moved to the synthetic fixture above. Detail:
 `INF_PLAN_TEST_SPEC.md` §1.3.2.
 
+## Knit-only branch — the planning tools (as of 2026-10-13)
+
+Branch `knit-only` (worktree `~/git-repos/swmt-projs/knit-only`) carries the
+knit planner as the plant now runs it. **Everything below is in the working
+tree, uncommitted** (68 files, ~7,800 lines added); the user commits. Inputs
+and run configs live in `~/git-repos/swmt-projs/knit-input-files/`
+(`master.json` for `plan infinite`, `retime.json` for `plan retime`, the
+exports as `machines.json` / `beam-sets.json` / `assigned-sets.json` /
+`demand.json` / `black-list.json`, the variant map + masters); plans go to
+`~/Desktop/Shawmut Projects/Scheduling/` (`knit_plan_<date>[_n].{xlsx,json}`,
+`tape_outs_*.txt`, `retime_*.txt`, Gantt `.html` from
+`scripts/make_gantt.py <plan.json> <out.html>`). The user edits inputs and
+configs themselves; the daily machine status table is built by the Claude
+skill `~/.claude/skills/reconcile-machine-status/` from the floor's exports.
+
+Commands (`plan …`, `planners/cli.py`):
+`infinite <config> -o <dir>` (the greedy planner), `retime <config> <prior
+plan.json> <tickets.json> -o <dir> [--keep-sets]` (realign a plan to the
+morning's status), `manual` (step-file replay), plus `machines` / `variants`
+/ `styles` input builders. The usual morning: `plan retime` yesterday's plan,
+then `plan infinite` with the retimed JSON as `prior_plan`.
+
+Landed this session, each design → spec → tests (DESIGN.md sections named):
+
+- **Sets described by evidence** (`schedule/DESIGN.md` "Beam-set
+  inventory", "Foreign bars"): mounted / queued sets take the export's or
+  the record's yarn, not the item's; a non-fitting mounted set is a
+  *foreign bar* (no run-up, taped out at the first plan); a non-fitting
+  queued set is *passed over* at the hang (`PassedOver`, with a `reason`).
+- **Sets assigned after planning** ("Assigning sets after planning"):
+  `schedule.assign_sets` hands stock to placeholder hangs in runout order
+  and relabels the schedule (`Machine.rebind_sets`); knits carry their
+  sets (`Knit.top_beam` / `btm_beam`, JSON and xlsx).
+- **Retimer** (`planners/retime/DESIGN.md`): two passes (placeholders,
+  then runout-order assignment), `--keep-sets`, and now **re-timing
+  rounds** — replay with the assigned sets named at real pounds until a
+  round assigns nothing (`MAX_ROUNDS` 6; sets refused at their hang are
+  held back and reported); `HangRecord.rolls` = rolls doffed off each set.
+- **Sticking to the prior plan** (`planners/infinite/DESIGN.md`): config
+  `prior_plan` (a retimed JSON); the pre-pass `recommit_prior` keeps prior
+  jobs inside `frozen_window` whose order (matched by item + due date) is
+  still **urgent and open** (week ≤ `reference_week_idx`); `prior_jobs`
+  sheet; JSON jobs carry `due_date` / `prior_job`.
+- **EOQ batching** for unique-setup low-volume items (`eoq_threshold_rolls`
+  / `eoq_batch_rolls`).
+- **Change cap + filling the wait** ("Changeover capacity", "Filling a
+  slot wait"): a third rationed kind `change` (one unit per machine
+  changed, whole-day period; master.json has 6/day); a move that must wait
+  for a slot knits its current item meanwhile as far as demand allows
+  (`Fill`, `Job.fill`).
+- **Blacklisted merges** (`schedule/DESIGN.md` "Blacklisted merges"):
+  config `blacklist` (a JSON list of merge codes); a flagged set fits
+  nothing and is never stock — withheld from picks, passed over in a
+  queue, taped out off a bar.
+
+**Approved design, not yet implemented:** assigned-set `status`
+(`"inventory"` default / `"staged"` / `"hung"`) — a hung set becomes the
+bar's unthreaded initial set (`init_*_threaded`), the first plan emits a
+`Threading` only, or an `Unhang` (new zero-duration activity, set back to
+stock) when it does not fit; `BeamSet.location` for queued sets. See
+`schedule/DESIGN.md` "Hung bars" and the `status` paragraph under File I/O,
+`planners/infinite/DESIGN.md` config comment, `planners/manual/DESIGN.md`
+`pending()`. Next step: implement, spec (SCHEDULE 6.x, INF_PLAN, manual),
+tests.
+
+**Parked (user's call, not designed):** the split-lease short-doff rule
+(a split-lease set running out mid-roll forces a short doff; counting is by
+400-lb ports: ≥ half a standard roll counts as half, styles ≤ 400 lbs count
+no half rolls); the retimer's `locate` treating a prior plan whose first
+job on a machine is an immediate changeover as a *wrong style* (seen on
+Q6 in the 10-13 plan — the machine is left at status, its jobs dropped).
+
+Spec files for all of this: `tests/spec-files/SCHEDULE_TEST_SPEC.md` (Phases
+5–7), `INF_PLAN_TEST_SPEC.md` (1.3.4–1.3.5, 1.5, 1.7–1.9), `RETIME_TEST_SPEC.md`,
+`RUN_TEST_SPEC.md` §5.
+
 ## Next concrete action
+
+On `knit-only`: implement the approved assigned-set `status` design above,
+then commit the branch (the user commits). The dashboard / SQL Server
+cut-over notes below predate this branch's work and still apply to the
+debug-log viewer, which this branch has not touched:
 
 Recently landed (working tree, pure suite green): `DebugLog` **composite PKs**,
 the two new tables (`run_configs` / `iteration_states`) end-to-end, the

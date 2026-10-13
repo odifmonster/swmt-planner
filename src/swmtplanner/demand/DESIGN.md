@@ -24,9 +24,13 @@ differ enough that combining them would obscure rather than clarify.
 `RlsItem` is constructed with:
 
 - `greige` — product reference, source of `safety` target (scalar lbs).
-- `start_date` — anchor for week 0's `due_date`. Week N's `due_date` is
-  `start_date + N * 7 days`, so week 0 is due at `start_date` itself and
-  the four-week horizon ends at `start_date + 21 days` (week 3).
+- `start_date` — anchor for week 0's `due_date`. Due dates fall on
+  **Mondays**: week N is due at midnight on the Monday that opens
+  `start_date`'s week, plus N weeks — so week 0 is due at the start of the
+  planning week (already due when the run starts mid-week) and the
+  four-week horizon ends on the Monday three weeks later (week 3). The
+  demand pull buckets by week; anchoring on the week's Monday keeps the
+  buckets aligned whatever day the planner runs on.
 - `on_hand_lbs` — inventory available at `start_date`.
 - `lead_time` — the carry duration before which early lbs are not penalized.
 - `weekly_demand` — 4 `WeeklyDemand` records (one per week, fixed horizon).
@@ -163,9 +167,9 @@ per-order late-reporting attributes:
 
 - `RawOrder.late_lbs` — the subset of `allocated_lbs` whose
   `availability_time > week.due_date`. The view-level `lateness`
-  scalar still aggregates the exponential lb-day cost; `late_lbs` is
-  the raw lbs view that the scheduler turns into an operator-facing
-  table.
+  scalar aggregates the order-share cost; `late_lbs` is the raw lbs
+  view that the scheduler turns into an operator-facing table (with
+  `late_lbs / week.qty_lbs` as the late share).
 - `RawOrder.late_fill_date` — the latest `availability_time` across
   the chunks that contributed to `allocated_lbs`. When the order is
   fully filled, this is the moment it became whole; when recompute
@@ -176,6 +180,15 @@ per-order late-reporting attributes:
 
 Anything left in the stream after week 3 is fully covered = excess. The raw
 view ignores excess and carrying — it only cares about lateness.
+
+Once the stream is exhausted, the remaining weeks are **uncovered**: no roll
+in `jobs` reaches them, and the walk charges nothing for them — lateness
+accrues on deliveries, and there is no delivery. Making the scheduler feel
+the cost of leaving an order uncovered is the scheduler's job (its priority
+cost, see "Priority cost" in `planners/infinite/DESIGN.md`), not the view's.
+A *lateness floor* that charged uncovered lbs inside this view at a
+predicted fill time was tried in 2026-10 and dropped; the view is realized
+lateness only.
 
 ## Allocation — Safety-aware view
 
@@ -228,14 +241,53 @@ returns all four components separately rather than pre-combined.
 
 ### Raw view
 
-**`lateness`** — exponential-shape lb-day quantity. Each lb assigned to an
-order has an `availability_time`; if it's past `due_date`, that lb accrues
-contribution for each day it stays past due, weighted by **`2 ** days_late`**
-(the cost doubles for each additional day). This approximates the real-world
-tiered shape (expedite → supply-chain disruption → customer loss) while
-keeping the curve monotonically increasing past the last real tier. The
-doubling factor is hard-coded in the view for now; if it needs to change we
-revisit then. The raw view reports nothing else — no carrying, no excess.
+**`lateness`** — order-share × days quantity, linear for a week and
+exponential beyond it. Each lb assigned to an order has an
+`availability_time`; if it's past `due_date`, it contributes its **share of
+the gross order** — `lbs / week.qty_lbs`, the week's demand as loaded, before
+on-hand is netted — times `lateness_factor(days_late)`:
+
+```
+contribution = (lbs_delivered_late / week.qty_lbs) × lateness_factor(days_late)
+```
+
+So an order delivered entirely a week late scores `lateness_factor(7)`
+whether it is 740 lbs or 20,000, and a delivery covering half of it scores
+half that. The size of an order says little about how serious its lateness
+is: further down the supply chain the number of items grows while each
+requirement shrinks, leaving many critical orders of half a roll or less,
+and a per-pound cost would let one roll of a large order outweigh the whole
+of a small one. (It did: a planner valuing pounds took the only machine set
+up for a 1,480-lb week-0 order to make one roll of a 19,000-lb order, and
+the small order ran three weeks late.) The shape in days:
+
+```
+lateness_factor(d) = d                         for d <= LINEAR_DAYS (7)
+                   = 7 × 2 ** (d − 7)          beyond — doubling per day
+                   = 0                         when not late
+```
+
+So a delivery up to a week late costs a plain order-share-day; past a
+week the cost doubles for each further day, continuously from the linear
+part (7 at the boundary, 14 the day after, about 900 at two weeks). A
+doubling from day 3 was tried and dropped: with every week-0 order already
+past three days when planning starts, the oldest backlog swamped every
+other term, tape-outs doubled and lateness got worse.
+That approximates the real-world tiered shape (expedite → supply-chain
+disruption → customer loss) while keeping the curve monotonically
+increasing past the last real tier, and without letting a two-week-late
+order dwarf every other term the way pure doubling did (`2 ** 14`, 16,384
+per lb, against a tape-out weighted in the thousands). `LINEAR_DAYS` and the
+doubling are hard-coded in the view (`view.lateness_factor`); if they need to
+change we revisit then. The scheduler's `lateness` weight is therefore "the
+cost of one whole order one day late"; drainage, carrying and excess stay in
+pounds, since they describe the safety pool and inventory, where pounds are
+the physical quantity. The raw view reports nothing else — no carrying, no
+excess.
+
+The scheduler's priority cost values a *predicted* late delivery with the
+same `lateness_factor` and the same share-of-the-gross-order quantity, so
+its weight is in the same units as this one.
 
 ### Safety-aware view
 
@@ -362,7 +414,9 @@ item. Per-row fields: greige id (looked up in `greige_by_id` for the
 `Greige` instance), on-hand lbs, lead time, and the weekly demand
 series. Item-side fields (yarn, tgt_wt, safety, machines) come from
 the resolved `Greige`, not from the demand file — those are products-
-submodule data.
+submodule data. A row whose greige id is not in `greige_by_id` — the
+demand pull still lists styles the plant no longer knits in-house — is
+skipped with a warning naming it, not an error.
 
 No writer is exported from `demand/`: the human-readable output of a
 planning run is the `PlanReport`'s per-item job snapshot, written by
@@ -371,8 +425,8 @@ the top-level CLI in `planners/infinite/`.
 ## Test-placement contract
 
 ```
-rls_item.cost_if(hypothetical_jobs) -> CostComponents(lateness, drainage,
-                                                      carrying, excess)
+rls_item.cost_if(hypothetical_jobs, detail_sink=None)
+    -> CostComponents(lateness, drainage, carrying, excess)
 ```
 
 Internally runs each view's `recompute` against `self.jobs + hypothetical_jobs`

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, TYPE_CHECKING
 
-from swmtplanner.schedule import Job, ProductionPlan, Inventory
+from swmtplanner.schedule import Job, ProductionPlan, Inventory, ChangeoverCapacity
 
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
@@ -25,10 +25,9 @@ class Move:
     for the production records.
 
     `week_idx` is the week index of the order this move addresses, or
-    `None` for safety-replenishment moves. The cost layer uses it to
-    form the `OrderKey` for priority-cost lookup; defaults to `None`
-    so directly-constructed `Move`s in tests don't have to set it
-    when priority weights are zero.
+    `None` for safety-replenishment moves; carried for the reports and
+    the tape-out decision log. Defaults to `None` so directly-constructed
+    `Move`s in tests don't have to set it.
 
     `order_remaining_lbs` is the unfulfilled lbs on the targeted order at
     enumeration time (the eligible `RegularOrder.lbs` / `SafetyOrder.lbs`).
@@ -42,6 +41,28 @@ class Move:
     plan: ProductionPlan
     week_idx: int | None = None
     order_remaining_lbs: float = 0.0
+
+
+@dataclass
+class PriorCommit:
+    """One job of the prior plan and its fate in this run (see "Sticking to
+    the prior plan" in DESIGN.md): the machine and the prior plan's job id,
+    its item and whole rolls left, the prior plan's target order id and
+    that order's due date, its aligned start; `status` is `'open'` until
+    the pre-pass recommits it (`'consumed'`, with the new job's id) or
+    passes it over (`'dropped'`, with the reason in `note`); a job left to
+    the loop stays `'open'` with the note `not urgent` or `outside the
+    frozen window`."""
+    machine: str
+    prior_job: str
+    item: str
+    rolls: int
+    order: str | None
+    due_date: datetime | None
+    start: datetime
+    status: Literal['open', 'consumed', 'dropped'] = 'open'
+    job_id: str | None = None
+    note: str = ''
 
 
 @dataclass
@@ -71,15 +92,22 @@ class State:
     # `commit_move` changes it. Empty when the run has no `beam_sets` input,
     # in which case every hang invents a set.
     inventory: Inventory = field(default_factory=dict)
+    # The plant's changeover ration (see `schedule/DESIGN.md`, "Changeover
+    # capacity"). Candidate plans are laid out against its committed
+    # bookings (`plan_production(..., capacity=)`); only `commit_move` books.
+    # Constrains nothing when the run has no `changeover_capacity` input.
+    capacity: ChangeoverCapacity = field(
+        default_factory=lambda: ChangeoverCapacity(None, {}))
     # Tuneable: the right value depends on plant size + planning load.
-    # 24h is a placeholder; refined after testing per DESIGN.md.
+    # 24h is the default; a run sets its own in the config's `state` block.
     window_advance_amount: timedelta = field(
         default_factory=lambda: timedelta(hours=24),
     )
     # Allowance under `due_date - lead_time` for carrying-avoidance idle.
     # Production may start this much earlier than the strict no-carry
     # moment, trading a bounded amount of carrying cost for less idle.
-    # Tuneable; 24h is the initial guess.
+    # Tuneable; 24h is the default; a run sets its own in the config's
+    # `state` block.
     carrying_avoidance_margin: timedelta = field(
         default_factory=lambda: timedelta(hours=24),
     )
@@ -97,13 +125,13 @@ class State:
     planning_horizon_buffer: timedelta = field(
         default_factory=lambda: timedelta(weeks=4),
     )
-    # --- Phase 2: priority-assignment reference week ---
-    # The right edge of the "urgent" bucket in `assign_priorities`. Orders
-    # with `week_idx <= reference_week_idx` are urgent regulars (rank above
-    # any safety order); orders past it are future regulars (rank below
-    # safety). Starts at 1 — next week's demand should be in production
-    # this week — and the main loop advances it forward as urgent items
-    # get filled.
+    # --- Phase 2: reference week ---
+    # The right edge of the "urgent" bucket in `coordination.eligible_orders`.
+    # An item's regular order with `week_idx <= reference_week_idx` is
+    # urgent and takes precedence over its safety order; one past it yields
+    # to safety replenishment first. Starts at 1 — next week's demand should
+    # be in production this week — and the main loop advances it forward as
+    # urgent items get filled.
     reference_week_idx: int = 1
     # How many weeks `advance_reference_week()` advances per call.
     reference_advance_amount: int = 1
@@ -112,6 +140,19 @@ class State:
     # main loop calls `advance_reference_week()` until met or until the
     # reference week exceeds the latest order's week_idx.
     reference_threshold: int = 1
+    # --- Economic order quantity (see "Move sizing" in DESIGN.md) ---
+    # A regular move for a unique-setup item sized at or under
+    # `eoq_threshold_rolls` rolls is batched up to `eoq_batch_rolls` rolls
+    # of the item's later demand.
+    eoq_threshold_rolls: int = 3
+    eoq_batch_rolls: int = 4
+    # --- Sticking to the prior plan ---
+    # The prior plan's jobs, per machine in start order, each with its fate
+    # (`PriorCommit`). Empty without a prior plan.
+    prior: dict[str, list[PriorCommit]] = field(default_factory=dict)
+    # How far into the prior plan the pre-pass recommits: only jobs starting
+    # before `start_date + frozen_window`; None (the default) is unbounded.
+    frozen_window: timedelta | None = None
 
     def commit_move(self, move: Move) -> None:
         """Apply `move` to the appropriate machine and rls_items. The
@@ -156,6 +197,8 @@ class State:
                     break
         for bs in move.plan.beam_sets_returned:
             self.inventory.setdefault(bs.desc.physical, []).append(bs)
+        for kind, day, units, _start in move.plan.capacity_taken:
+            self.capacity.book(kind, day, units)
 
     def advance_window(self) -> None:
         """Extend `window_end` forward by `window_advance_amount`. Called
@@ -168,6 +211,6 @@ class State:
         `reference_advance_amount`. Called by the main loop's reference-
         week-advance step when the count of items with at least one
         unmet `RegularOrder` at or before `reference_week_idx` falls
-        below `reference_threshold` (see `coordination.assign_priorities`
-        for how the reference week feeds into the priority sort)."""
+        below `reference_threshold` (see `coordination.eligible_orders`
+        for how the reference week feeds into eligibility)."""
         self.reference_week_idx += self.reference_advance_amount

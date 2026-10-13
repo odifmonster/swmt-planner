@@ -39,7 +39,19 @@ The planner is invoked against:
 - `rls_items: dict[str, RlsItem]` — keyed by greige id, already
   constructed with weekly demand and on-hand inventory.
 - `start_date: datetime` — the planning anchor; matches each
-  `RlsItem.start_date`.
+  `RlsItem.start_date`. It is when the machines' starting state was
+  identified.
+- `change_date: datetime` (>= `start_date`, default equal to it) — when
+  the plant can first change a machine over. Time passes between the
+  scheduler running, the plan reaching the floor, and a changeover
+  actually being possible; meanwhile every machine keeps running what it
+  is running. The loader (`run.load_inputs`) runs each machine up to
+  `change_date` on its current item before the planner sees it —
+  `Machine.run_until`: the roll in progress plus every whole roll that
+  starts before `change_date`, committed like any move (machine schedule,
+  the item's demand, the inventory); a machine with nothing to run idles
+  to `change_date` — so every schedule tail is at or past it and no
+  changeover can be placed earlier.
 - `weights` — cost-weighting config that the costing module consumes
   (see below).
 
@@ -67,12 +79,18 @@ State
                                     # physical description (see
                                     # schedule/DESIGN.md "Beam-set inventory");
                                     # empty when no beam_sets input was given
+  capacity: ChangeoverCapacity      # the plant's rations per day: changes of
+                                    # any kind, tape-outs, pattern changes (see
+                                    # schedule/DESIGN.md "Changeover capacity");
+                                    # unlimited when no changeover_capacity
+                                    # input was given
   window_end: datetime              # right edge of the decision window
   reference_week_idx: int           # right edge of the priority "urgent" bucket
   # tuneable thresholds and step sizes (window_advance_amount,
   # carrying_avoidance_margin, candidate_threshold,
   # reference_advance_amount, reference_threshold,
-  # planning_horizon_buffer)
+  # planning_horizon_buffer, frozen_window, eoq_threshold_rolls,
+  # eoq_batch_rolls)
   commit_move(move) -> None
   advance_window() -> None          # extends window_end forward
   advance_reference_week() -> None  # extends reference_week_idx forward
@@ -92,7 +110,9 @@ dicts through call signatures. It owns three mutation operations:
   `plan.beam_sets_returned` — taped-out sets carrying their remaining lbs
   and the tape-out's end as `avail_date` — are added back. Candidate plans
   are enumerated against the same `inventory` and never mutate it, so only
-  the committed move changes the stock.
+  the committed move changes the stock. Likewise the plan's
+  `capacity_taken` slots are booked on `capacity`; candidates are planned
+  against the committed bookings and never book.
 - `advance_window` extends `window_end` forward so additional decisions
   become eligible (see "Decision window" below).
 - `advance_reference_week` extends `reference_week_idx` forward so
@@ -117,7 +137,8 @@ one number:
    and accumulate:
    - One `tape_out_single` per `TapeOut(bars='top')` or
      `TapeOut(bars='btm')`.
-   - One `tape_out_both` per `TapeOut(bars='both')`.
+   - One `tape_out_both` per `TapeOut(bars='both')`. An `Unhang` (a
+     never-threaded set taken off again) costs nothing.
    - One per changeover activity, by type (the activity class carries the
      semantic — there is no `is_family_change` flag): `style_change` per
      `StyleChange` (a new machine's uniform reconfigure), `runner_change`
@@ -145,14 +166,15 @@ one number:
 3. **Cross-cutting aggregates** (Phase 2+). Penalties that compare each
    candidate against the others in the same iteration's pool — costs no
    single item's or machine's view can capture alone. Phase 2 adds three:
-   - **Priority cost** — for each move, sum the *predicted lateness
-     lb-days* across every higher-priority regular order under the
-     assumption that, if the planner doesn't address them now, those
-     orders won't ship until at least one day past their `due_date` or
-     until the earliest decision point on a different machine —
-     whichever is later. Weighted by `w.priority`. The result is an
-     opportunity cost: the higher-priority orders being deferred by
-     this move. See "Priority cost" below for the formula.
+   - **Priority cost** — for each move, sum the *predicted lateness*
+     of every higher-priority regular order under the assumption that,
+     if the planner doesn't address them now, each ships one week
+     after the earliest decision point on a different machine. Each
+     order's predicted lateness has the same shape as realized
+     lateness (share of the gross order × the week-linear-then-doubling
+     factor). Weighted by `w.priority`. The result is an opportunity
+     cost: the higher-priority orders being deferred by this move. See
+     "Priority cost" below for the formula.
    - **Level-loading cost** — `work_hours_delta × w.level_loading` per
      move, where the delta is from the earliest decision point in the
      candidate pool. Encourages spreading work across machines instead
@@ -163,25 +185,37 @@ one number:
      faster and easier to change over, so we'd rather route work to
      them whenever the candidate pool offers the choice.
 
-   See "Plant-wide coordination" below for all three. Future cross-
-   cutting terms — once real-data behavior tells us priority +
-   level-loading + new-machine preference isn't enough — may include
-   plant-wide total excess, per-machine utilization imbalance, and
-   aggregate changeover time.
+   - **Recovery cost** — a move that takes a machine out of the set
+     able to make some items cheaply (a tape-out loses the old yarn's
+     items, an old machine's pattern change loses the old family's) is
+     charged the predicted lateness of the open demand on those items
+     that the remaining cheap machines cannot cover on time, at the fill
+     time it would take to get the items back on a machine — weighted
+     across the recovery routes the plant has available (style change,
+     runner change, pattern change, tape-out) and their slot waits.
+     Weighted by `w.recovery`. See "Changeover capacity" below.
+
+   See "Plant-wide coordination" and "Changeover capacity" below. Future
+   cross-cutting terms — once real-data behavior tells us these aren't
+   enough — may include plant-wide total excess, per-machine utilization
+   imbalance, and aggregate changeover time.
 
 ```
 CostWeights
   # per-item demand weights (Phase 1)
-  lateness, drainage, carrying, excess: float
+  lateness: float                                        # per whole order per day late (share of the gross order × days shape)
+  drainage, carrying, excess: float                      # per lb-day / per lb
   # per-machine schedule weights (Phase 1)
   tape_out_single, tape_out_both: float                  # per occurrence
   style_change, runner_change, pattern_change: float     # per changeover, by type
   idle_time: float                                       # per work-hour
   waste_lbs: float                                       # per lb of discarded Waste
   # cross-cutting weights (Phase 2)
-  priority: float                                        # per rank step
+  priority: float                                        # per whole higher-priority order per predicted day late (same units as lateness)
   level_loading: float                                   # per work-hour delta from earliest DP
   old_machine: float                                     # per move on a legacy machine when a new one is candidate-available
+  # changeover-capacity weight
+  recovery: float                                        # per whole stranded order per predicted day late (same units as lateness)
 
 Costing
   score(state) -> float                                  # current state's score (no ctx — cross-cutting costs are per-move)
@@ -190,13 +224,12 @@ Costing
 
 `ctx` is a `ScoringContext` (see "Plant-wide coordination" below) that
 bundles the priorities dict, the earliest DP time, and the
-new-machine-availability dict so the scorer can
-compute the cross-cutting cost contributions without re-running the
-priority sort or the candidate-wide min-DP scan. Only
-`score_after_move` consumes `ctx`; `score(state)` reports the per-item
-+ per-machine portion of the score for a state with no in-iteration
-move under consideration (e.g., the post-loop final score in
-`PlanReport.total_score`).
+new-machine-availability dict so the scorer can compute the
+cross-cutting cost contributions without re-running the priority sort
+or the candidate-wide min-DP scan. Only `score_after_move` consumes
+`ctx`; `score(state)` reports the per-item + per-machine portion of the
+score for a state with no in-iteration move under consideration (e.g.,
+the post-loop final score in `PlanReport.total_score`).
 
 `score_after_move` is the loop's hot path. It computes what `score`
 would return if `move` were committed, without actually mutating
@@ -216,13 +249,13 @@ its table schema and the planner's population flow.
 ### `coordination/` (Phase 2)
 
 Plant-wide relationships across candidate orders and decision points.
-Holds the cross-cutting identity (`OrderKey`), the scoring bundle
-(`ScoringContext`), and the priority ranker (`assign_priorities`). The
-costing layer consumes a `ScoringContext` but doesn't own its
-construction — `coordination/` does, so the priority sort and the
-shape of the cross-candidate inputs can evolve without touching
-`costing/` or `loop/`. See "Plant-wide coordination" below for the
-mechanism.
+Holds the eligible-order types (`RegularOrder`, `SafetyOrder`), the
+order identity (`OrderKey`), the scoring bundle (`ScoringContext`), and
+the priority ranker (`assign_priorities`). The costing layer consumes a
+`ScoringContext` but doesn't own its construction — `coordination/`
+does, so the priority sort and the shape of the cross-candidate inputs
+can evolve without touching `costing/` or `loop/`. See "Plant-wide
+coordination" below for the mechanism.
 
 ### `loop/`
 
@@ -246,6 +279,10 @@ plan(state, costing, debuglog=None) -> PlanReport
 
 `plan` is the entrypoint. It iterates:
 
+0. **Start from the prior plan** (once, before the loop, when the run
+   has one — see "Sticking to the prior plan"): recommit every prior job
+   inside the frozen window whose order is still urgent and open, so the
+   loop plans only what is left.
 1. **Advance the reference week** while the count of items with at
    least one unmet `RegularOrder` at or before
    `state.reference_week_idx` falls below `state.reference_threshold` —
@@ -285,6 +322,9 @@ PlanReport
   unmet_lbs_by_item_week: dict[tuple[str, int], float]
   # which orders ship late and when they finish filling
   late_orders: tuple[RawOrder, ...]
+  # the prior plan's jobs, each with its fate in this run (empty without
+  # a prior plan) — see "Sticking to the prior plan"
+  prior: tuple[PriorCommit, ...]
 ```
 
 The full schedules also remain on the `Machine` instances inside
@@ -309,6 +349,121 @@ move exactly as the hot path does. When absent (the default), the loop
 scores via the scalar `score_after_move` and nothing is logged. The
 log object, its tables, and the population flow are owned by the
 standalone `swmtplanner.debuglog` module — see `debuglog/DESIGN.md`.
+
+## Sticking to the prior plan
+
+A plan the floor has been following should not be thrown away by the
+next run: a machine the previous plan had changing over on Wednesday
+should still change over on Wednesday, not be re-decided on Monday to
+something that scores a little better. The run is given the previous
+plan and starts from it: every prior job inside the **frozen window**
+whose order is **still urgent and open** is recommitted before the loop
+plans anything, and the loop then schedules only the demand that is
+left. Nothing else is held — a prior job for a later week, for an order
+since filled, or beyond the window is left to the loop to re-decide.
+
+**The prior plan is a retimed plan.** The config names the previous
+plan's schedule JSON (`prior_plan`) **after** `plan retime` has realigned
+it to today's status — rolls already doffed consumed, early changes and
+wrong-style machines dealt with, the remaining jobs re-timed from the
+status. Realigning is the retimer's whole job and the planner does none
+of it: it reads the file as it is (the schedule-JSON job reader the
+retimer uses, `planners/retime.prior_jobs`), so the usual morning is
+`plan retime` on yesterday's plan, then `plan infinite` with the retimed
+plan as `prior_plan`. The result is, per machine, the prior jobs in order
+with their item, roll count, target order, due date and start time. A job
+with no target order (a run-up job) is never recommitted — the load's own
+run-up covers the current item. The planner's config and the retime's
+should describe the same morning (same dates, machines file and
+inventory), or the prior jobs' times will not line up with the machines
+the planner loads.
+
+**Which prior jobs are kept.** A prior job is kept when the order it was
+raised for is still **urgent and open** in this run: the item's regular
+order with the job's `due_date` has `week_idx <= reference_week_idx`
+(this week's and next week's demand, at the reference week's starting
+value of 1) and remaining lbs. Last week's plan was made for last week's
+demand; what it decided for the demand that is now due is kept, and
+everything else — a job for a later week, a safety job, an order since
+filled — is re-decided by the loop, which sees today's demand. How many
+of the kept changes the floor can take in a day is bounded separately,
+by the change ration (see "Changeover capacity"): a kept job whose change
+the day cannot take waits for the next slot, knitting the current item
+meanwhile where the plant still wants it, exactly as a loop move does.
+
+Demand moves between weeks from one run to the next, so the matching is
+by **item and due date**, not order id: order ids count weeks from each
+run's `start_date`, so `P3@AU8154` last week is `P2@AU8154` this week,
+while the due date is the same date in both. The schedule JSON carries
+each job's `due_date` for this.
+
+**The frozen window** bounds how far into the prior plan the pre-pass
+looks: `state.frozen_window`, a duration in the `state` block, keeps
+only prior jobs whose aligned **start** is before `start_date +
+frozen_window`. A job starting at or past that is left `open` with the
+note `outside the frozen window` — the loop re-decides it. Left unset
+(`None`, the default) the window is unbounded and every needed prior job
+is recommitted.
+
+**The pre-pass.** Before the loop's first iteration, the prior jobs are
+walked in **prior start order across machines** (so an earlier tape-out
+claims its ration slot before a later one, as the prior plan laid them
+out). Each is a `PriorCommit`:
+
+```
+PriorCommit
+  machine: str
+  prior_job: str           # the job's id in the prior plan
+  item: str
+  rolls: int               # whole rolls left on it after alignment
+  order: str | None        # the prior plan's target order id
+  due_date: datetime | None
+  start: datetime          # its aligned start
+  status: 'open' | 'consumed' | 'dropped'
+  job_id: str | None       # the job this run committed for it
+  note: str                # why it was dropped, or left open
+
+State.prior: dict[str, list[PriorCommit]]     # per machine, in start order
+```
+
+For each, in that order:
+
+- a job whose order is urgent and open is planned with
+  `plan_production(item, rolls × tgt_wt, 'schedule_tail', tgt_order=<the
+  matched order's id>, prior_job=<its prior id>, fill=<the current item's
+  fill>)` against the inventory and the rations — the changeover, if the
+  machine is on another item, happens at its schedule tail, as the retime
+  replays it, and waits for a slot (filled with the current item, see
+  "Filling a slot wait") when the day's are taken — committed through
+  `State.commit_move`, and marked `consumed` with the new job's id (the
+  new `Job` records the prior job it came from, `Job.prior_job`, written
+  to the schedule JSON as `prior_job`). The prior roll count is kept
+  whatever the demand now is — the job was sized when the floor started
+  following it — and the demand it produces flows to the item's orders
+  as any job's does, so a later prior job for the same order may find it
+  filled;
+- a job whose order is open but past the reference week is left `open`
+  with the note `not urgent`; one whose order has no remaining lbs is
+  `dropped (order filled)`; a safety job, one whose order the run cannot
+  match by item and due date, or one for an item the run does not have
+  is `dropped (no such order)`; one starting at or past the frozen
+  window's end is left `open` with the note `outside the frozen window`;
+  one whose item the machine can no longer run, or that
+  `plan_production` refuses, is `dropped` with the reason. Every job left
+  `open` is the loop's to re-decide.
+
+Because the walk is in start order, a machine's prior sequence inside
+the window is kept whole except where a job is dropped, in which case
+the jobs after it move up to the tail. The loop then runs exactly as
+before on the state the pre-pass left — the recommitted jobs are ordinary
+committed jobs to it. The decision window and reference week are
+untouched by the pre-pass.
+
+**Outputs.** `PlanReport.prior` lists every prior job with its fate;
+the xlsx gains a `prior_jobs` sheet (machine, prior_job, item, rolls,
+order, due_date, start, status, job_id, note) and the CLI prints the
+counts after the score. The debug log records nothing for the pre-pass —
+its `iteration_log` rows are the scored iterations.
 
 ## Candidate enumeration
 
@@ -407,28 +562,145 @@ if producible_cap == 0:
     cap_end       = cap_end + 7 days   # bump to end of next ISO week
     producible_cap = machine.producible_lbs_through(
                        item, end=cap_end, start=effective_start)
-move.lbs = min(
-    order_lbs,    # remaining_lbs of the regular order, OR
-                  # safety_target - safety_pool for the safety order
-    producible_cap,
-)
+target_lbs = safety_target - safety_pool          # safety order
+target_lbs = max(order_lbs, open_demand(item))    # regular order
+    # order_lbs         = remaining_lbs of the targeted (earliest unmet) order
+    # open_demand(item) = Σ remaining_lbs over the item's unmet regular
+    #   orders with week_idx <= state.reference_week_idx
+if regular and unique_setup(item) and target_lbs <= eoq_threshold_rolls × tgt_wt:
+    target_lbs = batched_demand(item)             # economic order quantity, below
+    move.lbs   = target_lbs                       # the batch is not capped at the week
+else:
+    move.lbs   = min(target_lbs, producible_cap)
 ```
 
+#### Open-demand sizing
+
+A regular move is sized to the item's whole open demand — every unmet
+regular order through the reference week, the same "should be in
+production now" bucket that makes an order urgent in `eligible_orders`
+— rather than to the one order it targets. This holds whether the move
+changes the machine's item or continues it; a safety order is its gap.
+The targeted order (`tgt_order`, the earliest unmet week) is unchanged;
+the demand views allocate the extra rolls to the later weeks in their
+normal way, so carrying and excess still apply to them, and the
+carrying-avoidance idle is still driven by the earliest order's due
+date.
+
+The reason is the setup. A tape-out or pattern change is charged once,
+at the move that makes it; nothing in the score remembers it afterwards
+and nothing values leaving the machine on the yarn. Sized to one order,
+a move could be a single roll: on the 2026-09-30 inputs I4, I9 and K10
+were each taped both bars for one 740-lb roll of week-0 AU4583 on
+10-01, sat idle, and were taped again for AU7389H on 10-09 while
+10,360 lbs of AU4583 for weeks 1 and 2 went unmade. Sized to the open
+demand, the same move is a week's worth of AU4583 (the cap still
+applies), the setup is scored against the run it actually buys, and the
+machine stays on the yarn until the backlog it was set up for is
+covered.
+
+Continuations are sized the same way on purpose. A first cut sized only
+the changeover moves and left a continuation at its single order, and
+that mismatch cost yarn the other way: K10 started on AU6563 with
+1,480 lbs of week-0 demand, made one roll, and then its 740-lb AU6563
+continuation lost to a 2,960-lb AU4583 changeover on the same machine;
+the last AU6563 roll was bought with a tape-out on I3 two weeks later.
+With both sized to open demand the comparison is like for like, and a
+machine already on the right yarn brings its whole backlog to it. Where
+an item has only one week open the two sizes coincide, so this does
+not push machines further ahead than before.
+
+The demand bucket is the reference week, not the decision window: the
+decision window is about which machines are free (time), the reference
+week is about which demand the planner considers due (weeks), and it is
+the latter that answers "how much of this item should this machine
+run". A future regular (past the reference week) is sized to itself.
+
+#### Economic order quantity for unique setups
+
+Open-demand sizing still leaves one case where the setup is bought for
+almost nothing: an item that needs a roll or two a week and is the
+**only item that runs its yarn**. Nothing else can follow it on the
+machine, so every week's roll or two costs a tape-out in and a tape-out
+out. For such an item the planner batches the demand instead — an
+economic order quantity — and sizes the move to several weeks at once.
+
+An item's **setup** is the pair of physical beam-set descriptions its
+bars call for (`BeamSetDesc.physical` of its top and bottom labels —
+split lease aside, denier by class). The setup is **unique** when no
+other item among the run's demand items (`state.rls_items`) has the same
+pair; items without demand this run are not counted, since nothing will
+be scheduled on their yarn anyway. `coordination.unique_setups(state)`
+is the set of such item ids, built once per enumeration.
+
+When a regular move's open-demand size for a unique-setup item is
+**`eoq_threshold_rolls` rolls or fewer** (3 by default), the move is
+sized to `batched_demand(item)` instead: the item's unmet regular
+orders in week order — the open ones and then the later weeks — summed
+until the total reaches **`eoq_batch_rolls` rolls** (4 by default) or
+every order on the schedule has been pulled in. The batch is then
+rounded down to whole rolls as any move is, so an item with 2½ rolls of
+demand in total still makes 2. A batched move is **not capped at the
+week**: the cap exists to keep ordinary moves to a week's worth so the
+decision window can spread work, and a batch is by construction more
+than a week's worth — cutting it back would defeat the batching. Both
+thresholds are `State` tunables settable in the config's `state` block;
+`eoq_threshold_rolls = 0` switches batching off, since no move is sized
+at zero rolls.
+
+Everything else about the move is unchanged: it targets the earliest
+unmet order (`tgt_order`, `week_idx`), the carrying-avoidance idle is
+driven by that order's due date, and the demand views allocate the
+later rolls to the later weeks, where carrying and excess apply to them
+as usual — the batch is scored against the carrying it causes, which is
+the right trade against the tape-outs it saves. Safety orders are never
+batched (a safety gap is already the whole top-up), and an item whose
+setup another item shares is sized as before, since the machine can
+change to the other item without a tape-out.
+
 The default cap window is `[effective_start, end_of_iso_week)`. When
-that window doesn't admit even a single full roll (e.g., the
-schedule tail landed late on a Friday with most of the week's work
-hours already consumed), the cap end is bumped forward by one week
-so a tightly-loaded machine doesn't get artificially excluded from
-contention. Without the bump, the enumerator would filter the
-candidate out (`n_rolls <= 0`), and the loop would have to advance
-the decision window past this machine entirely; with the bump, the
-planner can commit a sensible chunk of next week's work on it.
+fewer than **three work days** of that week remain at `effective_start`
+— fewer than `3 × workcal.hours_per_day` work hours, 72 on the plant's
+round-the-clock weekday calendar — the cap end is the end of the
+*following* ISO week instead. A machine whose tail lands on a Wednesday
+afternoon would otherwise be offered only the two days left in the week,
+and the planner was seen putting a single roll of a very large order at
+the end of such a machine's week; sized through the next week, the move
+is a run worth setting up for. (The rule replaces a narrower one that
+extended the window only when not even one roll fit; that case still
+extends, since under three days remain whenever one roll does not fit.)
 
 `Machine.producible_lbs_through(item, end, start)` accounts for the
 required preamble, any forced idle (below), mid-stream beam reloads,
 and non-work hours via `workcal`. The legacy
 `Machine.producible_lbs_in_week(item, year, week, start)` remains as
 a thin wrapper for callers that want a single-ISO-week cap.
+
+### Filling a slot wait
+
+A move that changes a machine's item may have to wait for a ration slot
+(see "Changeover capacity"). Rather than idle the machine, every such
+candidate is planned with a **fill**, `plan_production(..., fill=Fill(rolls,
+tgt_order))`: the preamble may knit whole rolls of the machine's current
+item while it waits, as far as the plant still wants that item
+(`schedule/DESIGN.md`, "Filling a slot wait"). The fill is sized to the
+current item's **whole open demand** — the remaining lbs of all its
+regular orders, any week, plus its safety gap when the pool is below
+target — rounded **up** to whole rolls, so the machine runs until that
+demand is completely filled or the slot comes, whichever is first; its
+`tgt_order` is the item's earliest open regular order, else its safety
+order. A move that continues the current item, a machine whose current
+item has no open demand, and a machine with no current item get no fill
+(`None`). The producible cap is laid out with the same fill, so the move
+is sized to what is left of the week after it.
+
+The fill is part of the candidate: its rolls are a job of the current
+item in `plan.jobs`, so the score sees their production (lateness and
+carrying on the current item's orders) and the shorter idle together with
+the change itself, and a machine that would have to wait is compared on
+what it would actually do. There is no fill-less twin of the candidate:
+idling a machine that holds yarn for an item the plant wants is never
+the better plan. The pre-pass plans prior jobs with the same fill.
 
 ### Forced idle for carrying-cost avoidance (regular orders only)
 
@@ -478,12 +750,19 @@ OrderKey
   item_id: str
   week_idx: int | None                                     # None ⇒ safety order
 
+RegularOrder
+  item, week_idx, due_date, order_id
+  lbs: float                                               # remaining (unmet) lbs of the week
+  gross_lbs: float                                         # the week's demand as loaded, before on-hand is netted — the priority cost values lateness as lbs / gross_lbs
+
 ScoringContext
   priorities: dict[OrderKey, int]                          # for priority assignment
-  regular_orders_by_key: dict[OrderKey, RegularOrder]      # for priority cost — looks up due_date and remaining lbs
+  regular_orders_by_key: dict[OrderKey, RegularOrder]      # for priority cost — looks up due_date, remaining lbs and gross lbs
   earliest_dp_excluding: dict[str, datetime]               # machine_id → earliest candidate DP NOT on that machine; missing key ⇒ no other machine has a DP this iteration
   earliest_dp_time: datetime                               # for level-loading (global min DP)
   new_machine_avail: dict[Greige, bool]                    # for new-machine preference
+  cheap_sets: dict[str, frozenset[str]]                    # for recovery cost — machine_id → items it can run at its tail with no tape-out and no pattern change
+  urgent_by_item: dict[str, list[RegularOrder]]            # for recovery cost — urgent regulars with remaining lbs, by item
 
 assign_priorities(state: State) -> dict[OrderKey, int]
 build_new_machine_avail(
@@ -492,6 +771,7 @@ build_new_machine_avail(
 build_earliest_dp_excluding(
     state: State, candidates: list[Move],
 ) -> dict[str, datetime]
+build_context(state: State, candidates: list[Move]) -> ScoringContext
 ```
 
 The submodule is the natural home for everything that *defines
@@ -499,13 +779,42 @@ relationships across the plant*: the `OrderKey` identity, the
 plant-wide priority sort, the new-machine availability sweep, the
 per-machine "earliest other DP" computation, and the bundle the
 scorer reads from. Level-loading's only cross-candidate input is
-`earliest_dp_time`, which the main loop computes inline as
-`min(dp_time(c) for c in candidates)` when building the context.
-New-machine preference's input is `new_machine_avail`, built by
-`build_new_machine_avail`. Priority cost's cross-candidate inputs
-are `regular_orders_by_key` (derived from `eligible_orders(state)`)
-and `earliest_dp_excluding`, built by `build_earliest_dp_excluding`
-— see the three sections below for the details.
+`earliest_dp_time`, which `build_context` computes as
+`min(dp_time(c) for c in candidates)`. New-machine preference's input
+is `new_machine_avail`, built by `build_new_machine_avail`. Priority
+cost's cross-candidate inputs are `regular_orders_by_key` (derived from
+`eligible_orders(state)`) and `earliest_dp_excluding`, built by
+`build_earliest_dp_excluding` — see the sections below for the details.
+
+## Reference week
+
+`state.reference_week_idx` is the right edge of the "urgent" bucket in
+eligibility (see "Per-item eligible orders"): a regular order with
+`week_idx <= reference_week_idx` is urgent and takes precedence over the
+item's safety order; one further out yields to safety replenishment
+first. It is the lever that controls how far out a regular order has to
+be before safety jumps the queue — we should not discourage scheduling
+safety stock when only future regular demand remains, because that would
+force the planner to schedule next-month demand *this* week even though
+the safety pool is empty.
+
+### Reference-week advance
+
+`state.reference_week_idx` mirrors the decision window's advance
+pattern. It starts at `1` — next week's demand should be in production
+this week, so weeks 0 and 1 are urgent from the start — and advances in
+steps of `state.reference_advance_amount` (default `1`) when the count
+of items with at least one unmet `RegularOrder` at or before
+`reference_week_idx` drops below `state.reference_threshold` (default
+`5`). The main loop calls `state.advance_reference_week()` before the
+window-advance step each iteration, advancing until the threshold is
+met or `reference_week_idx` exceeds the latest order's `week_idx`.
+
+The threshold keeps a healthy pool of urgent regulars available to
+score against. With too few urgent items, safety stock would dominate
+the score early and starve later regulars; with too many, safety stock
+never gets a turn. Like `candidate_threshold`, this is a tuneable knob
+expected to be refined against real-data behavior.
 
 ## Priority assignment
 
@@ -538,7 +847,8 @@ discourage scheduling safety stock when only future regular demand
 remains, because that would force the planner to schedule next-month
 demand *this* week even though the safety pool is empty.
 `reference_week_idx` is the lever that controls how far out a regular
-order has to be before safety jumps the queue.
+order has to be before safety jumps the queue (see "Reference week"
+above for how it advances).
 
 `safety_pool` and `safety_target` come from each `RlsItem`'s safety
 view as currently committed — i.e., the final pool after all
@@ -547,32 +857,13 @@ That's a coarse proxy for "how at-risk is this item" but it's a single
 number per item that's already computed; we can refine later if real
 data shows the planner mis-ordering things.
 
-### Reference-week advance
-
-`state.reference_week_idx` mirrors the decision window's advance
-pattern. It starts at `1` — next week's demand should be in production
-this week, so weeks 0 and 1 are urgent from the start — and advances in
-steps of `state.reference_advance_amount` (default `1`) when the count
-of items with at least one unmet `RegularOrder` at or before
-`reference_week_idx` drops below `state.reference_threshold` (default
-`5`). The main loop calls `state.advance_reference_week()` before the
-window-advance step each iteration, advancing until the threshold is
-met or `reference_week_idx` exceeds the latest order's `week_idx`.
-
-The threshold keeps a healthy pool of urgent regulars available to
-score against. With too few urgent items, safety stock would dominate
-the score early and starve later regulars; with too many, safety stock
-never gets a turn. Like `candidate_threshold`, this is a tuneable knob
-expected to be refined against real-data behavior.
-
 ### Priority cost
 
 The priority cost reframes "did the planner take a higher-priority
 move first?" as an *opportunity cost*: every higher-priority regular
-order the move skips is assumed to be deferred to either one day
-past its `due_date` or the earliest non-self decision point in the
-candidate pool — whichever is later — and is charged the standard
-exponential lateness formula for that deferral.
+order the move skips is assumed to be deferred until **one week after
+the earliest decision point on another machine** in the candidate
+pool, and is charged the standard lateness shape for that deferral.
 
 For a move at rank `r = priorities[OrderKey(move.item.id,
 move.week_idx)]`:
@@ -590,9 +881,9 @@ predicted_lateness(O, move):
   other_dp = ctx.earliest_dp_excluding.get(
       move.machine_id, ctx.earliest_dp_time,
   )
-  fill_time = max(O.due_date + 1 day, other_dp)
-  days_late = (fill_time - O.due_date) in days
-  return O.lbs × 2 ** days_late
+  fill_time = other_dp + 7 days
+  days_late = (fill_time - O.due_date) in days           # ≤ 0 ⇒ no charge
+  return (O.lbs / O.gross_lbs) × lateness_factor(days_late)
 ```
 
 Notes:
@@ -601,35 +892,56 @@ Notes:
   for now — their "miss" cost is drainage, which has a different
   temporal shape that doesn't compose cleanly into this per-move sum.
   Future work may revisit.
-- **Minimum one day late.** The `due_date + 1 day` floor reflects
-  that even when another machine *is* available immediately, the
-  schedule won't fill the order until at least one work day past due
-  in practice (queue effects, hand-off). It also keeps `days_late ≥
-  1`, so each skipped higher-priority regular contributes at least
-  `2 × O.lbs × w.priority` to the move — a measurable floor.
+- **One week past the next free machine.** The proxy for "when will
+  this order get made if not now" is the earliest decision point on a
+  machine other than the move's own, plus a week: the next free
+  machine picks it up, and a week of work on that machine is a fair
+  guess at what stands between it and the order's last roll. An order
+  whose due date is further out than that is not predicted late and
+  costs nothing to defer; an order already past due is charged from
+  its due date to that fill time. An earlier version used `max(due +
+  1 day, other_dp)`, which made every skipped order look fillable the
+  moment a machine freed up and so under-charged deferral.
 - **Self-machine excluded.** `earliest_dp_excluding[machine_id]`
   drops every candidate on the move's own machine — that machine is
   committed to this move and can't simultaneously fill the higher-
   priority order. Missing key (no other machine has a DP this
   iteration) falls back to `earliest_dp_time` (the global min, which
-  equals the move's own DP) — a slight underestimate that still
-  yields a sensible floor via the `due_date + 1 day` clause.
-- **Same shape as `w.lateness`.** `lbs × 2 ** days_late` matches the
-  raw view's lateness formula, so the priority cost and the
-  realized-lateness cost (`w.lateness × raw_view.lateness`) are
-  directly comparable scalars once the relevant weights are applied.
-  In practice `w.priority` should be tuned in roughly the same
-  order of magnitude as `w.lateness` for the trade-off to behave
-  intuitively.
+  equals the move's own DP).
+- **Same shape as `w.lateness`.** `(lbs / gross_lbs) ×
+  lateness_factor(days_late)` is exactly how the raw view values a
+  late delivery (share of the gross order × the week-linear-then-
+  doubling factor — see "Costs" in `demand/DESIGN.md`), so the priority
+  cost and the realized-lateness cost are directly comparable once the
+  weights are applied: `w.priority` is the cost of one whole
+  higher-priority order predicted one day late, just as `w.lateness` is
+  the cost of one whole order delivered one day late. Setting the two
+  equal is the natural starting point. `RegularOrder.gross_lbs` carries
+  the week's demand as loaded for this purpose.
 - **Move identity.** `Move` already carries `week_idx`, so the cost
   layer forms `OrderKey(move.item.id, move.week_idx)` directly to
   look up the move's own rank. `week_idx = None` (safety move) is a
-  valid key.
-- **Heuristic.** The "deferred to one-day-past-due-or-next-DP"
-  assumption is a proxy, not a prediction. Reality could fill the
-  order earlier (via window advance bringing more candidates in)
-  or later (via repeated commits piling up). Real-data tuning will
-  show whether this proxy needs to evolve.
+  valid key. A move whose key is not in `priorities` (hand-built in
+  tests) pays nothing.
+- **Debug log.** With a `DebugLog`, each deferred order is a
+  `priority_detail` row (`late_day` = the predicted days late, `cost`
+  = the weighted contribution) under the candidate's `priority`
+  summary row — see `debuglog/DESIGN.md`.
+- **Heuristic.** The "one week past the next free machine" assumption
+  is a proxy, not a prediction. Reality could fill the order earlier
+  (via window advance bringing more candidates in) or later (via
+  repeated commits piling up). Real-data tuning will show whether this
+  proxy needs to evolve.
+- **What was tried instead.** Through 2026-10-01 the priority cost was
+  replaced by a *lateness floor*: every item's uncovered demand was
+  charged, inside the lateness term, at the earliest time the machines
+  holding its yarn could knit it, with a capacity-aware predictor. It
+  was dropped because it behaved perversely under tuning — a shorter
+  linear window or a higher lateness weight made *more* pounds late,
+  and it drove machines across yarn families and back — and because
+  the per-item prediction counted the same machines' capacity for
+  every item on a shared yarn. The priority cost above is the simpler
+  rule it had replaced.
 
 ## Level-loading
 
@@ -709,6 +1021,185 @@ to be calibrated against real plant behavior — a small flat penalty
 should be enough to break ties; a large one risks starving legacy
 machines even when they're the right answer.
 
+## Changeover capacity
+
+Changes are rationed (see `schedule/DESIGN.md`, "Changeover capacity").
+Plant-wide, the floor can absorb only so many **changes** of any kind in
+a day — tape-outs, pattern changes, runner changes and new machines'
+style changes together, one unit per machine changed — the `change`
+resource, five a day by default, counted against the day the change
+starts whichever shift that is. (A week that began with sixteen changes
+at once stopped the plant for three days; five a day, with the rest
+following on later days, is the lesser harm.) Beneath that, the tape-out
+and pattern-change rations of their own: two tape-out bars and three
+pattern changes a day, both between 08:00 and midnight (first and second
+shift), none at all on weekends. The machine model makes the rations
+**real** — a plan that needs a slot the day no longer has waits for the
+next one, and while it waits it knits its current item when the plant
+still wants it (see "Filling a slot wait" under "Candidate enumeration")
+and stands idle otherwise; the wait shows up as later rolls and any idle
+time, which the existing lateness and idle costs already price. The
+planner adds two things on top: the bookkeeping that makes candidates see
+the committed bookings, and one cost term — the recovery cost — that
+charges a move for the demand it strands and the slots a recovery would
+need. Using a slot carries no charge of its own: the rations are hard
+limits and the wait they cause is already priced by lateness and idle
+time.
+
+### Bookkeeping
+
+`State.capacity` is the plant's `ChangeoverCapacity`. Candidate
+enumeration passes it to `plan_production` next to the inventory, so
+every candidate is laid out against the slots the committed moves have
+already taken; `commit_move` books the chosen plan's `capacity_taken`.
+The pre-pass's recommits book first, in the prior plan's start order.
+The greedy commits in score order, not time order, so a move committed
+later can find the day's units taken by a move whose change actually
+falls later that day; the later move then waits for tomorrow. Score order
+roughly follows urgency, so this is accepted for now and the report (the
+`changeovers` sheet) shows every wait so the ordering can be judged.
+
+### Recovery cost
+
+A tape-out or a pattern change takes a machine out of the set of machines
+that can make some items *cheaply* — with neither a tape-out nor a pattern
+change. If the open demand on those items can still be made on time by the
+machines left in that set, the move costs nothing here. If it cannot, some
+machine will have to be converted back later, and what that takes depends
+on what the plant has: a new machine on the same yarn is a five-minute
+style change, an old machine on the same yarn in another family is a
+rationed pattern change, a machine on another yarn is a rationed tape-out.
+The recovery cost is the predicted lateness of the stranded demand at the
+fill time those routes imply, weighted by how many machines each route
+offers.
+
+**The cheap set.** For every machine, from its `schedule_tail`:
+
+```
+cheap(m) = { items I : I's yarn fits m's bars at its tail (the preamble's fit test), and
+                       (m.is_new  or  I's pattern family == m's current item's family) }
+```
+
+A new machine's cheap set is everything on its yarn; an old machine's is
+its yarn and its pattern family. `ctx.cheap_sets` holds these for the
+iteration. For a move on machine `M` to item `B`:
+
+```
+lost(M, B) = cheap(M at its tail) − cheap(M after the move)      # items M could make cheaply and no longer can
+```
+
+A tape-out loses the old yarn's items (less any `B`'s yarn also serves); an
+old machine's pattern change loses the old family's items on the same
+yarn; a runner change or a new machine's style change loses nothing.
+
+**What is stranded.** For each `I` in `lost(M, B)` with urgent open demand
+(`ctx.urgent_by_item[I]`, the regular orders through the reference week
+with remaining lbs), walk its orders in due-date order and ask whether the
+machines still able to make `I` cheaply can cover them on time:
+
+```
+others = cheap-set holders of I, excluding M
+for O in urgent orders of I, by due_date:
+    cap         = Σ over m in others of lbs m can knit of I from its tail to O.due_date
+                  (rate of I on m × work hours), less what earlier orders of I took
+    uncovered_O = max(0, O.remaining_lbs − cap)
+```
+
+All covered ⇒ `recovery(I) = 0`: the current machines on that yarn and
+pattern carry it, and the move is free to leave. (The last-holder rule is
+the special case `others = ∅`.)
+
+**What getting it back takes.** The uncovered pounds need a recovery move
+on some other machine. Four routes, each with the machines it could use
+(`n_r`, machines other than `M` that can run `I`) and the earliest it could
+deliver (`t_r`), with every slot wait read from `state.capacity`:
+
+| route | machines `n_r` | earliest fill `t_r` |
+|---|---|---|
+| style change | new machines on `I`'s yarn | earliest tail among them (they are the cheap set, already booked to the horizon, so in practice the end of the urgent window) |
+| runner change | old machines on `I`'s yarn in `I`'s family | as above |
+| pattern change | old machines on `I`'s yarn in another family | next free pattern-change slot at or after the earliest of their tails |
+| tape-out | machines on another yarn that can run `I` | next free both-bar tape-out slot at or after the earliest of their tails, plus a pattern-change slot when that machine is old and in another family |
+
+Every route is a change, so each `t_r` is then pushed to the next free
+`change` slot at or after it; a day already full of changes delays every
+recovery alike.
+
+```
+p_r         = n_r / Σ_r n_r                                 over routes with n_r > 0
+fill_r      = t_r + 7 days                                   the priority cost's "a week of work" lead
+recovery(I) = Σ_r p_r × Σ_O (uncovered_O / O.gross_lbs) × lateness_factor(days(fill_r − O.due_date))
+
+recovery_cost(move) = w.recovery × Σ over I in lost(M, B) of recovery(I)
+```
+
+So many new machines on the yarn put most of the weight on the style
+route and the fill comes soon, so leaving costs little; few new machines
+and several old ones in other families shift the weight to the pattern
+route, whose fill waits on the three-a-day ration; a unique yarn has only
+the tape-out route, whose fill waits on the two-bars-a-day ration, and
+leaving it is expensive. A day already full of tape-outs pushes every
+recovery fill out and makes leaving dearer.
+
+Notes:
+
+- **Same units as lateness.** `w.recovery` is the cost of one whole
+  stranded order predicted one day late; `lateness` is the natural
+  starting value.
+- **Overlap with the priority cost.** An order charged here may also be
+  in the priority cost's sum when it outranks the move. That double
+  counting is accepted: jumping the queue and stranding a yarn are
+  different mistakes.
+- **Routes count machines, not capacity.** The route weights are head
+  counts, deliberately: the question is which kind of conversion the
+  plant is likely to end up making, not how much each could knit. The
+  capacity question is answered once, by the cheap set, in the stranding
+  step.
+- **Per iteration / per move.** `cheap_sets`, the route machine lists per
+  yarn and family, and `urgent_by_item` are built once in `build_context`;
+  the per-move work is `lost(M, B)` and the capacity walk over those few
+  items, memoised per `(M, B's yarn, B's family)`.
+- **Heuristic.** It prices a departure by what the plant has on hand to
+  undo it, not by predicting the planner's later moves.
+
+### Reporting
+
+The xlsx has a `changeovers` sheet: a `period` row per `(resource, day)`
+that was booked — `period_start` / `period_end`, `capacity`
+(`units_per_period`), `used`, and `activities` as `machine:id@HH:MM` —
+and a `wait` row per slot wait (an `Idle` with a `reason`): `machine`,
+`resource`, `start`, `end`. A `change` unit is read off the schedule as
+one per preamble that changed the machine: one per changeover activity
+(`StyleChange` / `RunnerChange` / `PatternChange`), plus one per
+`TapeOut` with no changeover activity before the next `Knit` (a
+same-item tape-out of a foreign bar), listed by that activity. The
+`schedule` sheet's `desc` reads `waiting for change slot` (or `tape_out`
+/ `pattern_change`) on such an idle, and the schedule JSON carries the
+idle's `reason`. A job that filled a wait is marked on the `production`
+sheet (`fill`) and in the JSON, and the CLI prints how many jobs filled
+waits and with how many rolls. The tape-out report's candidate lines
+show the slot the tape-out landed in, the recovery cost and the items
+the move strands, so a questionable tape-out can be read against what it
+cost. The Gantt (`scripts/make_gantt.py`) gets a per-day strip of units
+used of capacity, the `change` count read the same way.
+
+### Configuration
+
+```
+"changeover_capacity": {                 # optional; absent ⇒ unlimited
+    "change":         {"units_per_period": 5, "window": [0, 24]},   # machines changed, any kind
+    "tape_out":       {"units_per_period": 2, "window": [8, 24]},
+    "pattern_change": {"units_per_period": 3, "window": [8, 24]}
+}
+```
+
+Any subset of the three may be given; a kind left out is unlimited, so
+the block can carry the plant-wide `change` cap alone, or the per-kind
+rations alone, or both.
+
+and one new weight, `recovery`, in the lateness units (one whole
+stranded order one day late); `lateness` is the natural starting value.
+
 ## End-to-end workflow
 
 ```
@@ -741,42 +1232,103 @@ plan infinite <config.json>
 
 `plan variants` (`planners/variants_cmd.py`) builds the two variant files
 the run-config's `variant_map` / `variant_masters` keys point at, from the
-plant's variant table (see `products/variants.py`):
+plant's variant table and the master list (see `products/variants.py`):
 
 ```
-plan variants <input-dir>            # holds greige-styles.json + greige-variants.tsv
-    [--styles PATH] [--variants PATH]
+plan variants <input-dir>            # holds greige-master-styles.json + variants.tsv
+    [--masters PATH] [--variants PATH] [--styles PATH]
     [--out-dir DIR]                  # default: <input-dir>
-    [--rl-tolerance N] [--skip-master ID ...]
     [--quiet]
 ```
 
-It writes `greige-variant-map.json`, `greige-variant-masters.json` and the
-audit report `greige-variants-report.txt`, and prints the report unless
-`--quiet`. Re-run it whenever the styles file or the variant table changes —
-the planner reads the generated files as they are, and a machines entry
-whose variant maps to a master no longer in the styles falls to `NONE`.
+The master list names each master style's **representative variant**; that
+variant's table row defines the master (per bar: runner length, ends, split
+lease, yarn), and another row is a variant of the master when it matches
+the representative on every bar — same construction and beam count, the
+same yarn as the planner tells yarns apart (denier class, colour, cationic
+or recycled finish, textured or flat), and the same runner length: exactly, or failing
+an exact match with any master, within 2 on every bar, the row going to the
+nearest such master by summed runner-length distance (a tie is ambiguous
+and excluded; older constructions share the style number but sit further
+off and are no longer used). It writes `greige-variant-map.json` (each master also recording its
+representative), `greige-variant-masters.json` and the audit report
+`greige-variants-report.txt` — which names, for every row that matched no
+master, the nearest one and what differed — and prints the report unless
+`--quiet`. When `greige-styles.json` is present its beam-set labels are
+cross-checked against the representatives'. Re-run it whenever the master
+list or the variant table changes — the planner reads the generated files as
+they are, and a machines entry whose variant maps to a master not in the
+styles falls to `NONE`.
+
+`plan styles <input-dir> [--out PATH] [--prior PATH]`
+(`planners/styles_cmd.py`) generates `greige-styles.json` from the master
+list, `variants.tsv` and `knit-machine-master.json`. The master list is the
+authoritative list of styles; each record takes its gauge, width and
+`beam_cfg` (labels, weight shares, runner lengths) from the master's
+representative variant, its `rack_wt` from the **average** over the
+master's variants, and its `pattern` from the stitch patterns its two
+**sets** knit — the single-bar set's stitch and the split set's two
+half-bar stitches in bar order, independent of which bar carries which set
+(a style that flips top and bottom is the same pattern); masters with the
+same set stitches share a family letter, handed
+out `A`, `B`, … in the order the list first shows each pattern (`Z` is
+`NONE`'s). Its
+`machine_rates` cover every machine in the knit-machine master that can run
+it — gauge equal; the 75-denier set on the top bar needs a `tall` machine;
+over 200" needs a `wide` one — at the nominal rate above (the machine's
+`wide` rpm for a wide style). `safety` — and `tgt_wt` when present — come
+from the master list's own records, where the safety target is maintained;
+a value the list lacks comes from the previous styles file (`--prior`,
+default the output file when it exists), and failing that from the
+defaults, 740 lbs and two rolls, which is reported. The `NONE`
+placeholder is carried over and written first; a master the two-set model
+cannot define (`AU1148G36`, one merge on both bars) is skipped and reported.
 
 `plan manual <config.json> <steps.json> [--output-dir DIR]`
 (`planners/manual_cmd.py`) rebuilds a hand-made schedule from a step file
 on the same run-config and writes `manual_schedule_<start date>.json` in the
 schedule-JSON format — see `planners/manual/DESIGN.md`.
 
+`plan retime <config.json> <prior plan.json> <tickets.json> [--output-dir DIR]
+[--keep-sets]` (`planners/retime_cmd.py`) carries an existing plan forward
+to the current machine status without re-deciding it — the same jobs and
+rolls, re-timed from the config's new dates and machines file, the sets
+handed out from its inventory in runout order, or, with `--keep-sets`,
+the prior plan's sets kept where they still can be and only its `NEW…`
+placeholders filled — and writes the usual `knit_plan_<date>.xlsx` /
+`.json` plus `retime_<date>.txt`; see `planners/retime/DESIGN.md`.
+
 `plan machines <runtime-export.json> <input-dir> [--out PATH] [--base PATH]`
-(`planners/machines_cmd.py`) converts the plant's runtime export — per
-machine `HH:MM` of running time left on each bar's set (excluding stops),
-racks left on the roll in progress, and optionally the variant running and
-the mounted set numbers — into a machines JSON (default
-`<input-dir>/machines-new.json`). What the export leaves out comes from a
-**base** machines file (`--base`, defaulting to the output file when it
-exists): its `init_item` and its `init_top_set` / `init_btm_set` objects
-are carried over verbatim, so refreshing the runtime numbers never loses
-the plant's merge and vendor for the mounted sets; base machines the export
-omits are kept unchanged.
-Pounds come from the variant table and the knit-machine master: racks/hour
-= rpm × 60 / 480; lbs/rack = `rack_wt` / 100; a bar's lbs = hours × racks/hour
-× lbs/rack × that bar's share of the weight (bars grouped by merge, the
-group holding bar 1 being the bottom); roll lbs = racks-to-doff × lbs/rack.
+(`planners/machines_cmd.py`) converts the plant's runtime export into a
+machines JSON (default `<input-dir>/machines-new.json`). The export covers
+the whole floor, one record per machine with `is_new`, a tagged quantity
+per bar — `{"unit": "time", "val": "HH:MM"}` of running time left on the
+set, excluding stops (the new line), or `{"unit": "lbs", "val": …}` of yarn
+left on the set as the legacy line's beam tracking computes it, `0` meaning
+an empty bar waiting for its next set — and `racks_on_roll`, the racks
+already wound on the roll in progress. (The older form — `top-rem` /
+`btm-rem`, `racks-to-doff` = racks *left*, optional `item` and set numbers
+— is still read.) The export never names the item or the mounted sets:
+those come from a **base** machines file (`--base`, defaulting to the
+output file when it exists), whose `init_item` and `init_top_set` /
+`init_btm_set` objects are carried over verbatim, so refreshing the runtime
+numbers never loses the plant's merge and vendor. The result is the
+**intersection** of the two files: a machine in only one of them is dropped
+and reported (export-only has no item; base-only has no fresh numbers).
+The export covers the whole floor; a machine whose item's bars do not group
+into exactly two merges — a 2-bar style with one merge on both bars, or a
+three-merge construction — cannot be an automotive style (ours are always
+a single-bar set plus a split-lease pair) and is skipped and reported
+rather than written, as is a machine whose item the variant table does not
+have at all (one down for `OVERHAUL`). A machine running a variant the mapping excluded is
+still written and flagged; the planner loads it as `NONE`.
+Pounds come from the variant table, the knit-machine master and the greige
+styles: racks/hour = rpm × 60 / 480; lbs/rack = `rack_wt` / 100; a `time`
+bar's lbs = hours × racks/hour × lbs/rack × that bar's share of the weight
+(bars grouped by merge, the group holding bar 1 being the bottom), a `lbs`
+bar is taken as is; lbs left on the roll = the master's `tgt_wt` −
+racks_on_roll × lbs/rack, floored at 0 (a roll past target is about to be
+doffed and counts as between rolls).
 Re-run it whenever the floor data is refreshed; it is the source of the
 `init_*` fields the machines loader reads. It writes the mounted sets in the
 bare set-number form; a machines file produced by the plant's own tooling
@@ -786,8 +1338,22 @@ also accepts (see `schedule/DESIGN.md`, File I/O).
 The input resolution is shared: `run.load_config(config)` /
 `run.load_inputs(cfg, config_dir, start_date=…, overrides=…)` return an
 `Inputs` record (greiges, variant files, inventory, workcal, demand,
-machines, weights), used by `plan infinite` and by the manual scheduler so a
-config loads identically in both.
+machines, weights, the blacklist), used by `plan infinite` and by the manual
+scheduler so a config loads identically in both. The `blacklist` (merge
+codes as strings, whitespace trimmed) is handed to the beam-set and machine
+loaders, so every set built from the export or an assigned-sets record is
+stamped `blacklisted` when its merge is on it, and the load echoes how many
+merges are listed, how many stock sets were withheld, and each blacklisted
+set found mounted on a machine or queued at one (the queued ones are passed
+over when their bar next hangs; the mounted ones make their bar foreign, so
+the machine's first plan tapes them out — see "Blacklisted merges" in
+schedule/DESIGN.md). The load also echoes each assigned set applied to a
+bar as **hung** (`"status": "hung"`, with the machines-file set it
+replaced, if any) and how many queued sets are staged at their machines
+against still in the warehouse. The file is a JSON list of merge codes as the export
+writes them (`"292286"`, `"292286BAD"`, `"299029-A"`, …); codes are compared
+trimmed and case-insensitively, each entry matching exactly the merge it
+names, so a code's `BAD` or `-A` variants are listed in their own right.
 
 ### Run-config JSON
 
@@ -798,6 +1364,11 @@ A top-level object with six required keys, plus optional `variant_masters`,
 {
     "start_date": "YYYY-MM-DD[ HH:MM:SS]",     # always inline; local time; a
                                                # bare date means midnight
+    "change_date": "YYYY-MM-DD[ HH:MM:SS]",    # optional (default start_date):
+                                               # when the plant can first change
+                                               # a machine over — see Inputs
+    "mode": "exact" | "planning",              # optional (default exact) — see
+                                               # "Planning mode"
     "products":   <path-string | list of greige objects>,
     "workcal":    <path-string | workcal object>,
     "machines":   <path-string | list of machine objects>,
@@ -815,16 +1386,59 @@ A top-level object with six required keys, plus optional `variant_masters`,
                                                # set_no, merge, vendor, received,
                                                # lbs, beams, ends, denier, luster,
                                                # desc, assigned
-    "assigned_sets": <path-string | list of {set_no, merge, vendor, machine, bar}>,
-                                               # optional; sets staged at a
-                                               # machine bar, not yet threaded —
-                                               # that bar's queue (see
-                                               # schedule/DESIGN.md)
+    "assigned_sets": <path-string | list of {set_no, merge, vendor, machine, bar,
+                                              denier, luster, desc, ends, beams,
+                                              lbs, received, status}>,
+                                               # optional; sets assigned to a
+                                               # machine bar. `status` is
+                                               # "inventory" (still in the
+                                               # warehouse; the default) or
+                                               # "staged" (at the machine) — both
+                                               # queue on the bar — or "hung": on
+                                               # the bar, not threaded, so the
+                                               # first plan threads it without a
+                                               # hang, or unhangs it when it does
+                                               # not fit (see schedule/DESIGN.md,
+                                               # File I/O).
+                                               # The yarn fields are the export's;
+                                               # they describe a set the export
+                                               # lacks
+    "blacklist":  <path-string | list of merge codes>,
+                                               # optional; yarn merges flagged for
+                                               # quality: a set carrying one is never
+                                               # hung by the planner (see
+                                               # schedule/DESIGN.md, "Blacklisted
+                                               # merges"); absent ⇒ none
     "demand":     <path-string | list of demand objects>,
     "weights":    <path-string | weights object>,
+    "changeover_capacity": <object>,           # optional; the rations of changes, tape-outs
+                                               # and pattern changes per day (see
+                                               # "Changeover capacity"); absent ⇒ unlimited
+    "prior_plan":  <path-string>,              # optional; the previous plan, already
+                                               # retimed to today's status (`plan
+                                               # retime`), whose urgent jobs the
+                                               # planner recommits before planning
+                                               # — see "Sticking to the prior plan"
+    "state":      <path-string | object>,      # optional; `State` tunables by field name
+                                               # (see below); absent ⇒ the defaults
     "database":   <db-config object>           # optional; only used with --verbose
 }
 ```
+
+**`state` block.** Any `State` tunable can be set by its field name:
+`candidate_threshold`, `reference_threshold`, `reference_advance_amount`,
+`reference_week_idx`, `eoq_threshold_rolls`, `eoq_batch_rolls` (integers
+— the last two the economic-order-quantity thresholds, see "Move sizing";
+3 and 4 by default) and the four durations
+`window_advance_amount`, `carrying_avoidance_margin`,
+`planning_horizon_buffer` and `frozen_window` (how far into the prior
+plan the pre-pass recommits — see "Sticking to the prior plan"; unset
+means unbounded). JSON has no duration type, so a duration is written as
+a number of **hours** or as a string with a unit — `"48h"`, `"3d"`,
+`"2w"`, `"90m"` — or as `"HH:MM"`; negative values are allowed. A field
+left out keeps the `State` default (24 h, 24 h, 4 weeks and unbounded
+for the four durations). The block can also come from the
+`--state-cfg` CLI option.
 
 **Clock.** The planner's clock is the plant's **local time**: `start_date`,
 the export's `received` dates, every activity time and the xlsx report are
@@ -837,12 +1451,32 @@ the input files themselves; doing it in the loaders is the intended next
 step), and the schedule JSON converts back to UTC on the way out (see
 "Schedule JSON").
 
-A greige object's `machine_rates` are lbs per hour of *running* time and
-already include the plant's **85% running efficiency**: `rate = rpm × 60 /
-480 revs per rack × rack_wt / 100 × 0.85`, with the machine's rpm from the
-knit-machine master (its `wide` rpm for styles 200" or wider). Unplanned
-stops — a defect, waiting for a fixer — are what the 0.85 stands for;
-planned stops (doffs, threading, changeovers) are separate activities.
+**Planning mode.** `"mode": "planning"` asks for a coarse plan — how many
+rolls of what to run on each machine before switching it — rather than
+exact runout and doff times. It is a process-wide switch
+(`support.planning_mode`, set by `load_inputs` before any input is read)
+that changes three plant-wide facts: doffing, hanging and threading take
+0.01 h each (tape-outs and changeovers keep their real durations, so a
+changeover still costs what it costs); there is no beam-set stock — the
+`beam_sets` and `assigned_sets` inputs are ignored, a taped-out set is
+never returned, and every set a changeover needs is invented — and every
+set, mounted or invented, starts with 1,000,000 lbs, so a set only ever
+comes off a machine because a changeover needs different yarn, never
+because it ran out; and machines run at 65 % efficiency (`planning_mode.EFFICIENCY`)
+instead of the model's `RUNNING_EFFICIENCY` of 76.5 %. The
+model, the loop and the outputs are otherwise unchanged; the schedule JSON
+still has times, they just no longer claim to be the floor's. `"exact"`
+(the default, and what the tests exercise) is the full model.
+
+A greige object's `machine_rates` are **nominal** lbs per hour of running
+time: `rate = rpm × 60 / 480 revs per rack × rack_wt / 100`, with the
+machine's rpm from the knit-machine master (900 on the legacy line, 2200 on
+the new line, 1500 for a wide style — over 200" — on a new machine). They
+carry no efficiency factor: the machine model scales every rate by
+`schedule.machine.RUNNING_EFFICIENCY` (0.765; 0.65 in planning mode), so the
+efficiency is one constant to edit rather than a number baked into every
+style's rate matrix. The styles file itself is generated by `plan styles`
+(see "CLI entry point").
 
 `variant_masters` is the variant -> master translation written by
 `products.variants.write_variant_masters` (built from the plant's variant
@@ -983,9 +1617,16 @@ resolve against; its `holidays` must also be inlined.
 
 ### Output
 
-The CLI writes a single Excel workbook at
+After the plan the CLI prints the score, the unmet (item, week) count and
+— when any — the **assigned sets passed over**: per machine and bar, the
+plant-staged set a hang dropped from the bar's queue because its yarn did
+not fit the requirement or its merge is blacklisted, the requirement, the
+hang time and the reason
+(`PlanReport.queue_passed_over`, from `Machine.queue_passed_over`; see
+"Assigned sets and bar queues" in schedule/DESIGN.md). It then writes a
+single Excel workbook at
 `<output_dir>/knit_plan_<YYYYMMDD>.xlsx` where the YYYYMMDD is the
-resolved `start_date`. Seven sheets:
+resolved `start_date`. Eight sheets:
 
 - `demand` — the original input demand, one row per order across all
   `rls_items`, **regular and safety**. Built from `PlanReport.rls_items`.
@@ -1003,11 +1644,16 @@ resolved `start_date`. Seven sheets:
   - `remaining` — `demand - covered_on_hand`, the demand production must
     still place after initial inventory
 - `schedule` — multi-indexed by `(machine, activity_id)`, every
-  activity across all machines. The `desc` cell names physical beam sets
-  where an activity touches one: a `Hanging` / `TapeOut` / `Waste` shows,
-  per bar, the set's planner label, set number and merge (an invented set
-  reads `NEW…` with no merge), a `Hanging` also the lbs hung and a `TapeOut`
-  the lbs returned; a `Knit` shows the item and, when known, its variant.
+  activity across all machines that did any work: a machine whose only
+  activity for the whole run is `Idle` (nothing could be planned on it)
+  is left out of this sheet, of `collapsed_sched` and of the schedule
+  JSON (`schedule_json.has_work`). The `desc` cell names physical beam sets
+  where an activity touches one: a `Hanging` / `TapeOut` / `Unhang` /
+  `Waste` shows, per bar, the set's planner label, set number and merge
+  (an invented set reads `NEW…` with no merge), a `Hanging` also the lbs
+  hung and a `TapeOut` or `Unhang` the lbs returned; a `Knit` shows the
+  item, its variant when known, and
+  the set number and merge on each bar (`top #1-1243 6268G / btm #…`).
 - `collapsed_sched` — a higher-level, operator-facing view of the same
   per-machine activity schedule, with consecutive activities folded into
   coarse steps (see "Collapsed schedule" below).
@@ -1016,7 +1662,9 @@ resolved `start_date`. Seven sheets:
   (when the job finishes — its last roll's `completion_time`), and
   `tgt_order` — the id of the order the job was raised to target
   (`Job.tgt_order`), **blank** when the job targeted no specific order
-  (e.g. a `'next_runout'` run-up job).
+  (e.g. a `'next_runout'` run-up job) — and `fill`, true when the job
+  (also) knit rolls of the current item while the machine waited for a
+  ration slot (see "Filling a slot wait").
 - `xref` — the roll/knit/order cross-reference: a flat table, **one row
   per `Knit` activity** across every committed job (run-up and
   production). Built from `PlanReport.rls_items` and the jobs they carry.
@@ -1048,16 +1696,39 @@ resolved `start_date`. Seven sheets:
   columns so each knit's full provenance reads on its own row.
 - `unmet_demand` — flat `(item, week_idx, unmet_lbs)`, one row per
   `safety_view.orders` entry with `remaining_lbs > 0`.
-- `late_orders` — flat `(item, week_idx, late_lbs, late_fill_date)`,
-  one row per `PlanReport.late_orders` entry. `late_fill_date`
+- `late_orders` — flat `(item, week_idx, late_lbs, late_pct, late_fill_date)`,
+  one row per `PlanReport.late_orders` entry; `late_pct` is `late_lbs` as a
+  percentage of the week's gross demand, the quantity the lateness cost is
+  valued on. `late_fill_date`
   reports when the order will finish filling (the latest contributing
   chunk's arrival time), even if some demand remains unmet.
+- `prior_jobs` — only when the run had a prior plan: one row per prior
+  job (`machine, prior_job, item, rolls, order, due_date, start, status,
+  job_id, note`) — see "Sticking to the prior plan".
 
 When `--verbose` is set, the planner additionally builds and populates
 an in-memory `DebugLog` audit trail during the run — see "Verbose
 audit log" below.
 
 See `report.py` for the per-sheet layouts.
+
+#### Tape-out decisions (`tape_outs_<date>.txt`)
+
+Alongside the xlsx and JSON the CLI writes a plain-text audit of every
+tape-out the planner chose: `plan(..., tape_out_report=path)`. The file
+takes the same name suffix as the run's xlsx and JSON — `tape_outs_<date>.txt`
+beside `knit_plan_<date>.xlsx`, or `tape_outs_<date>_<n>.txt` when the
+run's outputs were numbered because `knit_plan_<date>.xlsx` already
+existed — and is truncated before the run starts, since the planner
+appends to it one decision at a time. At each
+iteration whose winning move carries a `TapeOut`, the block appended lists
+the iteration (window end, reference week, candidate count), the chosen
+move, and then **every candidate of that iteration** in ascending score —
+machine, item, lbs, start point, leading idle, the order week it serves,
+the tape-out bars, changeover kind and sets hung it would need, its score
+and its gap to the chosen move. It uses the hot path's scores, so it costs
+nothing extra and needs no debug log; the per-component breakdown is the
+debug log's job.
 
 #### Schedule JSON
 
@@ -1069,10 +1740,16 @@ machine-readable hand-off of the plan. A list of machine objects:
 [{"id": "<machine>", "schedule": [<job | orphaned activity>, ...]}, ...]
 ```
 
-`schedule` is chronological and every entry carries `kind` and `id`. A
+Machines whose only activity is `Idle` are left out, as on the schedule
+sheets. `schedule` is chronological and every entry carries `kind` and `id`. A
 **job** (`kind: "job"`) is placed at its first activity's start and holds
-`item`, `tgt_order`, `start`, `end`, `total_lbs`, `rolls` and `activities`
-(its `Job.activities` — see `schedule/DESIGN.md` "Job activities"). A roll
+`item`, `tgt_order`, `due_date` (the target order's due date, null for a
+safety or run-up job — what a later run matches the job to its order by,
+see "Sticking to the prior plan"), `prior_job` (the prior plan's job this
+one recommits, else null), `fill` (true when the job filled a slot wait,
+see "Filling a slot wait"), `start`, `end`, `total_lbs`, `rolls` and
+`activities` (its `Job.activities` — see `schedule/DESIGN.md` "Job
+activities"). A roll
 has a derived `id` `<job id>-R<n>` (1-based within the job; `Roll` has no id
 of its own), `item`, `variants` (the distinct `Knit.variant` values of its
 knits, in order, empty when none is known — a roll straddling a beam swap
@@ -1083,13 +1760,22 @@ can be wound by knits of different variants), `lbs`, `completion_time` and
 in its own right.
 
 An activity object is `kind` (the class name), `id`, `start`, `end`, then
-the type's own fields: `Knit` → `item`, `lbs`, `variant`; `Waste` → `beam`,
-`bar`, `lbs`; `TapeOut` / `Hanging` → `bars`, `top_beam`, `btm_beam` (null
-for an untouched bar); `Threading` → `bars`; the changeovers → `from_item`,
+the type's own fields: `Knit` → `item`, `lbs`, `variant`, `top_beam`,
+`btm_beam` (the sets on the bars while it ran); `Waste` → `beam`,
+`bar`, `lbs`; `TapeOut` / `Unhang` / `Hanging` → `bars`, `top_beam`, `btm_beam` (null
+for an untouched bar), a `Hanging` also `passed_over` — a list of
+`{"bar", "set_no", "merge", "vendor", "desc", "lbs", "reason"}` for the
+queued sets it passed over — only when it passed any; `Threading` → `bars`;
+the changeovers → `from_item`,
 `to_item`; `Doff` / `Idle` nothing more. A `Greige` reduces to its id; a
 `BeamSet` to `{"set_no", "merge", "vendor", "desc", "lbs"}` (`merge` and
 `vendor` null for an invented set; `lbs` is the set's pounds at that moment
-— hung on a `Hanging`, returned to stock on a `TapeOut`). Datetimes are
+— hung on a `Hanging`, returned to stock on a `TapeOut` or `Unhang`), plus
+`"blacklisted": true` on a set whose merge the run blacklisted (the set a
+`TapeOut` took off a bar it was found mounted on, or a passed-over queued
+set; the key is left out otherwise) and `"location"` on a plant-assigned
+set (`"staged"` / `"inventory"`, the assigned-sets record's `status`; left
+out otherwise). Datetimes are
 written the way the plant's systems store them: **UTC**, `YYYY-MM-DD
 HH:MM:SS`, whole seconds. The planner's clock is plant local time (see
 "Clock"), so the writer converts every timestamp through the plant's zone
@@ -1238,7 +1924,6 @@ the **`runs`** registry (`knit_runs`; run metadata; owns the auto-incremented
 key-less (their `order_by` is `move_id, item, week_idx` and `item, week_idx`
 respectively). Logical columns are name-for-name identical to the `DebugLog`'s;
 physically, each `datetime` column is its `_date`/`_time` INT pair.
-
 The DB also defines two **views** — **`committed_sched`** and
 **`committed_prod`** — the committed-move slices of `sched_cost_detail` /
 `production` (each `INNER JOIN`ed to the committed `iteration_log` rows). They
@@ -1413,7 +2098,7 @@ across multiple machines via the window mechanism.
 
 Adds the priority-cost, level-loading, and new-machine-preference
 layers — the first three cross-cutting costs in scope. See "Plant-wide
-coordination" above for all three mechanisms.
+coordination" above for the mechanisms.
 
 - New `planners/infinite/coordination/` submodule exposing `OrderKey`,
   `ScoringContext`, `assign_priorities(state) -> dict[OrderKey, int]`,
@@ -1498,6 +2183,37 @@ deliverable when `--verbose` is off.
 - Requires either reversible state updates (undo) or operating on
   state snapshots. Probably introduces a `state.snapshot()` method or
   a copy-on-write variant of `commit_move`.
+
+### Phase 5 — changeover capacity
+
+Rations tape-outs and pattern changes plant-wide (see "Changeover
+capacity" above). Three steps, each run against the 2026-10-01 inputs
+and compared with the plan before it:
+
+1. **Feasibility.** `schedule/capacity.py` (`ChangeoverCapacity`,
+   `CapacityView`); `plan_production(..., capacity=)` waits for slots and
+   records `capacity_taken`; `State.capacity` and booking in
+   `commit_move`; the run-config block; the manual planner's stagings
+   overlay each other's bookings; the `changeovers` sheet and the Gantt
+   strip. No new weights.
+2. **Recovery cost.** `cheap_sets` and `urgent_by_item` on the context,
+   the route machine lists, the stranding walk; the `recovery` weight and
+   `cost_summary` label; the tape-out report columns.
+
+A *slot scarcity* term — a charge per unit booked scaled by how full the
+period was — was built between the two steps and taken out again: at a
+small weight it changed no decision, at a large one it only spread
+tape-outs across more days and made the plan worse, and consuming the
+ration was never meant to cost anything in itself.
+
+A *threading ration* — eleven threading bars a day covering every
+re-thread, runouts included, with a tape-out placed only on a day that
+had threadings left for its re-thread — was built after step 2 and taken
+out again: the greedy commits in score order, not time order, so the
+day's threadings went to whichever move scored first rather than to the
+most urgent work, and runouts queued behind changeovers for days. The
+team's limit is carried instead by the lower running efficiency
+(`RUNNING_EFFICIENCY`, see `schedule/DESIGN.md`).
 
 ## Out of scope
 

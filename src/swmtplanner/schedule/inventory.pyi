@@ -10,7 +10,8 @@ InventoryView = Mapping[BeamSetDesc, Sequence[BeamSet]]
 
 def worth_stocking(beam_set: BeamSet) -> bool:
     """Whether a set has enough usable yarn (`lbs - BEAM_FLOOR_LBS >=
-    MAX_BEAM_WASTE_LBS`) to be hung at all."""
+    MAX_BEAM_WASTE_LBS`) to be hung at all. Always False in planning mode,
+    which keeps no stock."""
     ...
 
 

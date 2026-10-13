@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Callable, Literal
 
 from swmtplanner.support import HasID
 from swmtplanner.products import Greige, BeamSet
@@ -13,7 +13,7 @@ __all__ = [
     'THREADING_SINGLE_DURATION', 'THREADING_BOTH_DURATION',
     'DOFF_DURATION',
     'STYLE_CHANGE_DURATION', 'RUNNER_CHANGE_DURATION', 'PATTERN_CHANGE_DURATION',
-    'BEAM_FLOOR_LBS', 'MAX_BEAM_WASTE_LBS',
+    'BEAM_FLOOR_LBS', 'MAX_BEAM_WASTE_LBS', 'rebind_sets',
 ]
 
 
@@ -44,6 +44,9 @@ class Knit(Activity):
     variant: str | None = ...
     """The plant variant the two bars' merges identify under `item` (the
     recipe's comma-separated names), or None when unknown."""
+    top_beam: BeamSet | None = ...
+    """The set on each bar while this knit ran; None when the bar held nothing."""
+    btm_beam: BeamSet | None = ...
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,9 @@ class Hanging(Activity):
     top_beam: BeamSet | None = ...
     """The set now on top — its `lbs` is what the bar holds; None if untouched."""
     btm_beam: BeamSet | None = ...
+    passed_over: tuple[tuple[Literal['top', 'btm'], BeamSet], ...] = ...
+    """Per bar, the plant-assigned sets this hang dropped from the bar's
+    queue because they did not fit; applying the hang removes them."""
 
 
 @dataclass(frozen=True)
@@ -100,4 +106,13 @@ class PatternChange(Activity):
 
 @dataclass(frozen=True)
 class Idle(Activity):
-    pass
+    reason: str = ...
+    """`'tape_out slot'` / `'pattern_change slot'` when the gap waited for
+    the day's changeover ration; empty for a caller-supplied idle."""
+
+
+def rebind_sets(activity: Activity, relabel: Callable[[BeamSet | None], BeamSet | None]) -> Activity:
+    """`activity` with every beam set it references passed through
+    `relabel` — same id, times and lbs; unchanged when nothing is
+    relabelled (a `Hanging`'s `passed_over` is left alone)."""
+    ...

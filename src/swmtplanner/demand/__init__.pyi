@@ -19,4 +19,6 @@ def rls_items_from_list(
     start_date: datetime,
     greige_by_id: dict[str, Greige],
     source: str = ...,
-) -> dict[str, RlsItem]: ...
+) -> dict[str, RlsItem]:
+    """Demand for an item not in `greige_by_id` is skipped with a warning."""
+    ...

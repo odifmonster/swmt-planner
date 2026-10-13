@@ -51,7 +51,7 @@ def _load_greiges() -> dict[str, Greige]:
 _GREIGES = _load_greiges()
 
 
-_START = datetime(2026, 1, 1)
+_START = datetime(2026, 1, 5)       # a Monday: due dates fall on Mondays
 
 
 def _make_weekly_demand(qtys: list[float]) -> list[WeeklyDemand]:
@@ -169,34 +169,34 @@ class RawViewRecomputeTests(unittest.TestCase):
 
     def test_lateness_one_day_late(self):
         # Single job, 100 lbs, ends 1 day after week 0's due_date.
-        # Expected: 100 * 2^1 = 200.
+        # Expected: (100/100) * f(1) = 1.0 — lateness is the late share of the gross order × lateness_factor (linear in the first week).
         view = _make_view([100, 0, 0, 0])
         jobs = [_job_at(_due(0) + timedelta(days=1), lbs=100)]
         view.recompute(jobs=jobs, on_hand=0)
         self.assertEqual(view.orders[0].allocated_lbs, 100.0)
-        self.assertAlmostEqual(view.lateness, 200.0)
+        self.assertAlmostEqual(view.lateness, 1.0)
 
     def test_lateness_two_days_late_doubles(self):
         # Single job, 100 lbs, ends 2 days after week 0's due_date.
-        # Expected: 100 * 2^2 = 400 (i.e., doubled from the 1-day-late case).
+        # Expected: (100/100) * f(2) = 2.0 (i.e., doubled from the 1-day-late case).
         view = _make_view([100, 0, 0, 0])
         jobs = [_job_at(_due(0) + timedelta(days=2), lbs=100)]
         view.recompute(jobs=jobs, on_hand=0)
-        self.assertAlmostEqual(view.lateness, 400.0)
+        self.assertAlmostEqual(view.lateness, 2.0)
 
     def test_lateness_fractional_days(self):
-        # Half a day late: 100 * 2^0.5 = 100 * sqrt(2) ≈ 141.421...
+        # Half a day late: (100/100) * f(0.5) = 0.5.
         view = _make_view([100, 0, 0, 0])
         jobs = [_job_at(_due(0) + timedelta(hours=12), lbs=100)]
         view.recompute(jobs=jobs, on_hand=0)
-        self.assertAlmostEqual(view.lateness, 100.0 * (2.0 ** 0.5))
+        self.assertAlmostEqual(view.lateness, 0.5)
 
     def test_lateness_chunks_to_different_orders_accumulate(self):
         # Single job, 200 lbs, ends 1 day after week 1's due_date.
         # That is 8 days late for week 0 and 1 day late for week 1.
-        # Order 0 takes 100 lbs (8 days late) → 100 * 2^8 = 25600.
-        # Order 1 takes 100 lbs (1 day late)  → 100 * 2^1 = 200.
-        # Total = 25800.
+        # Order 0 takes 100 lbs (8 days late) → (100/100) * f(8) = 7 * 2^1 = 14.
+        # Order 1 takes 100 lbs (1 day late)  → (100/100) * f(1) = 1.
+        # Total = 15.
         view = _make_view([100, 100, 0, 0])
         jobs = [_job_at(_due(1) + timedelta(days=1), lbs=200)]
         view.recompute(jobs=jobs, on_hand=0)
@@ -204,19 +204,19 @@ class RawViewRecomputeTests(unittest.TestCase):
             [o.allocated_lbs for o in view.orders],
             [100.0, 100.0, 0.0, 0.0],
         )
-        self.assertAlmostEqual(view.lateness, 100.0 * 2.0**8 + 100.0 * 2.0**1)
+        self.assertAlmostEqual(view.lateness, 14.0 + 1.0)
 
     def test_lateness_on_time_chunks_do_not_contribute(self):
         # One job ends 1 day late for week 0 but on time for week 1.
         # Demand [50, 50, 0, 0], job ends at week_0.due + 1 day, 100 lbs.
-        # Order 0 takes 50 (1 day late) → 50 * 2 = 100.
+        # Order 0 takes 50 (1 day late) → (50/50) * f(1) = 1.0.
         # Order 1 takes 50 — job.end = week_0.due + 1 day, week_1.due is 7 days
         # past week_0.due, so the chunk is well within on-time for week 1.
-        # Total lateness = 100.
+        # Total lateness = 1.0.
         view = _make_view([50, 50, 0, 0])
         jobs = [_job_at(_due(0) + timedelta(days=1), lbs=100)]
         view.recompute(jobs=jobs, on_hand=0)
-        self.assertAlmostEqual(view.lateness, 100.0)
+        self.assertAlmostEqual(view.lateness, 1.0)
 
     def test_lateness_resets_between_recomputes(self):
         # First recompute introduces lateness; second with no jobs clears it.
@@ -230,18 +230,18 @@ class RawViewRecomputeTests(unittest.TestCase):
         # Demand [100, 0, 0, 0]. 30 lbs on hand cover part of order 0 on time;
         # the remaining 70 come from a job that ends 1 day past week 0's due.
         # Only the 70 lbs from the job should be counted late.
-        # Expected lateness = 70 * 2^1 = 140.
+        # Expected lateness = (70/100) * f(1) = 0.7.
         view = _make_view([100, 0, 0, 0])
         jobs = [_job_at(_due(0) + timedelta(days=1), lbs=70)]
         view.recompute(jobs=jobs, on_hand=30)
         self.assertEqual(view.orders[0].allocated_lbs, 100.0)
-        self.assertAlmostEqual(view.lateness, 140.0)
+        self.assertAlmostEqual(view.lateness, 0.7)
 
     def test_on_hand_covers_full_order_lateness_only_on_subsequent(self):
         # Demand [100, 100, 0, 0]. 100 lbs on hand fully cover order 0 on time.
         # A late job (100 lbs, ending 1 day past week 1's due) then fills
         # order 1. Order 0 contributes no lateness; order 1 contributes
-        # 100 * 2^1 = 200.
+        # (100/100) * f(1) = 1.0.
         view = _make_view([100, 100, 0, 0])
         jobs = [_job_at(_due(1) + timedelta(days=1), lbs=100)]
         view.recompute(jobs=jobs, on_hand=100)
@@ -249,7 +249,7 @@ class RawViewRecomputeTests(unittest.TestCase):
             [o.allocated_lbs for o in view.orders],
             [100.0, 100.0, 0.0, 0.0],
         )
-        self.assertAlmostEqual(view.lateness, 200.0)
+        self.assertAlmostEqual(view.lateness, 1.0)
 
     # --- Per-order late reporting (RawOrder.late_lbs / late_fill_date) ---
 
@@ -376,7 +376,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         # Section 5.1: every order filled by a single late job. Each job
         # ends 1 day past its target order's due_date with exactly that
         # order's demand, so each order is fully late.
-        # Lateness = sum(qty * 2^1) = 2 * 750 = 1500.
+        # Lateness = four whole orders one day late = 4 * f(1) = 4.0.
         view = _make_view([100, 200, 150, 300])
         job0 = _job_at(_due(0) + timedelta(days=1), lbs=100)
         job1 = _job_at(_due(1) + timedelta(days=1), lbs=200)
@@ -389,7 +389,7 @@ class RawViewRecomputeTests(unittest.TestCase):
             self.assertEqual(o.allocated_lbs, alloc)
             self.assertEqual(o.late_lbs, alloc)  # fully late
             self.assertEqual(o.late_fill_date, fill)
-        self.assertAlmostEqual(view.lateness, 2.0 * sum(expected_alloc))
+        self.assertAlmostEqual(view.lateness, 4.0)
 
     def test_late_reporting_all_orders_late_on_hand_partial_week_0(self):
         # Section 5.2: on_hand = 50 fills half of order 0 on-time
@@ -397,7 +397,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         # order 0; further late jobs fill orders 1–3.
         # Order 0: late_lbs = qty - on_hand = 50; late_fill_date is the
         # late job's end (latest chunk). Orders 1–3: fully late.
-        # Lateness = 50*2 + 200*2 + 150*2 + 300*2 = 1400.
+        # Lateness = 50/100 + 1 + 1 + 1 = 3.5 (f(1) = 1).
         view = _make_view([100, 200, 150, 300])
         job0a = _job_at(_due(0) + timedelta(days=1), lbs=50)
         job1 = _job_at(_due(1) + timedelta(days=1), lbs=200)
@@ -416,7 +416,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 300.0)
         self.assertEqual(view.orders[3].late_lbs, 300.0)
         self.assertEqual(view.orders[3].late_fill_date, job3.end)
-        self.assertAlmostEqual(view.lateness, 1400.0)
+        self.assertAlmostEqual(view.lateness, 3.5)
 
     def test_late_reporting_week_0_full_week_1_partial_on_hand(self):
         # Section 5.3: on_hand = 200 fully covers order 0 (100) and half
@@ -426,7 +426,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         # Order 1: late_lbs = qty - (on_hand - week_0.qty) = 100;
         # late_fill_date = job1.end (the latest contributing chunk).
         # Orders 2–3: fully late.
-        # Lateness = 100*2 + 150*2 + 300*2 = 1100.
+        # Lateness = 100/200 + 1 + 1 = 2.5 (f(1) = 1).
         view = _make_view([100, 200, 150, 300])
         job1 = _job_at(_due(1) + timedelta(days=1), lbs=100)
         job2 = _job_at(_due(2) + timedelta(days=1), lbs=150)
@@ -444,7 +444,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 300.0)
         self.assertEqual(view.orders[3].late_lbs, 300.0)
         self.assertEqual(view.orders[3].late_fill_date, job3.end)
-        self.assertAlmostEqual(view.lateness, 1100.0)
+        self.assertAlmostEqual(view.lateness, 2.5)
 
     def test_late_reporting_mixed_late_early_on_time_later_no_on_hand(self):
         # Section 5.4: no on-hand. One late job at _due(1)+1d with 300 lbs
@@ -452,7 +452,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         # with 450 lbs covers orders 2+3 on-time.
         # Order 0: 100 lbs late by 8 days. Order 1: 200 lbs late by 1 day.
         # Orders 2–3: fully on-time (avail = _due(2)-1d < each due_date).
-        # Lateness = 100*2^8 + 200*2^1 = 25600 + 400 = 26000.
+        # Lateness = (100/100)*f(8) + (200/200)*f(1) = 14 + 1 = 15.
         view = _make_view([100, 200, 150, 300])
         late_job = _job_at(_due(1) + timedelta(days=1), lbs=300)
         on_time_job = _job_at(_due(2) - timedelta(days=1), lbs=450)
@@ -469,7 +469,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 300.0)
         self.assertEqual(view.orders[3].late_lbs, 0.0)
         self.assertEqual(view.orders[3].late_fill_date, on_time_job.end)
-        self.assertAlmostEqual(view.lateness, 26000.0)
+        self.assertAlmostEqual(view.lateness, 15.0)
 
     def test_late_reporting_mixed_late_early_on_time_later_with_on_hand(self):
         # Section 5.5: same as 5.4 but on_hand = 50 covers half of order 0
@@ -478,7 +478,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         # Order 0: mixed — 50 on-time from on_hand + 50 late from late_job.
         # late_lbs = 50; late_fill_date = late_job.end.
         # Orders 1–3 unchanged from 5.4.
-        # Lateness = 50*2^8 + 200*2^1 = 12800 + 400 = 13200.
+        # Lateness = (50/100)*f(8) + (200/200)*f(1) = 7 + 1 = 8.
         view = _make_view([100, 200, 150, 300])
         late_job = _job_at(_due(1) + timedelta(days=1), lbs=250)
         on_time_job = _job_at(_due(2) - timedelta(days=1), lbs=450)
@@ -495,7 +495,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 300.0)
         self.assertEqual(view.orders[3].late_lbs, 0.0)
         self.assertEqual(view.orders[3].late_fill_date, on_time_job.end)
-        self.assertAlmostEqual(view.lateness, 13200.0)
+        self.assertAlmostEqual(view.lateness, 8.0)
 
     def test_late_reporting_mixed_late_on_time_partial_last_week(self):
         # Section 5.6: same as 5.4 but on_time_job sized 350 lbs (100
@@ -519,7 +519,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 200.0)
         self.assertEqual(view.orders[3].late_lbs, 0.0)
         self.assertEqual(view.orders[3].late_fill_date, on_time_job.end)
-        self.assertAlmostEqual(view.lateness, 26000.0)
+        self.assertAlmostEqual(view.lateness, 15.0)
 
     def test_late_reporting_mixed_late_on_time_partial_last_week_with_on_hand(self):
         # Section 5.7: same as 5.5 but on_time_job sized 350 lbs → order 3
@@ -543,7 +543,7 @@ class RawViewRecomputeTests(unittest.TestCase):
         self.assertEqual(view.orders[3].allocated_lbs, 200.0)
         self.assertEqual(view.orders[3].late_lbs, 0.0)
         self.assertEqual(view.orders[3].late_fill_date, on_time_job.end)
-        self.assertAlmostEqual(view.lateness, 13200.0)
+        self.assertAlmostEqual(view.lateness, 8.0)
 
 
 class SafetyAwareViewRecomputeTests(unittest.TestCase):

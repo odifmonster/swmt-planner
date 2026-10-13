@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from swmtplanner.products import BeamSetDesc
+
 if TYPE_CHECKING:
     from swmtplanner.products import Greige
+    from swmtplanner.schedule import Machine
     from swmtplanner.planners.infinite.state import Move, State
 
 
@@ -33,11 +36,17 @@ class RegularOrder:
     `order_id` is the id of the demand-layer `SafetyAwareOrder` this
     order corresponds to (`P{week_idx}@{item.id}`), captured directly
     from that order so it never has to be rebuilt. The enumerator threads
-    it into `Machine.plan_production` as `tgt_order`."""
+    it into `Machine.plan_production` as `tgt_order`.
+
+    `lbs` is the week's remaining (unmet) demand; `gross_lbs` is the week's
+    demand as loaded, before on-hand was netted. The priority cost values a
+    predicted late delivery by `lbs / gross_lbs` — the share of the order
+    left to make — matching the raw view's valuation of a realized one."""
     item: 'Greige'
     week_idx: int
     due_date: datetime
     lbs: float
+    gross_lbs: float
     order_id: str
 
 
@@ -87,12 +96,22 @@ class ScoringContext:
     - `new_machine_avail` maps each `Greige` that appears in the
       candidate pool to `True` iff at least one of that item's
       candidates targets a `Machine.is_new` machine, used by the
-      old-machine penalty."""
+      old-machine penalty.
+    - `cheap_sets` maps each machine to the items it can run at its
+      `schedule_tail` with neither a tape-out nor a pattern change
+      (`build_cheap_sets`), and `urgent_by_item` maps each item to its
+      urgent regular orders with remaining lbs (`build_urgent_by_item`);
+      both feed the recovery cost. `recovery_cache` memoises that cost
+      per `(machine, item)` within the iteration. Hand-built contexts
+      may leave all three empty — the recovery cost is then 0."""
     priorities: dict[OrderKey, int]
     regular_orders_by_key: dict[OrderKey, 'RegularOrder']
     earliest_dp_excluding: dict[str, datetime]
     earliest_dp_time: datetime
     new_machine_avail: dict['Greige', bool]
+    cheap_sets: dict[str, frozenset[str]] = field(default_factory=dict)
+    urgent_by_item: dict[str, list['RegularOrder']] = field(default_factory=dict)
+    recovery_cache: dict = field(default_factory=dict, compare=False)
 
 
 # ----- Order eligibility --------------------------------------------------
@@ -115,9 +134,10 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
     nothing.
 
     Lives in `coordination/` (rather than `loop/candidates.py`) because
-    the eligible-order set is plant-wide — both candidate enumeration
-    and priority assignment consume it, and `coordination/` is the
-    architectural home for cross-cutting order data."""
+    the eligible-order set is plant-wide — candidate enumeration, priority
+    assignment and the main loop's reference-week advance all consume it,
+    and `coordination/` is the architectural home for cross-cutting order
+    data."""
     out: list[RegularOrder | SafetyOrder] = []
     for rls in state.rls_items.values():
         # Regular: earliest safety-aware order with unmet demand. The
@@ -130,6 +150,7 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
                     week_idx=order.week.week_idx,
                     due_date=order.week.due_date,
                     lbs=order.remaining_lbs,
+                    gross_lbs=order.week.qty_lbs,
                     order_id=order.id,
                 ))
                 added_flag = True
@@ -153,6 +174,7 @@ def eligible_orders(state: 'State') -> list[RegularOrder | SafetyOrder]:
                         week_idx=order.week.week_idx,
                         due_date=order.week.due_date,
                         lbs=order.remaining_lbs,
+                        gross_lbs=order.week.qty_lbs,
                         order_id=order.id
                     ))
                     break
@@ -288,6 +310,95 @@ def build_earliest_dp_excluding(
     return out
 
 
+# ----- Cheap sets and urgent orders (recovery cost) ------------------------
+
+def item_yarn(item: 'Greige') -> tuple[BeamSetDesc, BeamSetDesc]:
+    """The beam descriptions an item needs on its top and bottom bars."""
+    cfg = item.configuration
+    return BeamSetDesc(cfg.top_beam), BeamSetDesc(cfg.btm_beam)
+
+
+def unique_setups(state: 'State') -> set[str]:
+    """The ids of the run's demand items whose **setup** — the pair of
+    physical beam-set descriptions their bars call for (`BeamSetDesc.physical`
+    of each label) — no other demand item shares. Nothing can follow such an
+    item on a machine without a tape-out, so its small moves are batched
+    (see "Economic order quantity for unique setups" in DESIGN.md)."""
+    setups: dict[tuple[str, str], list[str]] = {}
+    for item_id, rls in state.rls_items.items():
+        top, btm = item_yarn(rls.item)
+        setups.setdefault((top.physical.id, btm.physical.id), []).append(item_id)
+    return {ids[0] for ids in setups.values() if len(ids) == 1}
+
+
+def holds_yarn(machine: 'Machine', item: 'Greige') -> bool:
+    """Whether the sets on the machine's bars at its tail fit `item`'s beam
+    descriptions — the preamble's test for "no tape-out needed"."""
+    status = machine.current_status
+    top, btm = item_yarn(item)
+    for bar, want in (('top', top), ('btm', btm)):
+        beam = status.beam(bar)
+        if beam is None or not beam.fits(want):
+            return False
+    return True
+
+
+def cheap_set_after(state: 'State', machine_id: str, item: 'Greige') -> frozenset[str]:
+    """The machine's cheap set once it runs `item`: every item that can run
+    on it whose yarn is `item`'s on both bars and that is in `item`'s
+    pattern family (any family on a new machine)."""
+    machine = state.machines[machine_id]
+    top, btm = item_yarn(item)
+    out = set()
+    for rls in state.rls_items.values():
+        other = rls.item
+        if not other.can_run_on_mchn(machine_id):
+            continue
+        o_top, o_btm = item_yarn(other)
+        if not (o_top.same_set(top) and o_btm.same_set(btm)):
+            continue
+        if machine.is_new or other.family == item.family:
+            out.add(other.id)
+    return frozenset(out)
+
+
+def build_cheap_sets(state: 'State') -> dict[str, frozenset[str]]:
+    """Each machine's cheap set at its `schedule_tail`: the items it can run
+    whose yarn fits its mounted sets and whose pattern family is the one
+    it is on (any family on a new machine). See "Changeover capacity —
+    Recovery cost" in DESIGN.md."""
+    out: dict[str, frozenset[str]] = {}
+    for m_id, machine in state.machines.items():
+        family = machine.current_status.current_item.family
+        items = set()
+        for rls in state.rls_items.values():
+            item = rls.item
+            if not item.can_run_on_mchn(m_id) or not holds_yarn(machine, item):
+                continue
+            if machine.is_new or item.family == family:
+                items.add(item.id)
+        out[m_id] = frozenset(items)
+    return out
+
+
+def build_urgent_by_item(state: 'State') -> dict[str, list[RegularOrder]]:
+    """Each item's urgent regular orders — through `state.reference_week_idx`
+    — with remaining lbs, in week order, as `RegularOrder`s (so `lbs` is
+    the remaining and `gross_lbs` the week's demand as loaded)."""
+    out: dict[str, list[RegularOrder]] = {}
+    for rls in state.rls_items.values():
+        orders = [
+            RegularOrder(item=rls.item, week_idx=o.week.week_idx,
+                         due_date=o.week.due_date, lbs=o.remaining_lbs,
+                         gross_lbs=o.week.qty_lbs, order_id=o.id)
+            for o in rls.safety_view.orders
+            if o.remaining_lbs > 0 and o.week.week_idx <= state.reference_week_idx
+        ]
+        if orders:
+            out[rls.item.id] = orders
+    return out
+
+
 # ----- ScoringContext construction ----------------------------------------
 
 def build_context(
@@ -330,6 +441,8 @@ def build_context(
     return ScoringContext(
         priorities=assign_priorities(state),
         regular_orders_by_key=regular_orders_by_key,
+        cheap_sets=build_cheap_sets(state),
+        urgent_by_item=build_urgent_by_item(state),
         earliest_dp_excluding=build_earliest_dp_excluding(state, candidates),
         earliest_dp_time=min(_dp_time(c) for c in candidates),
         new_machine_avail=build_new_machine_avail(state, candidates),

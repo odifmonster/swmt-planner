@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from . import workcal
+from . import planning_mode
 from .has_id import HasID
 from .observer import Observer
 from .linkedlist import LinkedList
@@ -12,5 +13,5 @@ workcal_from_dict = workcal.workcal_from_dict
 
 __all__ = [
     'HasID', 'Observer', 'workcal', 'WorkCal', 'load_workcal',
-    'workcal_from_dict', 'LinkedList', 'Counters',
+    'workcal_from_dict', 'LinkedList', 'Counters', 'planning_mode',
 ]

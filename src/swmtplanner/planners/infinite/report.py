@@ -10,6 +10,7 @@ from swmtplanner.schedule import (
     Knit, Waste, Doff, TapeOut, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
 )
+from .schedule_json import has_work
 
 if TYPE_CHECKING:
     from swmtplanner.products import BeamSet
@@ -21,7 +22,8 @@ __all__ = [
     'schedule_dataframe', 'collapsed_schedule_dataframe',
     'production_dataframe', 'xref_dataframe',
     'unmet_demand_dataframe',
-    'late_orders_dataframe', 'write_plan_report_xlsx',
+    'late_orders_dataframe', 'changeovers_dataframe', 'prior_jobs_dataframe',
+    'write_plan_report_xlsx',
 ]
 
 # Activity groupings for the collapsed schedule (see DESIGN.md, Collapsed
@@ -117,9 +119,12 @@ def schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
       activities show `'from <item> to <item>'`, Doff/Idle are blank.
 
     Within each machine, rows are in chronological order (the order
-    `Machine.add_activities` appended them)."""
+    `Machine.add_activities` appended them). Machines whose only activity
+    is `Idle` for the whole run are left out (`schedule_json.has_work`)."""
     rows = []
     for machine_id, activities in report.schedules.items():
+        if not has_work(activities):
+            continue        # idle for the whole run: not in the outputs
         for a in activities:
             rows.append({
                 'machine': machine_id,
@@ -162,6 +167,8 @@ def collapsed_schedule_dataframe(report: 'PlanReport') -> pd.DataFrame:
     Rows stay in chronological order within each machine."""
     rows = []
     for machine_id, activities in report.schedules.items():
+        if not has_work(activities):
+            continue        # idle for the whole run: not in the outputs
         acts = list(activities)
         i, n = 0, len(acts)
         while i < n:
@@ -220,9 +227,10 @@ def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
     roll's `completion_time`; `NaT` for a job with no rolls), and
     `tgt_order` (the id of the order the job was raised to target,
     `Job.tgt_order`; `pd.NA`/blank when the job targeted no specific
-    order, e.g. a `'next_runout'` run-up job). Rows are sorted by
-    `(item, completion)` so each item's production reads as a
-    chronological run."""
+    order, e.g. a `'next_runout'` run-up job), and `fill` (True when the
+    job knit rolls of the current item while the machine waited for a
+    changeover-ration slot). Rows are sorted by `(item, completion)` so
+    each item's production reads as a chronological run."""
     rows = []
     for item_id, jobs in report.jobs_by_item.items():
         for job in jobs:
@@ -238,11 +246,12 @@ def production_dataframe(report: 'PlanReport') -> pd.DataFrame:
                 'tgt_order': (
                     job.tgt_order if job.tgt_order is not None else pd.NA
                 ),
+                'fill': job.fill,
             })
     df = pd.DataFrame(
         rows,
         columns=['item', 'job_id', 'total_rolls', 'total_lbs', 'completion',
-                 'tgt_order'],
+                 'tgt_order', 'fill'],
     )
     if not df.empty:
         df = df.sort_values(['item', 'completion']).reset_index(drop=True)
@@ -305,13 +314,83 @@ def late_orders_dataframe(report: 'PlanReport') -> pd.DataFrame:
             'item': order.rls_item.item.id,
             'week_idx': order.week.week_idx,
             'late_lbs': order.late_lbs,
+            # The share of the week's gross demand that is late — the
+            # quantity the lateness cost is valued on (see demand/DESIGN.md).
+            'late_pct': (100.0 * order.late_lbs / order.week.qty_lbs
+                         if order.week.qty_lbs > 0 else 0.0),
             'fill_date': order.late_fill_date
         }
         for order in report.late_orders
     ]
-    df = pd.DataFrame(rows, columns=['order_id', 'week_idx', 'late_lbs', 'fill_date'])
+    df = pd.DataFrame(rows, columns=['order_id', 'week_idx', 'late_lbs', 'late_pct', 'fill_date'])
     df['late_lbs'] = _round_int(df['late_lbs'])
+    df['late_pct'] = df['late_pct'].round(1)
     return df.set_index('order_id')
+
+
+def changeovers_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    """The changeover ration's ledger (see "Changeover capacity" in
+    DESIGN.md): one `period` row per `(resource, day)` that has a period
+    and either a booking or a wait — `capacity` units allowed, `used`
+    units booked, `activities` as `machine:id@HH:MM` — and one `wait` row
+    per slot wait (an `Idle` with a reason): the machine, what it waited
+    for, `start` and `end`. A `change` unit is one per preamble that
+    changed the machine: one per changeover activity, listed by the
+    tape-out that opened the preamble when there was one, plus one per
+    tape-out with no changeover before the next knit (a same-item tape-out
+    of a foreign bar). Empty when the run has no ration."""
+    cols = ['row', 'resource', 'day', 'period_start', 'period_end',
+            'capacity', 'used', 'activities', 'machine', 'start', 'end']
+    cap = report.capacity
+    if cap is None or not cap.resources:
+        return pd.DataFrame(columns=cols)
+    used: dict[tuple[str, 'object'], list[str]] = {}
+    units: dict[tuple[str, 'object'], int] = {}
+    periods: dict[tuple[str, 'object'], 'object'] = {}
+    waits = []
+
+    def count(kind: str, n: int, a, machine_id: str) -> None:
+        if cap.limits(kind) is None:
+            return
+        p = cap.period_of(kind, a.start)
+        if p is None:
+            return          # placed before the ration applied (initial state)
+        key = (kind, p.day)
+        periods[key] = p
+        units[key] = units.get(key, 0) + n
+        used.setdefault(key, []).append(f'{machine_id}:{a.id}@{a.start:%H:%M}')
+
+    for machine_id, activities in report.schedules.items():
+        pending = None      # a tape-out whose preamble has not shown its changeover yet
+        for a in activities:
+            if isinstance(a, TapeOut):
+                if pending is not None:
+                    count('change', 1, pending, machine_id)
+                pending = a
+                count('tape_out', 2 if a.bars == 'both' else 1, a, machine_id)
+            elif isinstance(a, (StyleChange, RunnerChange, PatternChange)):
+                if isinstance(a, PatternChange):
+                    count('pattern_change', 1, a, machine_id)
+                count('change', 1, pending if pending is not None else a, machine_id)
+                pending = None
+            elif isinstance(a, Knit):
+                if pending is not None:
+                    count('change', 1, pending, machine_id)
+                    pending = None
+            elif isinstance(a, Idle) and a.reason:
+                waits.append({'row': 'wait', 'resource': a.reason.replace(' slot', ''),
+                              'machine': machine_id, 'start': a.start, 'end': a.end})
+        if pending is not None:
+            count('change', 1, pending, machine_id)
+    rows = []
+    for key in sorted(periods, key=lambda k: (k[1], k[0])):
+        p = periods[key]
+        rows.append({'row': 'period', 'resource': key[0], 'day': p.day,
+                     'period_start': p.start, 'period_end': p.end,
+                     'capacity': cap.limits(key[0]).units_per_period,
+                     'used': units[key], 'activities': ', '.join(used[key])})
+    rows.extend(sorted(waits, key=lambda w: w['start']))
+    return pd.DataFrame(rows, columns=cols)
 
 
 def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
@@ -331,6 +410,21 @@ def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
 
 
 # ----- Numeric helpers ----------------------------------------------------
+
+def prior_jobs_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    """The `prior_jobs` sheet: one row per job of the prior plan — machine,
+    prior_job, item, rolls, order, due_date, start, status (`consumed` /
+    `dropped` / `open`), job_id, note — in start order across machines
+    (see "Sticking to the prior plan")."""
+    rows = [
+        {'machine': f.machine, 'prior_job': f.prior_job, 'item': f.item, 'rolls': f.rolls,
+         'order': f.order, 'due_date': f.due_date, 'start': f.start, 'status': f.status,
+         'job_id': f.job_id, 'note': f.note}
+        for f in sorted(report.prior, key=lambda f: (f.start, f.machine))
+    ]
+    return pd.DataFrame(rows, columns=['machine', 'prior_job', 'item', 'rolls', 'order',
+                                       'due_date', 'start', 'status', 'job_id', 'note'])
+
 
 def _round_int(s: pd.Series) -> pd.Series:
     """Round a numeric column to the nearest integer, preserving NaN via
@@ -366,7 +460,10 @@ def _activity_desc(a: 'Activity') -> str:
     the lbs hung and a `TapeOut` the lbs returned to stock; a `Knit` adds
     its variant when known."""
     if isinstance(a, Knit):
-        return a.item.id if a.variant is None else f'{a.item.id} [{a.variant}]'
+        text = a.item.id if a.variant is None else f'{a.item.id} [{a.variant}]'
+        bars = [f'{bar} #{bs.set_no}' + ('' if bs.merge is None else f' {bs.merge}')
+                for bar, bs in (('top', a.top_beam), ('btm', a.btm_beam)) if bs is not None]
+        return f'{text} {" / ".join(bars)}' if bars else text
     if isinstance(a, Waste):
         return f'{_beam_set_desc(a.beam)} on {a.bar}'
     if isinstance(a, Hanging):
@@ -387,7 +484,9 @@ def _activity_desc(a: 'Activity') -> str:
         return ', '.join(parts) if parts else a.bars
     if isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         return f'from {a.from_item.id} to {a.to_item.id}'
-    if isinstance(a, (Doff, Idle)):
+    if isinstance(a, Idle):
+        return f'waiting for {a.reason}' if a.reason else ''
+    if isinstance(a, Doff):
         return ''
     return ''
 
@@ -431,3 +530,10 @@ def write_plan_report_xlsx(
         late_orders_dataframe(report).to_excel(
             writer, sheet_name='late_orders'
         )
+        changeovers_dataframe(report).to_excel(
+            writer, sheet_name='changeovers', index=False,
+        )
+        if report.prior:
+            prior_jobs_dataframe(report).to_excel(
+                writer, sheet_name='prior_jobs', index=False,
+            )

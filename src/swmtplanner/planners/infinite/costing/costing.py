@@ -8,7 +8,13 @@ from swmtplanner.schedule import (
     Job, TapeOut, StyleChange, RunnerChange, PatternChange, Idle, Waste,
 )
 
-from swmtplanner.planners.infinite.coordination import OrderKey, ScoringContext
+from swmtplanner.demand.view import lateness_factor
+from swmtplanner.schedule import (
+    effective_rate, TAPE_OUT_BOTH_DURATION, PATTERN_CHANGE_DURATION,
+)
+from swmtplanner.planners.infinite.coordination import (
+    OrderKey, RegularOrder, ScoringContext, cheap_set_after, holds_yarn,
+)
 from swmtplanner.planners.infinite.report import _activity_desc
 from swmtplanner.planners.infinite.state import Move, State
 
@@ -27,11 +33,16 @@ class CostWeights:
     returned by `RlsItem.cost_if` / the demand views. Per-machine
     schedule weights apply per occurrence (TapeOut, the changeover types),
     per work-hour (Idle), or per lb (Waste). Phase 2 cross-cutting weights apply per move
-    being scored — `priority` per rank step, `level_loading` per work-
+    being scored — `priority` per whole higher-priority order per predicted
+    day late (the same units as `lateness`), `level_loading` per work-
     hour delta from the earliest decision point, `old_machine` per move
     that targets a legacy machine when a new one is candidate-available
-    for the same item. All weights are required; callers must set every
-    field explicitly (0 to opt out of a contribution)."""
+    for the same item. `recovery` is per whole stranded order per predicted
+    day late — the same units as `lateness` — charged when a move takes a
+    machine off items whose open demand the remaining cheap machines
+    cannot cover (see "Changeover capacity — Recovery cost" in DESIGN.md).
+    All weights are required; callers must set every field explicitly (0
+    to opt out of a contribution)."""
     # per-item demand weights
     lateness: float
     drainage: float
@@ -53,6 +64,8 @@ class CostWeights:
     priority: float
     level_loading: float
     old_machine: float
+    # changeover-capacity weight (Phase 5): the recovery cost
+    recovery: float
 
 
 class Costing:
@@ -244,7 +257,9 @@ class Costing:
             ctx.new_machine_avail.get(move.item, False) and not machine.is_new
         ) else 0.0
 
-        # (label, kind, raw quantity, weight) for all fourteen components.
+        recovery_q, _strands = self.recovery_detail(state, move, ctx)
+
+        # (label, kind, raw quantity, weight) for all fifteen components.
         components = [
             ('lateness', 'inventory', lateness_q, w.lateness),
             ('drainage', 'inventory', drainage_q, w.drainage),
@@ -260,6 +275,7 @@ class Costing:
             ('priority', 'other', priority_q, w.priority),
             ('level_loading', 'other', level_q, w.level_loading),
             ('old_machine', 'other', old_q, w.old_machine),
+            ('recovery', 'other', recovery_q, w.recovery),
         ]
 
         total = 0.0
@@ -329,8 +345,9 @@ class Costing:
         self, state: State, move: Move, ctx: ScoringContext,
     ) -> float:
         """Per-move cross-cutting cost: predicted-lateness priority
-        sum, level-loading work-hour delta × w.level_loading, and the
-        flat old-machine penalty when applicable."""
+        sum, level-loading work-hour delta × w.level_loading, the flat
+        old-machine penalty when applicable, and the recovery cost of the
+        items the move takes its machine away from."""
         w = self._weights
         machine = state.machines[move.machine_id]
 
@@ -354,20 +371,139 @@ class Costing:
         else:
             old_machine_cost = 0.0
 
-        return priority_cost + level_loading_cost + old_machine_cost
+        recovery_q, _ = self.recovery_detail(state, move, ctx)
+        return (priority_cost + level_loading_cost + old_machine_cost
+                + w.recovery * recovery_q)
+
+    def recovery_detail(
+        self, state: State, move: Move, ctx: ScoringContext,
+    ) -> tuple[float, list[tuple[str, float]]]:
+        """Unweighted recovery quantity for `move`, with the per-item
+        breakdown `[(item id, contribution)]` of the items it strands. See
+        "Changeover capacity — Recovery cost" in DESIGN.md.
+
+        `lost` is what the move's machine could make cheaply (no tape-out, no
+        pattern change) at its tail and no longer can once it runs the move's
+        item. For each lost item with urgent open demand, the machines still
+        in its cheap set are walked against its orders in due-date order; the
+        pounds they cannot cover on time are charged at the fill time the
+        plant's recovery routes imply — a style change, a runner change, a
+        rationed pattern change or a rationed tape-out on some other machine,
+        a week after each route's earliest availability — weighted by the
+        number of machines on each route, in the raw view's lateness shape
+        (`uncovered / gross × lateness_factor(days late)`). Memoised per
+        `(machine, item)` on `ctx.recovery_cache`; 0 for a context without
+        cheap sets."""
+        M = move.machine_id
+        before = ctx.cheap_sets.get(M)
+        if before is None:
+            return 0.0, []
+        key = (M, move.item.id)
+        hit = ctx.recovery_cache.get(key)
+        if hit is not None:
+            return hit
+        lost = before - cheap_set_after(state, M, move.item)
+        cap = state.capacity
+        week = timedelta(days=7)
+        one_day = timedelta(days=1)
+        total = 0.0
+        strands: list[tuple[str, float]] = []
+        for item_id in sorted(lost):
+            orders = ctx.urgent_by_item.get(item_id)
+            if not orders:
+                continue
+            item = state.rls_items[item_id].item
+            others = [m for m, cs in ctx.cheap_sets.items() if m != M and item_id in cs]
+
+            # What the remaining cheap machines cannot cover on time.
+            used = {m: 0.0 for m in others}
+            uncovered: list[tuple[RegularOrder, float]] = []
+            for order in sorted(orders, key=lambda o: o.due_date):
+                need = order.lbs
+                for m in others:
+                    if need <= 0:
+                        break
+                    mach = state.machines[m]
+                    hours = mach.workcal.get_work_hours_between(mach.schedule_tail, order.due_date)
+                    avail = max(0.0, hours * self._rate(mach, item) - used[m])
+                    take = min(avail, need)
+                    used[m] += take
+                    need -= take
+                if need > 1e-6:
+                    uncovered.append((order, need))
+            if not uncovered:
+                continue
+            horizon = max(o.due_date for o in orders)
+
+            # The routes the plant has to get the item back on a machine.
+            routes: dict[str, list] = {'style': [], 'runner': [], 'pattern': [], 'tape': []}
+            for m, mach in state.machines.items():
+                if m == M or not item.can_run_on_mchn(m):
+                    continue
+                if holds_yarn(mach, item):
+                    if mach.is_new:
+                        routes['style'].append(mach)
+                    elif mach.current_status.current_item.family == item.family:
+                        routes['runner'].append(mach)
+                    else:
+                        routes['pattern'].append(mach)
+                else:
+                    routes['tape'].append(mach)
+            # Every route is a change, so each fill time also waits for the
+            # next free change slot (0 h: the change is counted on the day
+            # it starts).
+            fills: dict[str, datetime] = {}
+            for r in ('style', 'runner'):
+                if routes[r]:
+                    t = max(min(x.schedule_tail for x in routes[r]), horizon)
+                    fills[r] = cap.next_slot('change', 1, t, 0.0)
+            if routes['pattern']:
+                t = min(x.schedule_tail for x in routes['pattern'])
+                t = cap.next_slot('pattern_change', 1, t, PATTERN_CHANGE_DURATION)
+                fills['pattern'] = cap.next_slot('change', 1, t, 0.0)
+            if routes['tape']:
+                mach = min(routes['tape'], key=lambda x: x.schedule_tail)
+                t = cap.next_slot('tape_out', 2, mach.schedule_tail, TAPE_OUT_BOTH_DURATION)
+                if (not mach.is_new
+                        and mach.current_status.current_item.family != item.family):
+                    t = cap.next_slot('pattern_change', 1, t, PATTERN_CHANGE_DURATION)
+                fills['tape'] = cap.next_slot('change', 1, t, 0.0)
+            n_total = sum(len(routes[r]) for r in fills)
+            if n_total == 0:
+                continue
+            rec = 0.0
+            for r, t in fills.items():
+                p = len(routes[r]) / n_total
+                fill = t + week
+                for order, unc in uncovered:
+                    days_late = (fill - order.due_date) / one_day
+                    rec += p * (unc / order.gross_lbs) * lateness_factor(days_late)
+            total += rec
+            strands.append((item_id, rec))
+        result = (total, strands)
+        ctx.recovery_cache[key] = result
+        return result
+
+    @staticmethod
+    def _rate(machine, item) -> float:
+        """The item's working rate on the machine (lbs per work hour)."""
+        return effective_rate(item.get_rate_on_mchn(machine.id),
+                              'new' if machine.is_new else 'old')
 
     def _priority_raw(
         self, move: Move, ctx: ScoringContext,
         debuglog: 'DebugLog | None' = None,
     ) -> float:
-        """Unweighted priority quantity: the summed `lbs × 2^days_late`
-        opportunity-cost shape over the higher-priority regular orders this
-        move defers. For each regular order ranked better than the move's own,
-        assume a fill time of `max(due_date + 1 day,
-        earliest_dp_excluding[move.machine_id])` (falling back to
-        `ctx.earliest_dp_time`). Safety orders are skipped — their miss-cost is
-        drainage, not lateness. `_priority_cost` is this times `w.priority`.
-        See "Priority cost" in DESIGN.md.
+        """Unweighted priority quantity: the summed predicted lateness of the
+        higher-priority regular orders this move defers, each valued as the
+        raw view values a realized late delivery — `(lbs / gross_lbs) ×
+        lateness_factor(days_late)`. For each regular order ranked better
+        than the move's own, the assumed fill time is one week after
+        `earliest_dp_excluding[move.machine_id]` (falling back to
+        `ctx.earliest_dp_time`); an order not yet due by then costs nothing.
+        Safety orders are skipped — their miss-cost is drainage, not
+        lateness. `_priority_cost` is this times `w.priority`. See "Priority
+        cost" in DESIGN.md.
 
         When `debuglog` is given, one `priority_detail` row is written per
         deferred order (its `cost` is the weighted contribution; the `move_id`
@@ -385,9 +521,10 @@ class Costing:
             move.machine_id, ctx.earliest_dp_time,
         )
         one_day = timedelta(days=1)
+        fill_time = other_dp + timedelta(days=7)
         w_priority = self._weights.priority
 
-        lateness_lb_days = 0.0
+        predicted_lateness = 0.0
         for key, rank in ctx.priorities.items():
             if rank >= move_rank:
                 continue
@@ -395,10 +532,11 @@ class Costing:
             if order is None:
                 # Safety order — skipped (regulars-only scope).
                 continue
-            fill_time = max(order.due_date + one_day, other_dp)
             days_late = (fill_time - order.due_date) / one_day
-            contribution = order.lbs * (2.0 ** days_late)
-            lateness_lb_days += contribution
+            if days_late <= 0:
+                continue
+            contribution = (order.lbs / order.gross_lbs) * lateness_factor(days_late)
+            predicted_lateness += contribution
             if debuglog is not None:
                 debuglog.add_row(
                     'priority_detail',
@@ -410,7 +548,7 @@ class Costing:
                     cost=w_priority * contribution,
                 )
 
-        return lateness_lb_days
+        return predicted_lateness
 
     def _priority_cost(
         self, move: Move, ctx: ScoringContext,
