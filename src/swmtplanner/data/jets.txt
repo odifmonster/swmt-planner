@@ -1,0 +1,11 @@
+SELECT * FROM openquery([JOMARPA],
+    'SELECT DISTINCT
+        CASE WHEN B2CHA=''0'' THEN B2BBE ELSE SUBSTR(B2CHA, 1, 10) END AS "Lot",
+        B2CHR3 AS "Machine"
+    FROM TXMYBW00
+    WHERE
+        B2DAT>$0 AND
+        B2DAT<$1 AND
+        B2ANR LIKE ''FF%'' AND
+        B2BEW=''06'' AND
+        B2LO2=''BD''')

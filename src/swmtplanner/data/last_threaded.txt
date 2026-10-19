@@ -1,0 +1,36 @@
+WITH threaded AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY new_Location, new_Bars
+            ORDER BY new_ThreadingDateandTime DESC
+        ) AS rn
+    FROM new_sethistoryBase
+    WHERE
+        new_ThreadingDateandTime IS NOT NULL AND
+        new_TapeOutDateandTime IS NULL AND
+        new_SetNumber NOT LIKE '%_del'
+), yarnt AS (
+    SELECT
+        new_yarnId AS "yarnId",
+        new_merge AS "merge",
+        AccountBase."Name" AS "vendor",
+        new_Denier AS "denier"
+    FROM new_yarnBase
+        LEFT JOIN AccountBase ON new_yarnBase.new_Producer=AccountBase.AccountId
+)
+SELECT
+    threaded.new_Location AS "machine",
+    threaded.new_Bars AS "bar",
+    threaded.new_CurrentWeight AS "rem_lbs",
+    bsz.new_name AS "beam_size",
+    threaded.new_Beams AS "nbeams",
+    threaded.new_SetNumber AS "set_no",
+    yarnt."merge" AS "merge",
+    yarnt.vendor AS "vendor",
+    yarnt.denier AS "denier"
+FROM threaded
+    LEFT JOIN yarnt ON yarnt.yarnId=threaded.new_MergeId
+    LEFT JOIN new_beamsizeBase AS bsz ON threaded.new_BeamSizeId=bsz.new_beamsizeId
+WHERE threaded.rn=1
+ORDER BY threaded.new_Location, threaded.new_Bars

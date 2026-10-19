@@ -26,3 +26,6 @@ classifiers = [
 
 [project.scripts]
 excel-data = "swmtplanner.excel.cli:app"
+
+[tool.setuptools.package-data]
+"swmtplanner.data" = ["*.txt"]

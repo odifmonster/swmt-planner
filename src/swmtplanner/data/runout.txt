@@ -1,0 +1,5 @@
+SELECT
+    new_Location AS "machine",
+    new_Bar AS "bar",
+    new_WeightRemaining AS "rem_lbs"
+FROM new_runoutsetweightBase

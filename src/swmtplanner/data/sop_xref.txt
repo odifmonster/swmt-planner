@@ -1,0 +1,16 @@
+SELECT * FROM openquery([JOMARPA],
+    'SELECT
+        DISTINCT VBLN AS "Order Num",
+        VANR AS "Stock Item",
+        VFLX11 AS "SOP",
+        PSA25 AS "Slit Instructions"
+    FROM TXUYUF01
+        LEFT JOIN (
+            SELECT DISTINCT PSANR, PSA25 FROM TXRYPS00
+            WHERE PSA25 IS NOT NULL
+        ) ON VFLX11=PSANR
+    WHERE
+        VBLA=''SO'' AND
+        VANR LIKE ''FF%'' AND
+        VDAT>$0 AND
+        VFLX11 IS NOT NULL')

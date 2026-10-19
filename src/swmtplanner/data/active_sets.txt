@@ -1,0 +1,28 @@
+SELECT
+	sh.new_name AS "set_no",
+	sh.new_ReceivedDate AS "rcv_date",
+	sh.new_Assn_Date AS "assign_date",
+	sh.new_CurrentWeight AS "lbs",
+    bsz.new_name AS "beam_size",
+	sh.new_Beams AS "beams",
+	sh.new_Ends AS "ends",
+	y.new_merge AS "merge",
+	ac."Name" AS "vendor",
+	y.new_Denier AS "denier",
+	y.new_Luster AS "luster",
+	d.new_yarntype AS "yarn_type",
+    sh.new_Comments AS "comments"
+FROM new_sethistoryBase AS sh
+    LEFT JOIN new_beamsizeBase AS bsz ON sh.new_BeamSizeId=bsz.new_beamsizeId
+	LEFT JOIN new_yarnBase AS y ON sh.new_MergeId=y.new_yarnId
+	LEFT JOIN new_yarndescriptionBase AS d ON d.new_yarndescriptionId=y.new_YarnDesc
+	LEFT JOIN AccountBase AS ac ON y.new_Producer=ac.AccountId
+WHERE
+    sh.new_name NOT LIKE '%_del' AND
+	sh.new_EmptyDateandTime IS NULL AND
+	(sh.new_Active='A' OR sh.new_Active IS NULL) AND
+	sh.new_CurrentWeight>50 AND
+    sh.new_ThreadingDateandTime IS NULL AND
+	sh.new_SetNumber NOT LIKE '%_del' AND
+    sh.new_Status='I'
+ORDER BY sh.new_name

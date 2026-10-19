@@ -1,0 +1,52 @@
+WITH merges AS (
+    SELECT
+        new_yarnId AS "yarnId",
+        new_merge AS "merge",
+        AccountBase."Name" AS "vendor",
+        new_Denier AS "denier",
+        new_Luster AS "luster",
+        new_yarndescriptionBase.new_yarntype AS "desc"
+    FROM new_yarnBase
+        LEFT JOIN new_yarndescriptionBase ON new_yarndescriptionId=new_YarnDesc
+        LEFT JOIN AccountBase ON new_yarnBase.new_Producer=AccountBase.AccountId )
+SELECT
+    s.new_Style AS "variant",
+    s.new_ktgwidth AS "width",
+    s.new_RackWt AS "rack_wt",
+    s.new_Gauge AS "gauge",
+    s.new_Beams AS "beams",
+    s.new_b1ends_crct1 AS "bar1_ends",
+    m1."merge" AS "bar1_merge", m1."vendor" AS "bar1_vendor", m1.denier AS "bar1_denier",
+    m1.luster AS "bar1_luster", m1."desc" AS "bar1_desc",
+    s.new_b2ends_crct1 AS "bar2_ends",
+    m2."merge" AS "bar2_merge", m2."vendor" AS "bar2_vendor", m2.denier AS "bar2_denier",
+    m2.luster AS "bar2_luster", m2."desc" AS "bar2_desc",
+    s.new_b3ends_crct1 AS "bar3_ends",
+    m3."merge" AS "bar3_merge", m3."vendor" AS "bar3_vendor", m3.denier AS "bar3_denier",
+    m3.luster AS "bar3_luster", m3."desc" AS "bar3_desc",
+    s.new_b4ends_crct1 AS "bar4_ends",
+    m4."merge" AS "bar4_merge", m4."vendor" AS "bar4_vendor", m4.denier AS "bar4_denier",
+    m4.luster AS "bar4_luster", m4."desc" AS "bar4_desc",
+    s.new_b1pct AS "bar1_pct", s.new_b1run AS "bar1_rl",
+    st1.new_name AS "bar1_stitch", thr1.new_name AS "bar1_thread",
+    s.new_b2pct AS "bar2_pct", s.new_b2run AS "bar2_rl",
+    st2.new_name AS "bar2_stitch", thr2.new_name AS "bar2_thread",
+    s.new_b3pct AS "bar3_pct", s.new_b3run AS "bar3_rl",
+    st3.new_name AS "bar3_stitch", thr3.new_name AS "bar3_thread",
+    s.new_b4pct AS "bar4_pct", s.new_b4run AS "bar4_rl",
+    st4.new_name AS "bar4_stitch", thr4.new_name AS "bar4_thread"
+FROM new_styleBase AS s
+    LEFT JOIN merges AS m1 ON m1.yarnId=s.new_b1mergeId
+    LEFT JOIN merges AS m2 ON m2.yarnId=s.new_b2mergeId
+    LEFT JOIN merges AS m3 ON m3.yarnId=s.new_b3mergeId
+    LEFT JOIN merges AS m4 ON m4.yarnId=s.new_b4mergeId
+    LEFT JOIN new_stitchBase AS st1 ON s.new_b1stitchId=st1.new_stitchId
+    LEFT JOIN new_stitchBase AS st2 ON s.new_b2stitchId=st2.new_stitchId
+    LEFT JOIN new_stitchBase AS st3 ON s.new_b3stitchId=st3.new_stitchId
+    LEFT JOIN new_stitchBase AS st4 ON s.new_b4stitchId=st4.new_stitchId
+    LEFT JOIN new_threadpatternBase AS thr1 ON s.new_b1threadId=thr1.new_threadpatternId
+    LEFT JOIN new_threadpatternBase AS thr2 ON s.new_b2threadId=thr2.new_threadpatternId
+    LEFT JOIN new_threadpatternBase AS thr3 ON s.new_b3threadId=thr3.new_threadpatternId
+    LEFT JOIN new_threadpatternBase AS thr4 ON s.new_b4threadId=thr4.new_threadpatternId
+WHERE
+    s.new_ktgwidth>0 AND s.new_RackWt>0 AND s.new_Gauge IS NOT NULL

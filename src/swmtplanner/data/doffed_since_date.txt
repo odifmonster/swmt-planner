@@ -1,0 +1,41 @@
+WITH unq_tkts AS (
+	SELECT
+		*,
+		SUBSTRING(new_Ticket, 1, 3) AS "location",
+		ROW_NUMBER() OVER (
+			PARTITION BY new_Ticket
+			ORDER BY new_ScanCreatedDate DESC
+		) AS tkt_rn
+	FROM new_scanneditemsBase
+	WHERE new_TicketType='PIECE' AND new_Isvalid=1
+), prev_tkts AS (
+	SELECT
+		*,
+		ROW_NUMBER() OVER (
+			PARTITION BY "location"
+			ORDER BY new_ScanCreatedDate DESC
+		) AS loc_rn
+	FROM unq_tkts
+	WHERE tkt_rn=1
+)
+SELECT
+	prev_tkts."location" AS "machine",
+	prev_tkts.new_Ticket AS "ticket",
+	prev_tkts.new_ScanCreatedDate AS "start_ts",
+	prev_end.new_ScanCreatedDate AS "end_ts",
+	sxref.new_Style AS "style",
+	sxref.new_RackWt AS "rack_wt",
+	CASE
+		WHEN txref.new_Dracks IS NULL
+		THEN txref.new_Racks
+		ELSE txref.new_Dracks
+	END AS "racks"
+FROM prev_tkts
+	LEFT JOIN new_ticketsBase AS txref ON prev_tkts.new_Ticket=txref.new_Ticket
+	LEFT JOIN new_styleBase AS sxref ON sxref.new_styleId=txref.new_StyleId
+	LEFT JOIN prev_tkts AS prev_end ON
+		prev_tkts."location" = prev_end."location" AND
+		prev_tkts.loc_rn = prev_end.loc_rn+1
+WHERE
+	prev_tkts.new_ScanCreatedDate>DATETIMEFROMPARTS($0, 0)
+ORDER BY prev_tkts."location", prev_tkts.new_ScanCreatedDate

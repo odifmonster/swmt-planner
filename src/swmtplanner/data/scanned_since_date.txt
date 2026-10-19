@@ -1,0 +1,16 @@
+WITH unq_tkts AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY new_Ticket
+            ORDER BY new_ScanCreatedDate DESC
+        ) AS tkt_rn
+    FROM new_scanneditemsBase
+    WHERE new_Isvalid=1
+)
+SELECT
+    new_Ticket AS "ticket",
+    new_TicketType AS "kind",
+    new_ScanCreatedDate AS "scan_ts"
+FROM unq_tkts
+WHERE tkt_rn=1 AND new_ScanCreatedDate>=DATETIMEFROMPARTS($0, 0)

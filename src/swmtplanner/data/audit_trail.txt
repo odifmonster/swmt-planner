@@ -1,0 +1,68 @@
+SELECT * FROM openquery([JOMARPA],
+    'WITH "audit" AS (
+        SELECT
+            B2VNR AS "Trans ID",
+            B2DAT AS "Date",
+            B2TIME AS "Time",
+            B2BNR AS "Business Unit",
+            B2PLT AS "Plant",
+            CASE WHEN B2CHA=''0'' THEN B2BBE ELSE SUBSTR(B2CHA, 1, 10) END AS "Lot",
+            B2ANR AS "Stock Item",
+            B2KDL AS "Cust No.",
+            B2RNR AS "Roll ID",
+            B2CHR5 AS "WIP Roll",
+            B2BEW AS "Trans Code",
+            B2USER AS "Username",
+            B2CHR3 AS "Machine",
+            B2LO1 AS "Loc 1",
+            B2LO2 AS "Loc 2",
+            B2MGES AS "Quantity",
+            B2QUAL AS "Quality"
+        FROM TXMYBW00
+        WHERE B2DAT>$0 AND B2DAT<$1 AND B2ANR LIKE ''FF%''
+    )
+    SELECT
+        "Trans ID", "Date", "Time",
+        "Lot", "Stock Item",
+        "Cust No.", KNA1 AS "Cust Name",
+        "Roll ID", "WIP Roll",
+        "Quantity", "Quality",
+        "Trans Code", TRNSDSC AS "Trans Desc",
+        "Username",
+        "Machine",
+        "Loc 1", "Loc 2",
+        RTFILB AS "Grade Code", GRDDSC AS "Grade Desc",
+        RTFIL2 AS "Defect Code", DFTDSC AS "Defect Desc",
+        VFLX11 AS "SOP", PSA25 AS "Slit Instruction",
+        XFLX30 AS "Mkt Segment"
+    FROM "audit"
+        LEFT JOIN TXRYRT00 ON "audit"."Roll ID"=RTRNR
+        LEFT JOIN (
+            SELECT DISTINCT KKDN, KNA1 FROM TXUYKD00
+        ) ON "audit"."Cust No."=KKDN
+        LEFT JOIN (
+            SELECT DISTINCT VBLN, VANR, VFLX11 FROM TXUYUF01 WHERE VFLX11 IS NOT NULL
+        ) ON "audit"."Lot"=VBLN AND "audit"."Stock Item"=VANR
+        LEFT JOIN (
+            SELECT DISTINCT PSANR, PSA25 FROM TXRYPS00 WHERE PSA25 IS NOT NULL
+        ) ON VFLX11=PSANR
+        LEFT JOIN (
+            SELECT SUBSTR(AXANR, 5) AS GRDCODE, AXTXT AS GRDDSC
+            FROM TXMYTX00
+            WHERE AXBNR=''002'' AND AXPLT=''PA'' AND AXANR LIKE ''%QCR%''
+        ) ON "GRDCODE"=RTFILB
+        LEFT JOIN (
+            SELECT SUBSTR(AXANR, 3) AS DFTCODE, AXTXT AS DFTDSC
+            FROM TXMYTX00
+            WHERE AXBNR=''002'' AND AXPLT=''PA'' AND AXANR LIKE ''#O%''
+        ) ON DFTCODE=RTFIL2
+        LEFT JOIN (
+            SELECT SUBSTR(AXANR, 4) AS TRNSCODE, AXTXT AS TRNSDSC
+            FROM TXMYTX00
+            WHERE AXBNR=''001'' AND AXPLT=''01'' AND AXANR LIKE ''#TM%''
+        ) ON TRNSCODE="Trans Code"
+        LEFT JOIN TXMYAT03
+            ON XBNR="audit"."Business Unit" AND
+                XPLT="audit"."Plant" AND
+                XANR="audit"."Stock Item"
+    ORDER BY "audit"."Trans ID"')

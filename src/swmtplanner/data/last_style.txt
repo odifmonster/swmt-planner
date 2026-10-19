@@ -1,0 +1,40 @@
+WITH last_chg AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY new_Loc ORDER BY new_Prd_Beg_d DESC
+        ) AS rn
+    FROM new_knitstylechglogBase
+    WHERE
+        new_Style IS NOT NULL AND
+        new_Style<>'A7F4F55A-7A39-E411-80B9-00155DFE0A03' AND
+        new_Prd_Beg_d<>DATEADD(hour, 16,
+            DATETIMEFROMPARTS(YEAR(CreatedOn), MONTH(CreatedOn), DAY(CreatedOn), 0, 0, 0, 0))
+), merges AS (
+    SELECT
+        new_yarnId AS "yarnId",
+        new_merge AS "merge",
+        AccountBase."Name" AS "vendor",
+        new_Denier AS "denier"
+    FROM new_yarnBase
+        LEFT JOIN AccountBase ON new_yarnBase.new_Producer=AccountBase.AccountId
+)
+SELECT
+    last_chg.new_Loc AS "machine",
+    last_chg.new_Prd_Beg_d AS "change_ts",
+    stl.new_Style AS "style",
+    stl.new_Beams AS "nbeams",
+&REPEAT >> 1, 4
+    y%."merge" AS "bar%_merge",
+    y%."vendor" AS "bar%_vendor",
+    y%."denier" AS "bar%_denier",
+    stl.new_b%pct AS "bar%_pct",
+&END
+    stl.new_RackWt AS "rack_wt"
+FROM last_chg
+    LEFT JOIN new_styleBase AS stl ON stl.new_styleId=last_chg.new_Style
+&REPEAT >> 1, 4
+    LEFT JOIN merges AS y% ON y%.yarnId=stl.new_b%mergeId
+&END
+WHERE rn=1
+ORDER BY last_chg.new_Loc

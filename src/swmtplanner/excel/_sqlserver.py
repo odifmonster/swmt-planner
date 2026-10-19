@@ -3,7 +3,10 @@
 import os
 import pyodbc
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from enum import Enum
+import re
+from importlib.resources import files
 
 
 SQLCNF_ENV = 'SQLCONFIG'
@@ -12,53 +15,51 @@ REPORTS_ENV = 'SWMTREPORTS'
 AUDIT_NAME = 'audit'
 GREIGE_NAME = 'greige_assigns'
 JETS_NAME = 'jets'
+SOP_NAME = 'pa_order_sops'
+VARIANTS_NAME = 'variants'
+LAST_TKT_NAME = 'last_tkt'
+LAST_STYLE_NAME = 'style_changes'
+RUNOUT_NAME = 'runout'
+THREAD_NAME = 'threaded'
+DOFFED_NAME = 'doffed'
+SETS_ASSN_NAME = 'assigned_sets'
+SETS_ACT_NAME = 'active_sets'
+THREAD_TKT_NAME = 'thread_tkt'
+ALL_SCAN_NAME = 'scanned'
 
-AUDIT_SQL = (
-    'select * from openquery([JOMARPA],'
-    '\'select B2VNR as "Trans ID", B2DAT as "Date", B2TIME as "Time", '
-    'B2BNR as "Business Unit", B2PLT as "Plant", '
-    'case when B2CHA=\'\'0\'\' then B2BBE else substr(B2CHA, 1, 10) end as "Lot", '
-    'B2ANR as "Stock Item", B2KDL as "Cust No.", KNA1 as "Cust Name", '
-    'B2RNR as "Roll ID", B2CHR5 as "WIP Roll", '
-    'B2BEW as "Trans Code", TRNTXT as "Trans Desc", '
-    'B2USER as "Username", B2CHR3 as "Machine", B2LO1 as "Loc 1", B2LO2 as "Loc 2", '
-    'B2MGES as "Quantity", B2QUAL as "Quality", '
-    'RTFILB as "Grade Code", GRDTXT as "Grade Desc", '
-    'RTFIL2 as "Defect Code", DFTTXT as "Defect Desc", '
-    'VFLX11 as "SOP", PSA25 as "Slit Instruction", XFLX30 as "Mkt Segment" '
-    'from TXMYBW00 '
-    'left join TXRYRT00 on RTRNR=B2RNR '
-    'left join (select distinct KKDN, KNA1 from TXUYKD00) on KKDN=B2KDL '
-    'left join (select distinct VBLN, VANR, VFLX11 from TXUYUF01 where VFLX11 is not null) on '
-    '(case when B2CHA=''0'' then B2BBE else substr(B2CHA, 1, 10) end)=VBLN and VANR=B2ANR '
-    'left join (select distinct PSANR, PSA25 from TXRYPS00 where PSA25 is not null) on PSANR=VFLX11 '
-    'left join (select substr(AXANR, 5) as GRDCODE, AXTXT as GRDTXT '
-    'from TXMYTX00 where AXBNR=\'\'002\'\' and AXPLT=\'\'PA\'\' and AXANR like \'\'%QCR%\'\') '
-    'on GRDCODE=RTFILB '
-    'left join (select substr(AXANR, 3) as DFTCODE, AXTXT as DFTTXT '
-    'from TXMYTX00 where AXBNR=\'\'002\'\' and AXPLT=\'\'PA\'\' and AXANR like \'\'#O%\'\') '
-    'on DFTCODE=RTFIL2 '
-    'left join (select substr(AXANR, 4) as TRNCODE, AXTXT as TRNTXT '
-    'from TXMYTX00 where AXBNR=\'\'001\'\' and AXPLT=\'\'01\'\' and AXANR like \'\'#TM%\'\') '
-    'on TRNCODE=B2BEW '
-    'left join TXMYAT03 on XBNR=B2BNR and XPLT=B2PLT and XANR=B2ANR '
-    'where B2DAT>{0} and B2DAT<{1} and B2ANR like \'\'FF%\'\' order by B2VNR\')'
-)
-GREIGE_SQL = (
-    'select * from openquery([JOMARPA],'
-    '\'select distinct case when B2CHA=\'\'0\'\' then B2BBE else substr(B2CHA, 1, 10) end as "Lot", '
-    'RTANR as "Greige Item", RTRNR as "Greige Roll" from TXMYBW00 '
-    'left join (select distinct RTANR, RTRNR, RTALN from TXRYRT00 where RTANR like \'\'GF%\'\') on '
-    '(case when B2CHA=\'\'0\'\' then B2BBE else substr(B2CHA, 1, 10) end)=RTALN '
-    'where B2DAT>{0} and B2DAT<{1} and B2ANR like \'\'FF%\'\'\')'
-)
-JETS_SQL = (
-    'select * from openquery([JOMARPA], '
-    '\'select distinct case when B2CHA=\'\'0\'\' then B2BBE else substr(B2CHA, 1, 10) end as "Lot", '
-    'B2CHR3 as "Machine" from TXMYBW00 '
-    'where B2DAT>{0} and B2DAT<{1} and B2ANR like \'\'FF%\'\' and B2BEW=\'\'06\'\' '
-    'and B2LO2=\'\'BD\'\'\')'
-)
+SQL_MAP = {
+    AUDIT_NAME: 'audit_trail.txt',
+    GREIGE_NAME: 'greige_assigns.txt',
+    JETS_NAME: 'jets.txt',
+    SOP_NAME: 'sop_xref.txt',
+    VARIANTS_NAME: 'si_variants.txt',
+    LAST_TKT_NAME: 'last_tkt.txt',
+    LAST_STYLE_NAME: 'last_style.txt',
+    RUNOUT_NAME: 'runout.txt',
+    THREAD_NAME: 'last_threaded.txt',
+    DOFFED_NAME: 'doffed_since_date.txt',
+    SETS_ASSN_NAME: 'assigned_sets.txt',
+    SETS_ACT_NAME: 'active_sets.txt',
+    THREAD_TKT_NAME: 'threaded_since_date.txt',
+    ALL_SCAN_NAME: 'scanned_since_date.txt'
+}
+
+class _SQLName(str, Enum):
+    audit = 'audit'
+    greige_assigns = 'greige_assigns'
+    jets = 'jets'
+    pa_order_sops = 'pa_order_sops'
+    variants = 'variants'
+    last_tkt = 'last_tkt'
+    style_changes = 'style_changes'
+    runout = 'runout'
+    threaded = 'threaded'
+    doffed = 'doffed'
+    assigned_sets = 'assigned_sets'
+    active_sets = 'active_sets'
+    thread_tkt = 'thread_tkt'
+    scanned = 'scanned'
+    all_pa = 'all_pa'
 
 
 def load_sql_config() -> dict[str, str]:
@@ -111,6 +112,40 @@ def build_cnxn_str(cnfmap: dict[str, str], driver: str = 'ODBC Driver 17 for SQL
 
     return ';'.join(map(lambda x: f'{x[0]}={x[1]}', pairs)) + ';'
 
+def extract_sql_from_file(flines: list[str]) -> str:
+    sql_lines = []
+
+    in_repeat = False
+    repeat_lines = []
+    repeat_s, repeat_e = -1, -1
+
+    for line in flines:
+        line = line.strip()
+        if not line: continue
+
+        if not in_repeat and line[0] == '&' and line.split()[0][1:] == 'REPEAT':
+            in_repeat = True
+            num_str = line.split('>>')[1].strip()
+            repeat_s, repeat_e = list(map(int, num_str.split(', ')))
+            continue
+
+        if in_repeat:
+            if line == '&END':
+                for i in range(repeat_s, repeat_e + 1):
+                    for repl in repeat_lines:
+                        sql_lines.append(re.sub(r'%', str(i), repl))
+                in_repeat = False
+                repeat_lines = []
+                repeat_s, repeat_e = -1, -1
+            else:
+                repeat_lines.append(line)
+            continue
+
+        line = re.sub(r'\$([0-9]+)', r'{\g<1>}', line)
+        sql_lines.append(line)
+
+    return ' '.join(sql_lines)
+
 def write_sql_result(fpath: Path, res: pyodbc.Cursor):
     lines: list[str] = []
 
@@ -139,11 +174,12 @@ def write_sql_result(fpath: Path, res: pyodbc.Cursor):
 
     print('\n\tfile written!')
 
-def run_query(dt: date, fstem: str, sql: str, cursor: pyodbc.Cursor):
+def run_query(dt: datetime, fstem: _SQLName, sql: str, cursor: pyodbc.Cursor):
     monday = dt - timedelta(days=dt.weekday())
     wk_start = monday - timedelta(days=3)
     mnth_start = monday - timedelta(days=30)
     end = dt + timedelta(days=1)
+    year_start = monday - timedelta(weeks=31)
 
     if dt.weekday() <= 3:
         wk_start -= timedelta(weeks=1)
@@ -152,23 +188,49 @@ def run_query(dt: date, fstem: str, sql: str, cursor: pyodbc.Cursor):
     start = wk_start
     if fstem == 'jets':
         start = mnth_start
+    elif fstem == 'pa_order_sops':
+        start = datetime(dt.year-1, dt.month, dt.day)
+    elif fstem == 'assigned_sets':
+        start = year_start
 
-    cursor.execute(sql.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d')))
+    if fstem == 'pa_order_sops':
+        cursor.execute(sql.format(start.strftime('%Y%m%d')))
+    elif fstem in ('doffed', 'thread_tkt', 'scanned'):
+        cursor.execute(sql.format(dt.strftime('%Y, %m, %d, %H, %M, %S')))
+    elif fstem == 'assigned_sets':
+        cursor.execute(sql.format(start.year))
+    elif fstem in ('variants', 'last_tkt', 'runout', 'threaded', 'active_sets'):
+        cursor.execute(sql)
+    else:
+        cursor.execute(sql.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d')))
+
     fname = f'{fstem}_{dt.strftime('%Y%m%d')}.tsv'
     write_sql_result(Path(os.environ['SWMTREPORTS']) / fname, cursor)
 
-def fetch_sql_data(dt: date):
+def fetch_pa_sql_data(dt: datetime):
     cnfmap = load_sql_config()
     cnxn_str = build_cnxn_str(cnfmap)
 
-    pairs = [(AUDIT_NAME, AUDIT_SQL),
-             (GREIGE_NAME, GREIGE_SQL),
-             (JETS_NAME, JETS_SQL)]
+    queries = [AUDIT_NAME, GREIGE_NAME, JETS_NAME]
 
     print('Connecting to database...', end='\r')
     with pyodbc.connect(cnxn_str) as connection:
         print('Connected to SQL server!                  ')
         with connection.cursor() as cursor:
-            for name, sql in pairs:
-                print(f'Running {name} query...')
-                run_query(dt, name, sql, cursor)
+            for q in queries:
+                print(f'Running {q} query...')
+                qtxt = files('swmtplanner.data').joinpath(SQL_MAP[q]).read_text().split('\n')
+                run_query(dt, q, extract_sql_from_file(qtxt), cursor)
+
+def fetch_named_sql_data(dt: datetime, name: str):
+    cnfmap = load_sql_config()
+    cnxn_str = build_cnxn_str(cnfmap)
+
+    sql = extract_sql_from_file(files('swmtplanner.data').joinpath(SQL_MAP[name]).read_text().split('\n'))
+
+    print('Connecting to database...', end='\r')
+    with pyodbc.connect(cnxn_str) as connection:
+        print('Connected to SQL server!     ')
+        with connection.cursor() as cursor:
+            print(f'Running {name} query...')
+            run_query(dt, name, sql, cursor)

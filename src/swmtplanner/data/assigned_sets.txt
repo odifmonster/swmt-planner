@@ -1,0 +1,35 @@
+WITH ranked_bars AS (
+	SELECT s.*, ROW_NUMBER() OVER (
+		PARTITION BY new_Location, new_Bars
+		ORDER BY new_Assn_Date DESC
+	) AS rn
+	FROM new_sethistoryBase AS s
+	WHERE s.new_Assn_Date IS NOT NULL
+		AND s.new_ThreadingDateandTime IS NULL
+        AND s.new_TapeOutDateandTime IS NULL
+        AND s.new_EmptyDateandTime IS NULL
+		AND (s.new_Active='A' OR s.new_Active IS NULL)
+		AND s.new_SetNumber NOT LIKE '%_del'
+		AND s.new_Bars IS NOT NULL
+        AND s.new_Status='I'
+) SELECT
+	ranked_bars.new_Location AS "machine",
+	ranked_bars.new_Bars AS "bar",
+    ranked_bars.new_Assn_Date AS "assn_ts",
+	ranked_bars.new_SetNumber AS "set_no",
+    ranked_bars.new_CurrentWeight AS "lbs",
+    bsz.new_name AS "beam_size",
+    ranked_bars.new_Beams AS "beams",
+    ranked_bars.new_Ends AS "ends",
+	y.new_Merge AS "merge",
+	y.new_Denier AS "denier",
+	ac."Name" AS "vendor",
+	y.new_Luster AS "luster",
+	d.new_yarntype AS "yarn_type"
+	FROM ranked_bars
+        LEFT JOIN new_beamsizeBase AS bsz ON ranked_bars.new_BeamSizeId=bsz.new_beamsizeId
+		LEFT JOIN new_yarnBase AS y ON y.new_yarnId=ranked_bars.new_MergeId
+		LEFT JOIN AccountBase AS ac ON y.new_Producer=ac.AccountId
+        LEFT JOIN new_yarndescriptionBase AS d ON y.new_YarnDesc=d.new_yarndescriptionId
+	WHERE rn<=5
+	ORDER BY ranked_bars.new_Location, ranked_bars.new_Bars

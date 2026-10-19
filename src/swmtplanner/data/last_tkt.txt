@@ -1,0 +1,41 @@
+WITH last_tkt AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY SUBSTRING(new_Ticket, 1, 3) ORDER BY new_ScanCreatedDate DESC
+        ) AS rn
+    FROM new_scanneditemsBase
+    WHERE new_TicketType='PIECE' AND new_Isvalid=1
+), merges AS (
+    SELECT
+        new_yarnId AS "yarnId",
+        new_merge AS "merge",
+        AccountBase."Name" AS "vendor",
+        new_Denier AS "denier"
+    FROM new_yarnBase
+        LEFT JOIN AccountBase ON new_yarnBase.new_Producer=AccountBase.AccountId
+)
+SELECT
+    SUBSTRING(last_tkt.new_Ticket, 1, 3) AS "machine",
+    last_tkt.new_Ticket AS "ticket",
+    last_tkt.new_ScanCreatedDate AS "scan_ts",
+    sxref.new_Style AS "style",
+    sxref.new_Beams AS "nbeams",
+&REPEAT >> 1, 4
+    shist%.new_SetNumber AS "bar%_set_no",
+    y%."merge" AS "bar%_merge",
+    y%."vendor" AS "bar%_vendor",
+    y%.denier AS "bar%_denier",
+    sxref.new_b%pct AS "bar%_pct",
+&END
+    sxref.new_RackWt AS "rack_wt",
+    txref.new_Racks AS "racks"
+FROM last_tkt
+    LEFT JOIN new_ticketsBase AS txref ON txref.new_Ticket=last_tkt.new_Ticket
+    LEFT JOIN new_styleBase AS sxref ON sxref.new_styleId=txref.new_StyleId
+&REPEAT >> 1, 4
+    LEFT JOIN new_sethistoryBase AS shist% ON shist%.new_sethistoryId=txref.new_B%SetLookupId
+    LEFT JOIN merges AS y% ON y%.yarnId=sxref.new_b%mergeId
+&END
+WHERE rn=1
+ORDER BY last_tkt.new_Ticket

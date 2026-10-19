@@ -1,0 +1,44 @@
+WITH unq_tx AS (
+	SELECT
+		*,
+		ROW_NUMBER() OVER (
+			PARTITION BY new_Ticket
+			ORDER BY new_ScanCreatedDate
+		) AS tx_rn
+	FROM new_scanneditemsBase
+	WHERE
+		new_TicketType='THREADING' AND
+		new_Isvalid=1 AND
+		new_Ticket IS NOT NULL AND
+		LEN(new_Ticket)>0
+), last_thr1 AS (
+	SELECT
+		*,
+		SUBSTRING(new_Ticket, 1, 3) AS "location",
+		RIGHT(new_Ticket, CHARINDEX('##', REVERSE(new_Ticket), 1) - 1) AS "set_bars",
+		ROW_NUMBER() OVER (
+			PARTITION BY SUBSTRING(new_Ticket, 1, 3)
+			ORDER BY new_ScanCreatedDate DESC
+		) AS loc_rn
+	FROM unq_tx
+	WHERE tx_rn=1
+), last_thr2 AS (
+	SELECT
+		*,
+		LEFT(set_bars, LEN(set_bars) - CHARINDEX('B', REVERSE(set_bars), 1)) AS "set_no",
+		RIGHT(set_bars, CHARINDEX('B', REVERSE(set_bars), 1) - 1) AS "bars",
+		SUBSTRING(new_Ticket, 6, LEN(new_Ticket) - 7 - LEN(set_bars)) AS "for_style"
+	FROM last_thr1
+)
+SELECT
+	last_thr2."location",
+	last_thr2.new_Ticket AS "ticket",
+	last_thr2.new_RacksatRO AS "racks_at_ro",
+	last_thr2."set_no",
+	sh.new_Weight AS "lbs",
+	last_thr2."bars",
+	last_thr2.new_ScanCreatedDate AS "start_ts",
+	last_thr2.new_ScanModifiedDate AS "end_ts"
+FROM last_thr2
+	LEFT JOIN new_sethistoryBase AS sh ON sh.new_name=last_thr2.set_no
+WHERE loc_rn<=10

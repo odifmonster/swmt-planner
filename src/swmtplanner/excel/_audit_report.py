@@ -314,7 +314,7 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         cur['qual'] = max(max_qty_rows['qual'])
 
         if round(max_qty) <= 0:
-            max_qty = max(grp['init_qty'])
+            max_qty = 0
         cur['yards'] = max_qty
 
     return pd.DataFrame(data=status_rows, columns=status_cols).set_index('id')

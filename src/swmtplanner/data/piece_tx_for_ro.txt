@@ -1,0 +1,5 @@
+SELECT *
+FROM new_ticketsBase
+WHERE new_Ticket NOT LIKE 'X_%' AND
+	new_DSDate IS NOT NULL AND
+	new_DSDate>=DATETIMEFROMPARTS(2026, 8, 15, 0, 0, 0, 0)

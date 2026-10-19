@@ -127,6 +127,111 @@ def _map_warehouse(wh):
             return 'CAN SHIP'
     return 'NONE'
 
+def _load_pa_fab_only():
+    NOW = dt.datetime.now()
+    START_DATE = dt.datetime(NOW.year, NOW.month, NOW.day)
+    if START_DATE.weekday() == 6:
+        START_DATE += dt.timedelta(days=1)
+    START_DATE = START_DATE - dt.timedelta(days=START_DATE.weekday())
+
+    fopath, foargs = INFO_MAP['pa_fab_only']
+    ffpath, ffargs = INFO_MAP['pa_fin_items']
+
+    fodf: pd.DataFrame = pd.read_excel(
+        fopath,
+        dtype={
+            'Bill To Num': 'string',
+            'Order Num': 'string',
+            'Line Quality': 'string',
+            'Item': 'string',
+            'Line Width': 'string'
+        },
+        **foargs
+    )
+
+    to_drop = fodf[fodf['Bill To Num'].str.contains('Bill To Num') | fodf['Order Num'].str.contains('H') | fodf['Order Num'].isna()]
+    fodf = fodf.drop(index=to_drop.index)
+
+    fodf['Order Num'] = fodf['Order Num'].apply(lambda s: f'{int(s):010}').astype('string')
+    fodf['Fin Width'] = '0'
+    fodf['Rem Qty'] = fodf['Order\nQuantity'] - fodf['Shipped\nQuantity']
+
+    ffdf: pd.DataFrame = pd.read_excel(
+        ffpath,
+        dtype={
+            'STYLE': 'string',
+            'COLOR NUMBER': 'string',
+            'STATUS': 'string'
+        },
+        **ffargs
+    )
+
+    to_drop = ffdf[ffdf['STYLE'].isna() | ffdf['COLOR NUMBER'].isna() | ffdf['STATUS'].str.contains('I')]
+    ffdf = ffdf.drop(index=to_drop.index)
+
+    by_order = fodf.groupby(['Order Num', 'Line Number']).agg('max')
+    by_order['Fin Width'] = '0'
+
+    for i in by_order.index:
+        if by_order.loc[i, 'Bill To Num'] == '17191': continue
+        if by_order.loc[i, 'Rem Qty'] <= 0: continue
+        if by_order.loc[i, 'Line Quality'] != 'A': continue
+        by_order.loc[i, 'Fin Width'] = by_order.loc[i, 'Line Width']
+
+    fo_data = {
+        'ply1_item': [], 'bill_to': [], 'plant': [], 'pa_item': [], 'past_due': []
+    }
+    for i in range(9):
+        fo_data[f'wk{i}'] = []
+    fo_data['sched_day'] = []
+
+    def get_next_id():
+        ctr = 0
+        def f():
+            nonlocal ctr
+            ctr += 1
+            return f'FO{ctr:06}'
+        return f
+
+    next_id = get_next_id()
+
+    for itemkey, grp in by_order.groupby(['Item', 'Fin Width']):
+        stckitem, widths = itemkey
+        if widths == '0': continue
+
+        fin_width = float(widths)
+        color_num = stckitem[-5:]
+        item = stckitem[:-6]
+
+        xref_rows = ffdf[(ffdf['STYLE'] == item[3:]) & (ffdf['COLOR NUMBER'] == color_num) & (ffdf['WD'] == fin_width)]
+        if len(xref_rows) == 0: continue
+
+        fo_data['ply1_item'].append(next_id())
+        fo_data['bill_to'].append(int(max(grp['Bill To Num'])))
+        fo_data['plant'].append('1350')
+        fo_data['pa_item'].append('-'.join((item, color_num, widths)))
+        added_sched_day = False
+
+        fo_data['past_due'].append(0)
+        for i in range(9):
+            fo_data[f'wk{i}'].append(0)
+
+        for i in grp.index:
+            pdt = dt.datetime.fromisoformat(str(by_order.loc[i, 'Promise\nDate']))
+            cur_mndy = pdt - dt.timedelta(days=pdt.weekday())
+            week_off = (cur_mndy - START_DATE).days // 7
+
+            if not added_sched_day:
+                fo_data['sched_day'].append((pdt.weekday() + 1) % 7 + 1)
+                added_sched_day = True
+
+            if week_off < 0:
+                fo_data['past_due'][-1] += by_order.loc[i, 'Rem Qty']
+            elif week_off < 7:
+                fo_data[f'wk{week_off}'][-1] += by_order.loc[i, 'Rem Qty']
+
+    return fo_data
+
 def _pa_dmnd_report(writer):
     dmnd_path, dmnd_args = INFO_MAP['lam_release']
 
@@ -185,7 +290,7 @@ def _pa_dmnd_report(writer):
     lam_data = {
         'plant': [], 'ply1_item': [], 'pa_item': [], 'ph_raw': [], 'ply1_on_hand': [], 'past_due': []
     }
-    for i in range(7):
+    for i in range(9):
         lam_data[f'wk{i}'] = []
     lam_data['sched_day'] = []
 
@@ -213,8 +318,12 @@ def _pa_dmnd_report(writer):
             rls_total += sum(grp[f'rls{i}'])
 
         rls_total -= sch_total
-        for i in range(3, 7+pull):
-            cur_rls = sum(grp[f'rls{i}'])
+        for i in range(3, 9+pull):
+            if f'rls{i}' not in stock_df.columns:
+                cur_rls = 0
+            else:
+                cur_rls = sum(grp[f'rls{i}'])
+
             rls_total += cur_rls
             if i == 3:
                 cur_rls = rls_total
@@ -225,31 +334,37 @@ def _pa_dmnd_report(writer):
     lam_df = pd.DataFrame(data=lam_data, index=lam_items)
     print(len(lam_df))
     ply1_data1 = {
-        'ply1_item': [], 'plant': [], 'pa_item': [], 'past_due': []
+        'ply1_item': [], 'bill_to': [], 'plant': [], 'pa_item': [], 'past_due': []
     }
-    for i in range(7):
+    for i in range(9):
         ply1_data1[f'wk{i}'] = []
     ply1_data1['sched_day'] = []
 
     for key, grp in lam_df.groupby(['ply1_item', 'plant']):
         ply1, plant = key
         ply1_data1['ply1_item'].append(ply1)
+        ply1_data1['bill_to'].append(17191)
         ply1_data1['plant'].append(plant)
         ply1_data1['pa_item'].append(max(grp['pa_item']))
 
         total_dmd = sum(grp['past_due']) - max(grp['ply1_on_hand']) - max(grp['ph_raw'])
         ply1_data1['past_due'].append(max(0, total_dmd))
-        for i in range(7):
+        for i in range(9):
             cur_dmd = sum(grp[f'wk{i}'])
             total_dmd += cur_dmd
             ply1_data1[f'wk{i}'].append(max(0, min(total_dmd, cur_dmd)))
 
         ply1_data1['sched_day'].append(min(grp['sched_day']))
 
+    fo_data = _load_pa_fab_only()
+    for col in ply1_data1:
+        ply1_data1[col].extend(fo_data[col])
+
     ply1_df1 = pd.DataFrame(data=ply1_data1)
     join_plts = lambda a: "/".join([str(int(float(x))) for x in list(a)])
 
     ply1_df2 = ply1_df1.groupby('ply1_item').agg(
+        bill_to = pd.NamedAgg('bill_to', 'max'),
         plant = pd.NamedAgg('plant', join_plts),
         pa_item = pd.NamedAgg('pa_item', 'max'),
         sched_day = pd.NamedAgg('sched_day', 'min'),
@@ -260,12 +375,14 @@ def _pa_dmnd_report(writer):
         wk3 = pd.NamedAgg('wk3', 'sum'),
         wk4 = pd.NamedAgg('wk4', 'sum'),
         wk5 = pd.NamedAgg('wk5', 'sum'),
-        wk6 = pd.NamedAgg('wk6', 'sum')
+        wk6 = pd.NamedAgg('wk6', 'sum'),
+        wk7 = pd.NamedAgg('wk7', 'sum'),
+        wk8 = pd.NamedAgg('wk8', 'sum')
     )
 
     mapper = {}
-    caps = ['ply1_item', 'plant']
-    fab_req = [f'wk{i}' for i in range(7)]
+    caps = ['ply1_item', 'bill_to', 'plant']
+    fab_req = [f'wk{i}' for i in range(9)]
 
     for col in caps:
         words = col.split('_')
@@ -401,6 +518,8 @@ def _pa_priority_mos_report(start: dt.datetime, mo_df: pd.DataFrame, writer):
 
     reqs_df['Ship Day'] = reqs_df['Ply1 Item'].apply(lambda x: _map_ship_day(x, ship_days_data))
 
+    if start.weekday() == 6:
+        start += dt.timedelta(days=1)
     monday = start - dt.timedelta(days=start.weekday())
     monday = dt.datetime(monday.year, monday.month, monday.day)
 
