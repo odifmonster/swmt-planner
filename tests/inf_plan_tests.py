@@ -2527,6 +2527,35 @@ class RecoveryCostTests(unittest.TestCase):
         self.assertEqual(cheap_set_after(state, 'MA', _RU), frozenset({'RU'}))
         self.assertEqual(cheap_set_after(state, 'MD', _RYC), frozenset({'RYC'}))   # old → family C only
         self.assertEqual(cheap_set_after(state, 'MA', _RYC), frozenset({'RY1', 'RY2', 'RYC'}))
+        # 10. a machine set up for an item it cannot run holds nothing cheaply
+        state = _make_state(machines={'MB': _rmachine('MB', _RY2)},
+                            rls_items={'RY2': _rrls(_RY2, [100.0, 0.0, 0.0, 0.0])},
+                            capacity=self.cap)
+        self.assertFalse(state.machines['MB'].can_run_current_item)
+        self.assertEqual(build_cheap_sets(state)['MB'], frozenset())
+
+    # 10. an item the machine cannot run
+    def test_cannot_run_current_item(self):
+        # MB is set up for RY2, which cannot run on it: leaving strands nothing.
+        state = _make_state(
+            machines={'MB': _rmachine('MB', _RY2), 'MC': _rmachine('MC', _RY1)},
+            rls_items={'RY1': _rrls(_RY1, [0.0, 1000.0, 0.0, 0.0]),
+                       'RU': _rrls(_RU, [1000.0, 0.0, 0.0, 0.0])},
+            capacity=self.cap)
+        self.assertEqual(self.costing.recovery_detail(state, _rmove('MB', _RU), _ctx_for(state)),
+                         (0.0, []))
+        self.assertEqual(self.costing.recovery_detail(state, _rmove('MB', _RYC), _ctx_for(state)),
+                         (0.0, []))
+        # ... and it does not cover for MA leaving yarn Y, where MB on RY1 would.
+        def leaving(mb_item):
+            st = _make_state(
+                machines={'MA': _rmachine('MA', _RY1, is_new=True), 'MB': _rmachine('MB', mb_item)},
+                rls_items={'RY1': _rrls(_RY1, [0.0, 1000.0, 0.0, 0.0]),
+                           'RU': _rrls(_RU, [1000.0, 0.0, 0.0, 0.0])},
+                capacity=self.cap)
+            return self.costing.recovery_detail(st, _rmove('MA', _RU), _ctx_for(st))[0]
+        self.assertEqual(leaving(_RY1), 0.0)
+        self.assertGreater(leaving(_RY2), 0.0)
 
     # 2. urgent orders
     def test_urgent_by_item(self):
@@ -3149,6 +3178,9 @@ _SAFE250 = Greige('AU0001', family='A', tgt_wt=100.0, top_beam='40D BLACK 1000X4
                   machines={'M1': 100.0, 'M2': 100.0})
 _NONE = Greige('NONE', family='A', tgt_wt=100.0, top_beam='40D BLACK 1000X4', top_pct=0.5,
                btm_beam='60D WHITE 1000X4', btm_pct=0.5, safety=0.0, machines={'M1': 100.0})
+# _ITEM_A's yarn and family, runnable on M2 only — M1 may still be set up for it.
+_ITEM_X = Greige('AU000X', family='A', tgt_wt=100.0, top_beam='40D BLACK 1000X4', top_pct=0.5,
+                 btm_beam='60D WHITE 1000X4', btm_pct=0.5, safety=0.0, machines={'M2': 100.0})
 
 
 def _change_booked(day=None):
@@ -3192,6 +3224,9 @@ class FillForTests(unittest.TestCase):
         self.assertIsNone(_fill_for(empty, m, _ITEM_B))
         none = _make_machine('M1', init_item=_NONE)
         self.assertIsNone(_fill_for(_make_state(machines={'M1': none}), none, _ITEM_B))
+        bad = _make_machine('M1', init_item=_ITEM_X)        # cannot run its item
+        self.assertIsNone(_fill_for(_make_state(machines={'M1': bad}, rls_items={
+            'AU000X': _make_rls_item(item=_ITEM_X, weekly=[0.0, 150.0, 0.0, 0.0])}), bad, _ITEM_B))
 
     def test_candidates_carry_the_fill(self):
         cap = _change_booked()
@@ -3210,6 +3245,32 @@ class FillForTests(unittest.TestCase):
         self.assertLess(wait, plain_wait)
         self.assertFalse(any(j.fill for j in cont.plan.jobs))
         self.assertEqual(cap.bookings(), {('change', _START.date()): 5})
+
+
+class CannotRunItemCandidateTests(unittest.TestCase):
+    """1.3.6 — M1 set up for `_ITEM_X`, which may run on M2 only."""
+
+    def _state(self):
+        m = _make_machine('M1', init_item=_ITEM_X)
+        return _make_state(
+            machines={'M1': m},
+            rls_items={'AU0001': _make_rls_item(item=_ITEM_A, weekly=[100.0, 100.0, 0.0, 0.0]),
+                       'AU000X': _make_rls_item(item=_ITEM_X, weekly=[100.0, 100.0, 0.0, 0.0])},
+            window_end=_START + timedelta(days=1))
+
+    def test_one_decision_point(self):
+        state = self._state()
+        self.assertEqual(eligible_decision_points(state),
+                         [DecisionPoint('M1', 'schedule_tail', _START)])
+
+    def test_open_to_what_it_can_run(self):
+        state = self._state()
+        moves = enumerate_candidates(state)
+        self.assertTrue(moves)
+        self.assertEqual({(mv.item.id, mv.start_at) for mv in moves}, {('AU0001', 'schedule_tail')})
+        for mv in moves:
+            self.assertEqual([j.item.id for j in mv.plan.jobs], ['AU0001'])
+            self.assertFalse(any(j.fill for j in mv.plan.jobs))
 
 
 class ChangeRowsTests(unittest.TestCase):
@@ -3323,3 +3384,34 @@ class BlacklistOutputTests(unittest.TestCase):
         hang = next(a for a in acts if a['kind'] == 'Hanging')
         self.assertEqual([(p['set_no'], p['reason']) for p in hang['passed_over']], [('QB', 'does not fit')])
         self.assertNotIn('blacklisted', hang['passed_over'][0])
+
+
+# --- 1.7.6 Hung and queued sets in the outputs -----------------------------------
+
+from swmtplanner.schedule import Unhang as _Unhang
+from swmtplanner.planners.infinite.report import _activity_desc as _desc
+
+_HUNG_ALT = BeamSet('SH', 'MX', 500.0, BeamSetDesc('30D RED 1000X4'), _FIXTURE_DATE, vendor='V',
+                    known_merge=True)
+_QS = BeamSet('QS', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
+              known_merge=True, assigned=True, location='staged')
+
+
+class HungSetOutputTests(unittest.TestCase):
+    """1.7.6"""
+
+    def test_location_and_unhang(self):
+        m = Machine('M1', _ITEM_A, _START, _HUNG_ALT, 500.0, _BTM_BEAM, 1800.0, _24_7,
+                    init_top_threaded=False, init_top_queue=(_QS,))
+        m.commit_plan(m.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        report = build_report(_make_state(machines={'M1': m}), Costing(_weights()))
+        entries = schedule_json(report)[0]['schedule']
+        unhang = next(e for e in entries if e['kind'] == 'Unhang')
+        self.assertEqual((unhang['bars'], unhang['top_beam']['set_no'], unhang['top_beam']['lbs'], unhang['btm_beam']),
+                         ('top', 'SH', 500.0, None))
+        self.assertNotIn('location', unhang['top_beam'])
+        hang = next(a for e in entries if e.get('kind') == 'job' for a in e['activities'] if a['kind'] == 'Hanging')
+        self.assertEqual((hang['top_beam']['set_no'], hang['top_beam']['location']), ('QS', 'staged'))
+        act = next(a for a in m.activities if isinstance(a, _Unhang))
+        self.assertTrue(_desc(act).startswith('unhung, never threaded: top'))
+        self.assertIn('500 lbs back', _desc(act))

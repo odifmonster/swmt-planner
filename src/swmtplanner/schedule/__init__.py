@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from .activity import (
-    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Activity, Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle, rebind_sets,
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
     HANGING_SINGLE_DURATION, HANGING_BOTH_DURATION,
@@ -24,7 +24,7 @@ from .io import read_machines, machines_from_list
 from .assign import Assigned, SetAssignment, assign_sets
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Unhang', 'Hanging', 'Threading',
     'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
     'Roll', 'Job',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',

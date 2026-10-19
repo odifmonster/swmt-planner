@@ -19,10 +19,11 @@ greige-styles record per master:
   in the order the master list first shows each pattern (`Z` stays the
   `NONE` placeholder's);
 - `machine_rates`: for every machine that can run the style — its gauge
-  matches, a style with the 75-denier set on the **top** bar needs a `tall`
-  machine, a style over 200" wide needs a `wide` one — the **nominal** rate
-  `rpm × 60 / 480 revs per rack × rack_wt / 100` lbs per running hour, with
-  the machine's `wide` rpm for a wide style when it has one. No efficiency
+  matches, the machine is at least as **wide** as the style (the master's
+  `width`, inches, against the style's), and a style with the 75-denier
+  set on the **top** bar needs a `tall` machine — the **nominal** rate
+  `rpm × 60 / 480 revs per rack × rack_wt / 100` lbs per running hour at
+  the machine's one `rpm`. No efficiency
   factor is baked in any more: the planner applies `RUNNING_EFFICIENCY`
   (`schedule.machine`) itself;
 - `safety` (and `tgt_wt`, when given) come from the master list's own
@@ -53,7 +54,6 @@ STYLES_FILE = 'greige-styles.json'
 REVS_PER_RACK = 480
 DEFAULT_TGT_WT = 740.0
 DEFAULT_SAFETY_ROLLS = 2
-WIDE_INCHES = 200                   # over this a style is wide
 NONE_PATTERN = 'Z'
 
 _InputDir = Annotated[Path, typer.Argument(
@@ -87,21 +87,22 @@ def _letters():
 
 
 def _can_run(spec: MasterSpec, machine: dict[str, Any]) -> bool:
+    """Gauge equal, the machine at least as wide as the style (the master's
+    `width`, inches), and a `tall` machine for a style with the 75D set on
+    top."""
     attrs = set(machine.get('attrs', ()))
     if int(machine['gauge']) != spec.gauge:
         return False
-    if spec.wide and 'wide' not in attrs:
+    if float(machine['width']) < float(spec.width):
         return False
     if spec.heavy_on_top and 'tall' not in attrs:
         return False
     return True
 
 
-def _rpm(spec: MasterSpec, machine: dict[str, Any]) -> float:
-    rpms = machine['rpms']
-    if spec.wide and 'wide' in rpms:
-        return float(rpms['wide'])
-    return float(rpms['any'])
+def _rpm(machine: dict[str, Any]) -> float:
+    """The machine's one running speed (the master's `rpm`)."""
+    return float(machine['rpm'])
 
 
 def _weight(rec: dict[str, Any], key: str) -> float | None:
@@ -166,11 +167,11 @@ def build_styles(
         for m_id, machine in machine_master.items():
             if not _can_run(spec, machine):
                 continue
-            rate = _rpm(spec, machine) * 60 / REVS_PER_RACK * rack_wt / 100
+            rate = _rpm(machine) * 60 / REVS_PER_RACK * rack_wt / 100
             rates.append({'id': m_id, 'rate': round(rate, 4)})
         if not rates:
             notes.append(f'{mid}: no machine can run it (gauge {spec.gauge}, '
-                         f'{"wide" if spec.wide else "standard"}, '
+                         f'{spec.width:g}" wide, '
                          f'{"75D on top" if spec.heavy_on_top else "75D on bottom"})')
         bar = lambda s: {'runlen': f'{s.runlen:.2f}', 'beamset': s.beamset,
                          'pct': round(s.pct, 2)}

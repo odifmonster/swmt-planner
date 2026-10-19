@@ -3,11 +3,12 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection, Iterable
+from dataclasses import dataclass
+from typing import Any, Collection, Iterable, Mapping
 
 from swmtplanner.support import planning_mode
 
-from .beamset import BeamSet, BeamSetDesc
+from .beamset import BeamSet, BeamSetDesc, parse_size
 from .greige import Greige
 from .variants import VariantMapFile, normalize_merge
 
@@ -76,34 +77,82 @@ def read_greige_styles(path: str | Path) -> dict[str, Greige]:
     )
 
 
-def normalize_blacklist(codes: Iterable[Any]) -> frozenset[str]:
-    """The run's blacklist of yarn merges (see "Blacklisted merges" in
-    schedule/DESIGN.md) as the set of codes compared against: each entry
-    as a string, whitespace trimmed, upper-cased; empty entries dropped."""
-    out = set()
-    for code in codes:
-        key = str(code).strip().upper()
-        if key:
-            out.add(key)
-    return frozenset(out)
+@dataclass(frozen=True)
+class Blacklist:
+    """The run's blacklist (see "Blacklisted merges" in schedule/DESIGN.md):
+    the merge codes, vendor names and set numbers flagged for quality, each
+    normalised for comparison (`_key`: trimmed, upper-cased). A set is
+    blacklisted when any of the three names it."""
+    merges: frozenset[str] = frozenset()
+    vendors: frozenset[str] = frozenset()
+    sets: frozenset[str] = frozenset()
+
+    def __len__(self) -> int:
+        return len(self.merges) + len(self.vendors) + len(self.sets)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def covers(self, merge: str | None, vendor: str | None = None,
+               set_no: str | None = None) -> bool:
+        """Whether a set with this merge, vendor and set number is
+        blacklisted; a missing value matches nothing."""
+        return ((merge is not None and _key(merge) in self.merges)
+                or (vendor is not None and _key(vendor) in self.vendors)
+                or (set_no is not None and _key(set_no) in self.sets))
 
 
-def is_blacklisted(merge: str | None, blacklist: Collection[str]) -> bool:
-    """Whether `merge` is on a blacklist made by `normalize_blacklist`
-    (compared trimmed and case-insensitively); never for no merge."""
-    if merge is None or not blacklist:
+def _key(value: Any) -> str:
+    return str(value).strip().upper()
+
+
+def _keys(values: Iterable[Any] | None) -> frozenset[str]:
+    return frozenset(k for k in (_key(v) for v in (values or ())) if k)
+
+
+def normalize_blacklist(data: Iterable[Any] | Mapping[str, Any]) -> Blacklist:
+    """The `Blacklist` a blacklist file or config value describes: a plain
+    list is merge codes; a mapping holds any of `merges`, `vendors` and
+    `sets` (lists). Every entry becomes a trimmed, upper-cased string;
+    empty entries are dropped. Raises `TypeError` for any other shape or
+    an unknown key."""
+    if isinstance(data, Mapping):
+        unknown = set(data) - {'merges', 'vendors', 'sets'}
+        if unknown:
+            raise TypeError(f'blacklist: unknown key(s) {sorted(unknown)}; '
+                            f"expected 'merges', 'vendors', 'sets'")
+        for k, v in data.items():
+            if isinstance(v, (str, bytes)) or not isinstance(v, Iterable):
+                raise TypeError(f'blacklist: {k!r} must be a list')
+        return Blacklist(_keys(data.get('merges')), _keys(data.get('vendors')),
+                         _keys(data.get('sets')))
+    if isinstance(data, (str, bytes)) or not isinstance(data, Iterable):
+        raise TypeError('blacklist must be a list of merge codes or an object '
+                        "with 'merges', 'vendors' and/or 'sets'")
+    return Blacklist(merges=_keys(data))
+
+
+def is_blacklisted(merge: str | None, blacklist: 'Blacklist | Collection[str]',
+                   vendor: str | None = None, set_no: str | None = None) -> bool:
+    """Whether a set with this `merge` (and, when given, `vendor` and
+    `set_no`) is on the blacklist (compared trimmed and case-insensitively).
+    A plain collection of codes is taken as merge codes alone."""
+    if not blacklist:
         return False
-    return str(merge).strip().upper() in blacklist
+    if isinstance(blacklist, Blacklist):
+        return blacklist.covers(merge, vendor, set_no)
+    return merge is not None and _key(merge) in blacklist
 
 
 def beam_sets_from_list(
     cfg: list[Any], variant_map: VariantMapFile, avail_date: datetime,
-    source: str = '<beam-sets list>', blacklist: Collection[str] = (),
+    source: str = '<beam-sets list>', blacklist: 'Blacklist | Collection[str]' = (),
 ) -> dict[str, BeamSet]:
     """Build a `{set_no: BeamSet}` dict from an already-parsed list of
     inventory records — the same shape a beam-sets JSON file holds.
 
-    Per-entry fields: `set_no`, `merge`, `vendor` (the yarn's supplier;
+    Per-entry fields: `set_no`, `merge`, `size` (the beams' `<diam> x
+    <width>` in inches; optional), `vendor` (the yarn's supplier;
     optional), `received` (when the plant received the set,
     `YYYY-MM-DD HH:MM:SS[.fff]`; optional), `lbs`, `beams`, `ends`, `denier`,
     `luster`, `desc` (the plant's yarn type, e.g. `TEXT POLY`), and the
@@ -139,7 +188,7 @@ def beam_sets_from_list(
 
 def beam_set_from_record(
     entry: dict, variant_map: VariantMapFile, avail_date: datetime,
-    source: str = '<beam-set record>', blacklist: Collection[str] = (),
+    source: str = '<beam-set record>', blacklist: 'Blacklist | Collection[str]' = (),
 ) -> BeamSet | None:
     """One export-shaped record (`set_no`, `merge`, `vendor`, `received`,
     `lbs`, `beams`, `ends`, `denier`, `luster`, `desc`, `assigned`) as a
@@ -147,7 +196,7 @@ def beam_set_from_record(
     `beam_sets_from_list` applies to every entry, shared with the machines
     loader for assigned-set records the export lacks. `None` for a set no
     style of ours can use (its yarn normalises to nothing). Stamped
-    `blacklisted` when its merge is on `blacklist`."""
+    `blacklisted` when its merge, vendor or set number is on `blacklist`."""
     merge = str(entry['merge'])
     info = variant_map.merges.get(merge)
     if info is not None:
@@ -165,7 +214,9 @@ def beam_set_from_record(
         denier=int(entry['denier']), luster=str(entry['luster']),
         ytype=str(entry['desc']), known_merge=info is not None,
         assigned=bool(entry.get('assigned', False)),
-        blacklisted=is_blacklisted(merge, blacklist),
+        blacklisted=is_blacklisted(merge, blacklist, vendor=_opt_str(entry.get('vendor')),
+                                   set_no=str(entry['set_no'])),
+        size=parse_size(entry.get('size')),
     )
 
 
@@ -187,7 +238,7 @@ def _received(value: Any, default: datetime, source: str) -> datetime:
 
 def read_beam_sets(
     path: str | Path, variant_map: VariantMapFile, avail_date: datetime,
-    blacklist: Collection[str] = (),
+    blacklist: 'Blacklist | Collection[str]' = (),
 ) -> dict[str, BeamSet]:
     """Load the beam-set inventory from a JSON file. Thin wrapper over
     `beam_sets_from_list`. The file's shape: a top-level list of objects, one

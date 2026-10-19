@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal, Sequence, TYPE_CHECKING
 
 from swmtplanner.schedule.activity import (
-    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Activity, Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle, BEAM_FLOOR_LBS,
 )
 
@@ -230,6 +230,21 @@ class Status:
         if isinstance(activity, TapeOut):
             # Removes the set on the named bar(s).
             gone = {'beam': None, 'lbs_remaining': 0.0, 'threaded': False}
+            return self._evolve(
+                activity.end,
+                top=gone if activity.bars in ('top', 'both') else None,
+                btm=gone if activity.bars in ('btm', 'both') else None,
+            )
+        if isinstance(activity, Unhang):
+            # Takes a hung, never-threaded set off again. Requires the bar
+            # hung (a set on it, not threaded) — the state a plant-hung bar
+            # is constructed in.
+            gone = {'beam': None, 'lbs_remaining': 0.0, 'threaded': False}
+            for bar in ('top', 'btm'):
+                if activity.bars in (bar, 'both') and (
+                        self._removed(bar) or self.threaded(bar)):
+                    raise ValueError(
+                        f'cannot unhang {bar}: it holds no hung, unthreaded set')
             return self._evolve(
                 activity.end,
                 top=gone if activity.bars in ('top', 'both') else None,

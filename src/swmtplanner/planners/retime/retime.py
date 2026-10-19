@@ -335,7 +335,7 @@ MAX_ROUNDS = 6
 
 
 def _usable(name: str | None, label: str, state: State, used: set[str],
-            queued: set[str]) -> tuple[str | None, str]:
+            queued: set[str], machine: 'Any' = None) -> tuple[str | None, str]:
     """With `keep_sets`: a prior hang's set name kept when the stock can
     still supply it for the bar's `label` — or the plant has it queued on
     that bar (`queued`) — else None with the reason: the set was invented,
@@ -348,8 +348,11 @@ def _usable(name: str | None, label: str, state: State, used: set[str],
     if name in queued:
         return name, ''
     stock = state.inventory.get(BeamSetDesc(label).physical, ())
-    if not any(b.set_no == name for b in stock):
+    found = next((b for b in stock if b.set_no == name), None)
+    if found is None:
         return None, 'not in the new inventory'
+    if machine is not None and not machine.accepts(found):
+        return None, 'too large for the machine'
     return name, ''
 
 
@@ -520,19 +523,18 @@ def _replay(ms: ManualSchedule, state: State, inputs: Any, queue: list,
             for bar, prior, label in (('top', job.top, cfg.top_beam), ('btm', job.btm, cfg.btm_beam)):
                 queued = {b.set_no for b in state.machines[mid].current_status.queue(bar)}
                 for name in prior:
-                    kept, reason = _usable(name, label, state, used, queued)
+                    kept, reason = _usable(name, label, state, used, queued,
+                                           state.machines[mid])
                     bar_names[bar].append(kept); why[bar].append(reason)
                     if kept is not None:
                         used.add(kept); prior_kept.add(kept)
         else:
             for bar in ('top', 'btm'):
                 bar_names[bar] = list(names.get((mid, job.job_id, bar), ()))
+                # Round one's note on a hang (why the prior set was not
+                # kept) stands whatever a later round hangs there.
                 old = list(notes.get((mid, job.job_id, bar), ()))
-                if bar_names[bar]:
-                    old += [''] * (len(bar_names[bar]) - len(old))
-                    why[bar] = [old[i] if n is None else '' for i, n in enumerate(bar_names[bar])]
-                else:
-                    why[bar] = old
+                why[bar] = old + [''] * max(0, len(bar_names[bar]) - len(old))
 
         def drop(bar: str, name: str, reason: str) -> None:
             nonlocal dropped

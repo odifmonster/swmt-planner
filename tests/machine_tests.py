@@ -3087,15 +3087,18 @@ class AssignSetsTests(unittest.TestCase):
         self.assertEqual([(h.machine, h.source) for h in res.hangs], [('M1', 'new'), ('M2', 'stock')])
         self.assertEqual(res.hangs[1].hung.set_no, 'R1')
 
-    def test_continuity(self):
+    def test_pull_order(self):
+        # a large set beats an older small one on a new machine; an old
+        # machine cannot take the large one and gets the small one
         t0 = BeamSet('T0', 'M7', BEAM_FLOOR_LBS, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
                      vendor='V', known_merge=True)
-        m1 = Machine('M1', _ITEM_A, _START, t0, BEAM_FLOOR_LBS, _BTM_BEAM, 1800.0, _24_7)
-        m1.commit_plan(m1.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
         older = _stock_set('OLD', '40D BLACK 1000X4', merge='M1', received=_START - timedelta(days=5))
-        same = _stock_set('SAME', '40D BLACK 1000X4', merge='M7', received=_START)
-        res = assign_sets({'M1': m1}, build_inventory([older, same]), now=_START)
-        self.assertEqual(res.hangs[0].hung.set_no, 'SAME')
+        large = _stock_set('BIG', '40D BLACK 1000X4', merge='M7', received=_START, size=(40.0, 42.0))
+        for is_new, want in ((True, 'BIG'), (False, 'OLD')):
+            m1 = Machine('M1', _ITEM_A, _START, t0, BEAM_FLOOR_LBS, _BTM_BEAM, 1800.0, _24_7, is_new=is_new)
+            m1.commit_plan(m1.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+            res = assign_sets({'M1': m1}, build_inventory([older, large]), now=_START)
+            self.assertEqual(res.hangs[0].hung.set_no, want, is_new)
 
     def test_returned_sets(self):
         ms = _two_machines(m2_top_rolls=8)
@@ -3383,7 +3386,7 @@ class FillSlotWaitTests(unittest.TestCase):
 # ---------------------------- PHASE 6 (cont.) ----------------------------
 # Blacklisted merges (tests/spec-files/SCHEDULE_TEST_SPEC.md, 6.6).
 
-from swmtplanner.products import normalize_blacklist, is_blacklisted
+from swmtplanner.products import normalize_blacklist, is_blacklisted, Blacklist
 from swmtplanner.schedule import worth_stocking as _worth_stocking
 
 _BL = normalize_blacklist(['M1'])          # _VMAP's M1: _ITEM_A's top yarn
@@ -3411,8 +3414,9 @@ class BlacklistTests(unittest.TestCase):
         self.assertEqual(build_inventory([plain, black]), {want: [plain]})
 
     def test_codes(self):
-        self.assertEqual(normalize_blacklist([' 292286 ', 'g622', '', 5]),
+        self.assertEqual(normalize_blacklist([' 292286 ', 'g622', '', 5]).merges,
                          frozenset({'292286', 'G622', '5'}))
+        self.assertEqual(normalize_blacklist(['x']), Blacklist(merges=frozenset({'X'})))
         bl = normalize_blacklist(['292286', 'g622'])
         self.assertTrue(is_blacklisted('292286', bl))
         self.assertTrue(is_blacklisted(' G622 ', bl))
@@ -3425,6 +3429,42 @@ class BlacklistTests(unittest.TestCase):
         sets = beam_sets_from_list([_record(set_no='S1', merge='M1'), _record(set_no='S2', merge='M2')],
                                    _VMAP, _START, blacklist=_BL)
         self.assertEqual({k: v.blacklisted for k, v in sets.items()}, {'S1': True, 'S2': False})
+
+    def test_vendors_and_sets(self):                                    # 6.6.2a
+        bl = normalize_blacklist({'merges': ['292286'], 'vendors': [' Unifi Manufacturing, Inc '],
+                                  'sets': ['2-3824']})
+        self.assertEqual((bl.merges, bl.vendors, bl.sets),
+                         (frozenset({'292286'}), frozenset({'UNIFI MANUFACTURING, INC'}),
+                          frozenset({'2-3824'})))
+        self.assertEqual(len(bl), 3)
+        self.assertEqual(normalize_blacklist({'vendors': ['V']}).merges, frozenset())
+        self.assertFalse(normalize_blacklist({}))
+        for bad in ({'vendor': ['V']}, {'sets': 'S1'}, 'S1', 5):
+            with self.assertRaises(TypeError):
+                normalize_blacklist(bad)
+        self.assertTrue(bl.covers('OTHER', vendor='unifi manufacturing, inc'))
+        self.assertFalse(bl.covers('OTHER', vendor='Unifi/Nanya'))
+        self.assertTrue(bl.covers('OTHER', set_no=' 2-3824 '))
+        self.assertFalse(bl.covers('OTHER', vendor=None, set_no=None))
+        self.assertTrue(is_blacklisted('OTHER', bl, set_no='2-3824'))
+        self.assertFalse(is_blacklisted('OTHER', bl))
+        # the loaders: an export record by vendor and by set number ...
+        by_vendor = normalize_blacklist({'vendors': ['Acme']})
+        recs = [_record(set_no='S1', merge='M1', vendor='ACME'), _record(set_no='S2', merge='M1', vendor='Other')]
+        sets = beam_sets_from_list(recs, _VMAP, _START, blacklist=by_vendor)
+        self.assertEqual({k: v.blacklisted for k, v in sets.items()}, {'S1': True, 'S2': False})
+        by_set = normalize_blacklist({'sets': ['s2']})
+        sets = beam_sets_from_list(recs, _VMAP, _START, blacklist=by_set)
+        self.assertEqual({k: v.blacklisted for k, v in sets.items()}, {'S1': False, 'S2': True})
+        # ... an assigned-set record by vendor, a mounted set by set number
+        entry = _entry(init_top_set={'set_no': 'S9', 'merge': 'M1', 'vendor': 'Acme'})
+        m = _load([entry], blacklist=by_vendor)['M1']
+        self.assertTrue(m.initial_status.beam('top').blacklisted)
+        m = _load([entry], blacklist=normalize_blacklist({'sets': ['S9']}))['M1']
+        self.assertTrue(m.initial_status.beam('top').blacklisted)
+        self.assertFalse(m.initial_status.beam('btm').blacklisted)
+        m = _load([entry], blacklist=normalize_blacklist({'sets': ['S8']}))['M1']
+        self.assertFalse(m.initial_status.beam('top').blacklisted)
 
     def test_mounted_set_is_a_foreign_bar(self):
         entry = _entry(init_top_set={'set_no': 'S2', 'merge': 'M1'}, init_roll_lbs=50.0)
@@ -3470,3 +3510,283 @@ class BlacklistTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.plan_production(_ITEM_A, 100.0, 'schedule_tail',
                               inventory=build_inventory([black]), assign={'top': ['S9']})
+
+
+# ---------------------------- PHASE 6 (cont.) ----------------------------
+# Hung and queued-set status (tests/spec-files/SCHEDULE_TEST_SPEC.md, 6.7).
+
+from swmtplanner.schedule import Unhang
+
+_HUNG_TOP = BeamSet('SH', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
+                    vendor='V', known_merge=True)
+
+
+def _hung_machine(top_beam=_HUNG_TOP, top_lbs=900.0, btm_lbs=300.0, **kw) -> Machine:
+    return Machine('M1', _ITEM_A, _START, top_beam, top_lbs, _BTM_BEAM, btm_lbs, _24_7,
+                   init_top_threaded=False, **kw)
+
+
+class HungSetTests(unittest.TestCase):
+    """6.7"""
+
+    def test_status_parsing(self):
+        q = _load([_entry()], assigned_sets=[
+            _record(set_no='Q1', machine='M01', bar=2),
+            _record(set_no='Q2', machine='M01', bar=2, status=' Staged '),
+            _record(set_no='Q3', machine='M01', bar=2, status='inventory')])['M1'].initial_status.queue('top')
+        self.assertEqual([(b.set_no, b.location, b.assigned) for b in q],
+                         [('Q1', 'inventory', True), ('Q2', 'staged', True), ('Q3', 'inventory', True)])
+        export = {'Q1': _stock_set('Q1', '40D BLACK 1000X4', assigned=True)}
+        q = _load([_entry()], beam_sets=export,
+                  assigned_sets=[_record(set_no='Q1', machine='M01', bar=2, status='staged')])['M1'].initial_status.queue('top')
+        self.assertEqual((q[0].set_no, q[0].location, q[0].lbs), ('Q1', 'staged', 900.0))
+        with self.assertRaises(ValueError):
+            _load([_entry()], assigned_sets=[_record(set_no='Q1', machine='M01', bar=2, status='mounted')])
+
+    def test_hung_set_replaces_the_bar(self):
+        m = _load([_entry(init_top_set={'set_no': 'S0', 'merge': 'M1'}, init_top_lbs=200.0,
+                          init_roll_lbs=50.0)],
+                  assigned_sets=[_record(set_no='S2', machine='M01', bar=2, status='hung'),
+                                 _record(set_no='Q1', machine='M01', bar=2)])['M1']
+        s = m.initial_status
+        top = s.beam('top')
+        self.assertEqual((top.set_no, top.lbs, top.assigned, top.location), ('S2', 900.0, False, ''))
+        self.assertEqual((s.lbs_remaining('top'), s.threaded('top'), s.roll_lbs_remaining), (900.0, False, 0.0))
+        self.assertEqual([b.set_no for b in s.queue('top')], ['Q1'])
+        self.assertTrue(s.threaded('btm'))
+        with self.assertRaises(ValueError):
+            _load([_entry()], assigned_sets=[_record(set_no='S2', machine='M01', bar=2, status='hung'),
+                                             _record(set_no='S3', machine='M01', bar=2, status='hung')])
+        with self.assertRaises(ValueError):
+            _load([_entry()], assigned_sets=[_record(set_no='S2', merge='ZZ', desc='NYLON',
+                                                     machine='M01', bar=2, status='hung')])
+
+    def test_hung_bar_in_the_model(self):
+        m = _hung_machine(init_roll_lbs_remaining=50.0)
+        s = m.initial_status
+        self.assertEqual((s.roll_lbs_remaining, s.threaded('top'), s.threaded('btm')), (0.0, False, True))
+        self.assertEqual((m.whole_rolls_before_runout, m.next_runout), (0, _START))
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        kinds = [type(a).__name__ for a in plan.activities[:3]]
+        self.assertEqual(kinds, ['Threading', 'Knit', 'Doff'])
+        self.assertEqual(plan.activities[0].bars, 'top')
+        self.assertFalse(any(isinstance(a, (Hanging, TapeOut, Unhang)) for a in plan.activities))
+        self.assertIsInstance(plan.jobs[0].activities[0], Threading)
+
+    def test_batching(self):
+        both = Machine('M1', _ITEM_A, _START, _HUNG_TOP, 900.0, _BTM_BEAM, 300.0, _24_7,
+                       init_top_threaded=False, init_btm_threaded=False)
+        plan = both.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([(type(a).__name__, getattr(a, 'bars', None)) for a in plan.activities[:2]],
+                         [('Threading', 'both'), ('Knit', None)])
+        mixed = _hung_machine(btm_lbs=BEAM_FLOOR_LBS)
+        plan = mixed.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([(type(a).__name__, getattr(a, 'bars', None)) for a in plan.activities[:3]],
+                         [('Hanging', 'btm'), ('Threading', 'both'), ('Knit', None)])
+
+    def test_hung_set_that_does_not_fit(self):
+        m = _hung_machine(top_beam=_ALT_TOP_BEAM, top_lbs=500.0)
+        cap = _change_cap()
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail', capacity=cap)
+        kinds = [(type(a).__name__, getattr(a, 'bars', None)) for a in plan.activities[:4]]
+        self.assertEqual(kinds, [('Unhang', 'top'), ('Hanging', 'top'), ('Threading', 'top'), ('Knit', None)])
+        u = plan.activities[0]
+        self.assertEqual((u.start, u.end, u.top_beam.set_no, u.top_beam.lbs, u.btm_beam),
+                         (_START, _START, _ALT_TOP_BEAM.set_no, 500.0, None))
+        self.assertEqual([(b.set_no, b.lbs) for b in plan.beam_sets_returned], [(_ALT_TOP_BEAM.set_no, 500.0)])
+        self.assertEqual(plan.capacity_taken, ())
+        black = BeamSet('SB', 'MX', 500.0, BeamSetDesc('30D RED 1000X4'), _FIXTURE_DATE, blacklisted=True)
+        plan = _hung_machine(top_beam=black, top_lbs=500.0).plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertIsInstance(plan.activities[0], Unhang)
+        self.assertEqual(plan.beam_sets_returned, ())
+        both = Machine('M1', _ITEM_A, _START, _ALT_TOP_BEAM, 500.0, _ALT_BTM_BEAM, 400.0, _24_7,
+                       init_top_threaded=False, init_btm_threaded=False)
+        plan = both.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual((type(plan.activities[0]).__name__, plan.activities[0].bars), ('Unhang', 'both'))
+
+    def test_guard_rails(self):
+        threaded = _make_machine().initial_status
+        with self.assertRaises(ValueError):
+            threaded.apply_activity(Unhang(start=_START, end=_START, bars='top'))
+        hung = _hung_machine().initial_status
+        after = hung.apply_activity(Unhang(start=_START, end=_START, bars='top', top_beam=_HUNG_TOP))
+        self.assertEqual((after.beam('top'), after.lbs_remaining('top'), after.threaded('top')), (None, 0.0, False))
+        with self.assertRaises(ValueError):
+            after.apply_activity(Unhang(start=_START, end=_START, bars='top'))
+
+    def test_no_job(self):
+        m = _hung_machine(top_beam=_ALT_TOP_BEAM, top_lbs=500.0)
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertFalse(any(isinstance(a, Unhang) for j in plan.jobs for a in j.activities))
+        self.assertIsNone(plan.replaced_job)
+
+
+# ---------------------------- PHASE 6 (cont.) ----------------------------
+# Large beams (tests/spec-files/SCHEDULE_TEST_SPEC.md, 6.8).
+
+from swmtplanner.products import parse_size, LARGE_BEAM_DIAMETER
+from swmtplanner.schedule.machine import stock_order
+
+_LARGE = _stock_set('BIG', '40D BLACK 1000X4', received=_RECEIVED, size=(40.0, 42.0))
+_SMALL = _stock_set('SML', '40D BLACK 1000X4', received=_RECEIVED - timedelta(days=30), size=(21.0, 42.0))
+
+
+class LargeBeamTests(unittest.TestCase):
+    """6.8"""
+
+    def test_size(self):
+        self.assertEqual(parse_size('40 x 42'), (40.0, 42.0))
+        self.assertEqual(parse_size('40x42'), (40.0, 42.0))
+        self.assertEqual(parse_size('21.5 x 42"'), (21.5, 42.0))
+        self.assertEqual(parse_size([40, 42]), (40.0, 42.0))
+        self.assertIsNone(parse_size(None)); self.assertIsNone(parse_size(''))
+        with self.assertRaises(ValueError):
+            parse_size('big')
+        rec = beam_set_from_record(_record(set_no='S1', size='40 x 42'), _VMAP, _START)
+        self.assertEqual((rec.size, rec.diameter, rec.is_large), ((40.0, 42.0), 40.0, True))
+        self.assertEqual(LARGE_BEAM_DIAMETER, 40.0)
+        plain = beam_set_from_record(_record(set_no='S2'), _VMAP, _START)
+        self.assertEqual((plain.size, plain.is_large), (None, False))
+        self.assertTrue(rec.returned(100.0, _START).is_large)
+        self.assertTrue(BeamSet.new(rec.desc, 100.0, _START).relabelled(rec).is_large)
+        self.assertTrue(rec.located('staged').is_large)
+
+    def test_accepts(self):
+        new = _make_machine(is_new=True); old = _make_machine()
+        for b in (_LARGE, _SMALL, _TOP_BEAM):
+            self.assertTrue(new.accepts(b))
+        self.assertFalse(old.accepts(_LARGE))
+        self.assertTrue(old.accepts(_SMALL)); self.assertTrue(old.accepts(_TOP_BEAM))
+
+    def test_pull_order(self):
+        self.assertLess(stock_order(_LARGE), stock_order(_SMALL))
+        a = _stock_set('A', '40D BLACK 1000X4', received=_RECEIVED)
+        b = _stock_set('B', '40D BLACK 1000X4', received=_RECEIVED - timedelta(days=1))
+        self.assertEqual(sorted([a, b], key=stock_order)[0].set_no, 'B')
+        inv = build_inventory([_LARGE, _SMALL])
+        new = _queued_machine()
+        plan = _make_machine(init_top_lbs=BEAM_FLOOR_LBS, init_btm_lbs=300.0, is_new=True).plan_production(
+            _ITEM_A, 100.0, 'schedule_tail', inventory=inv)
+        self.assertEqual(_first_hang(plan).top_beam.set_no, 'BIG')
+        old_plan = _queued_machine().plan_production(_ITEM_A, 100.0, 'schedule_tail', inventory=inv)
+        self.assertEqual(_first_hang(old_plan).top_beam.set_no, 'SML')
+        self.assertNotIn('BIG', [b.set_no for b in old_plan.beam_sets_taken])
+        with self.assertRaises(ValueError) as cm:
+            _queued_machine().plan_production(_ITEM_A, 100.0, 'schedule_tail', inventory=inv,
+                                              assign={'top': ['BIG']})
+        self.assertIn('too large', str(cm.exception))
+        ok = _make_machine(init_top_lbs=BEAM_FLOOR_LBS, init_btm_lbs=300.0, is_new=True).plan_production(
+            _ITEM_A, 100.0, 'schedule_tail', inventory=inv, assign={'top': ['BIG']})
+        self.assertEqual(_first_hang(ok).top_beam.set_no, 'BIG')
+
+    def test_queue(self):
+        big_q = BeamSet('BQ', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
+                        vendor='V', known_merge=True, assigned=True, size=(40.0, 42.0))
+        old = _queued_machine((big_q, _Q_OK))
+        plan = old.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual(_first_hang(plan).top_beam.set_no, 'QO')
+        self.assertEqual([(p.beam_set.set_no, p.reason) for p in plan.queue_passed_over],
+                         [('BQ', 'too large for this machine')])
+        new = Machine('M1', _ITEM_A, _START, _TOP_BEAM, BEAM_FLOOR_LBS, _BTM_BEAM, 300.0, _24_7,
+                      init_top_queue=(big_q,), is_new=True)
+        self.assertEqual(_first_hang(new.plan_production(_ITEM_A, 100.0, 'schedule_tail')).top_beam.set_no, 'BQ')
+
+    def test_mounted(self):
+        big = BeamSet('BM', 'M1', 500.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE,
+                      vendor='V', known_merge=True, size=(40.0, 42.0))
+        old = Machine('M1', _ITEM_A, _START, big, 500.0, _BTM_BEAM, 300.0, _24_7,
+                      init_roll_lbs_remaining=50.0)
+        self.assertEqual((old.initial_status.roll_lbs_remaining, old.whole_rolls_before_runout), (0.0, 0))
+        plan = old.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        self.assertEqual([type(a).__name__ for a in plan.activities[:3]], ['TapeOut', 'Hanging', 'Threading'])
+        self.assertEqual([b.set_no for b in plan.beam_sets_returned], ['BM'])
+        hung = Machine('M1', _ITEM_A, _START, big, 500.0, _BTM_BEAM, 300.0, _24_7, init_top_threaded=False)
+        self.assertIsInstance(hung.plan_production(_ITEM_A, 100.0, 'schedule_tail').activities[0], Unhang)
+        new = Machine('M1', _ITEM_A, _START, big, 500.0, _BTM_BEAM, 300.0, _24_7, is_new=True,
+                      init_roll_lbs_remaining=50.0)
+        self.assertEqual(new.initial_status.roll_lbs_remaining, 50.0)
+        self.assertIsInstance(new.plan_production(_ITEM_A, 100.0, 'schedule_tail').activities[0], Knit)
+
+    def test_loader_and_json(self):
+        export = {'S1': _stock_set('S1', '40D BLACK 1000X4', size=(40.0, 42.0))}
+        top = _load([_entry(init_top_set={'set_no': 'S1', 'merge': 'M1'}, is_new=True)],
+                    beam_sets=export)['M1'].initial_status.beam('top')
+        self.assertEqual((top.size, top.is_large), ((40.0, 42.0), True))
+        from swmtplanner.planners.infinite.schedule_json import _beam_set
+        self.assertEqual(_beam_set(top)['size'], '40 x 42')
+        self.assertNotIn('size', _beam_set(_TOP_BEAM))
+
+
+# ---------------------------------------------------------------------------
+# 6.9 An item the machine cannot run
+
+from swmtplanner.schedule import (
+    TapeOut as _TapeOut6_9, Waste as _Waste6_9, Hanging as _Hanging6_9,
+    RunnerChange as _RunnerChange6_9, Idle as _Idle6_9,
+)
+
+# _ITEM_A's yarn and family, but M2 only — M1 is still set up for it.
+_ITEM_X = Greige(
+    'AU000X', family='A', tgt_wt=100.0,
+    top_beam='40D BLACK 1000X4', top_pct=0.4,
+    btm_beam='60D WHITE 1000X4', btm_pct=0.6,
+    safety=0.0, machines={'M2': 100.0},
+)
+# Another yarn altogether, runnable on M1.
+_ITEM_U = Greige(
+    'AU000U', family='A', tgt_wt=100.0,
+    top_beam='30D RED 1000X4', top_pct=0.5,
+    btm_beam='90D GREEN 1000X4', btm_pct=0.5,
+    safety=0.0, machines={'M1': 100.0},
+)
+_NONE_6_9 = Greige('NONE', family='A', tgt_wt=100.0,
+                   top_beam='40D BLACK 1000X4', top_pct=0.5,
+                   btm_beam='60D WHITE 1000X4', btm_pct=0.5, safety=0.0, machines={})
+
+
+class CannotRunItemTests(unittest.TestCase):
+    """6.9 — M1 set up for `_ITEM_X`, which may run on M2 only."""
+
+    def test_flag_and_roll(self):                                       # 6.9.1
+        m = Machine('M1', _ITEM_X, _START, _TOP_BEAM, 200.0, _BTM_BEAM, 300.0, _24_7,
+                    init_roll_lbs_remaining=50.0)
+        self.assertFalse(m.can_run_current_item)
+        self.assertTrue(_make_machine().can_run_current_item)
+        self.assertTrue(_make_machine(init_item=_NONE_6_9).can_run_current_item)
+        s = m.initial_status
+        self.assertEqual(s.roll_lbs_remaining, 0.0)
+        self.assertTrue(s.threaded('top') and s.threaded('btm'))
+        self.assertEqual((s.lbs_remaining('top'), s.lbs_remaining('btm')), (200.0, 300.0))
+
+    def test_no_run_up(self):                                           # 6.9.2
+        m = _make_machine(init_item=_ITEM_X, init_top_lbs=2000.0, init_btm_lbs=3000.0)
+        self.assertEqual(m.whole_rolls_before_runout, 0)
+        self.assertEqual(m.next_runout, _START)
+        self.assertFalse(m._can_fill_roll(m.current_status))
+
+    def test_run_until(self):                                           # 6.9.3
+        m = _make_machine(init_item=_ITEM_X, init_top_lbs=2000.0, init_btm_lbs=3000.0)
+        t = _START + timedelta(hours=5)
+        plan = m.run_until(t)
+        self.assertEqual(plan.jobs, ())
+        self.assertEqual([type(a) for a in plan.activities], [_Idle6_9])
+        self.assertEqual((plan.activities[0].start, plan.activities[0].end), (_START, t))
+        self.assertIsNone(m.run_until(_START))
+
+    def test_same_yarn_move_keeps_the_sets(self):                       # 6.9.4
+        for mode in ('schedule_tail', 'next_runout'):
+            m = _make_machine(init_item=_ITEM_X, init_top_lbs=2000.0, init_btm_lbs=3000.0)
+            plan = m.plan_production(_ITEM_A, 100.0, mode)
+            kinds = [type(a) for a in plan.activities]
+            for bad in (_TapeOut6_9, _Waste6_9, _Hanging6_9):
+                self.assertNotIn(bad, kinds, mode)
+            self.assertIn(_RunnerChange6_9, kinds, mode)
+            self.assertEqual([j.item.id for j in plan.jobs], ['AU0001'], mode)
+            self.assertEqual(plan.activities[0].start, _START, mode)
+
+    def test_other_yarn_move_tapes_out_the_real_sets(self):             # 6.9.5
+        m = _make_machine(init_item=_ITEM_X)
+        plan = m.plan_production(_ITEM_U, 100.0, 'schedule_tail')
+        tos = [a for a in plan.activities if isinstance(a, _TapeOut6_9)]
+        self.assertEqual([a.bars for a in tos], ['both'])
+        self.assertEqual(sorted(b.lbs for b in plan.beam_sets_returned), [200.0, 300.0])

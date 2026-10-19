@@ -40,8 +40,8 @@ no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **666 tests pass, 4 skip** (`python -m unittest discover -s
-> tests -p '*_tests.py'`; as of 2026-10-13 on branch `knit-only`). The 4 skips are the **SQL Server-gated** classes —
+> **Suite state:** **694 tests pass, 4 skip** (`python -m unittest discover -s
+> tests -p '*_tests.py'`; as of 2026-10-15 on branch `knit-only`). The 4 skips are the **SQL Server-gated** classes —
 > `persist_run` end-to-end plus the `sqlload` read layer against a live store —
 > which probe a `SWMT_TEST_*` SQL Server test database in `setUpClass` and skip
 > when the driver/server is unreachable. **No test database exists yet**, so they
@@ -333,20 +333,51 @@ Landed this session, each design → spec → tests (DESIGN.md sections named):
   changed, whole-day period; master.json has 6/day); a move that must wait
   for a slot knits its current item meanwhile as far as demand allows
   (`Fill`, `Job.fill`).
-- **Blacklisted merges** (`schedule/DESIGN.md` "Blacklisted merges"):
-  config `blacklist` (a JSON list of merge codes); a flagged set fits
-  nothing and is never stock — withheld from picks, passed over in a
-  queue, taped out off a bar.
+- **Blacklisted merges, vendors and sets** (`schedule/DESIGN.md`
+  "Blacklisted merges"): config `blacklist` — a JSON list of merge codes,
+  or an object `{"merges", "vendors", "sets"}` (`products.Blacklist`,
+  2026-10-19) naming whole vendors by the export's name and individual
+  set numbers too; a flagged set fits nothing and is never stock —
+  withheld from picks, passed over in a queue, taped out off a bar.
 
-**Approved design, not yet implemented:** assigned-set `status`
-(`"inventory"` default / `"staged"` / `"hung"`) — a hung set becomes the
-bar's unthreaded initial set (`init_*_threaded`), the first plan emits a
-`Threading` only, or an `Unhang` (new zero-duration activity, set back to
-stock) when it does not fit; `BeamSet.location` for queued sets. See
-`schedule/DESIGN.md` "Hung bars" and the `status` paragraph under File I/O,
-`planners/infinite/DESIGN.md` config comment, `planners/manual/DESIGN.md`
-`pending()`. Next step: implement, spec (SCHEDULE 6.x, INF_PLAN, manual),
-tests.
+- **Assigned-set `status`** (`schedule/DESIGN.md` "Hung bars" and the
+  `status` paragraph under File I/O): `"inventory"` (default) / `"staged"`
+  queue the set with a `location`; `"hung"` makes it the bar's unthreaded
+  initial set (`init_*_threaded`), which the first plan threads without a
+  hang, or takes off with the new zero-duration `Unhang` activity (set
+  back to stock) when it does not fit. The user's `assigned-sets.json`
+  already carries the field.
+- **Large beams** (`schedule/DESIGN.md` "Large beams"): export records
+  carry `size` (`"<diam> x <width>"` in inches); a set of 40 in or more
+  (`LARGE_BEAM_DIAMETER`) fits only new machines — `Machine.accepts`
+  gates the stock pick, manual assignments, `assign_sets`, the queue
+  (passed over, reason `too large for this machine`), the retimer's
+  keep-sets and a mounted set (foreign bar, taken off at the first plan).
+  The stock pick order is now `stock_order`: large sets first, then
+  oldest received, then set number — the merge/vendor continuity tiers
+  are gone.
+- **An item the machine cannot run** (`schedule/DESIGN.md` "An item the
+  machine cannot run"): a machine set up for a style whose machine list
+  leaves it out (`Machine.can_run_current_item` False) knits nothing of
+  it — treated like foreign bars for the run-up (roll zeroed, no run-up,
+  no fill, runout immediate) while its sets keep their real lbs for the
+  preamble; `run_until` idles it to the change date; its cheap set is
+  empty, so moving it costs no recovery and it covers for nobody; the
+  load echoes it (`run.cannot_run_on_machines`). Note the style file
+  still lists Q6 for AU7992T2A — the machine master qualifies it — so
+  the rule fires only once the user drops Q6 from that style.
+- `plan styles` reads the reshaped `knit-machine-master.json`: a
+  per-machine `width` (a machine must be at least as wide as the style)
+  and a single `rpm` (no `wide` attribute, no `rpms.any/wide`).
+- Variant rows are split into sets by **threading**, not by shared merge
+  (`products/variants.py` `_sets`): the two bars threaded `1 IN, 1 OUT` /
+  `1 OUT, 1 IN` are the split-lease set (same planner yarn required,
+  merge codes may differ); every other bar is its own set, so two solid
+  bars of one merge are two sets (this is what defines AU1148G36, skipped
+  before). A row with more than two distinct merges is still excluded.
+  Not regenerated in the input folder — the user runs `plan variants` /
+  `plan styles`; note a regenerated styles file re-adds the nine old
+  machines the user removed by hand from AU7992T2A.
 
 **Parked (user's call, not designed):** the split-lease short-doff rule
 (a split-lease set running out mid-roll forces a short doff; counting is by
@@ -361,8 +392,8 @@ Spec files for all of this: `tests/spec-files/SCHEDULE_TEST_SPEC.md` (Phases
 
 ## Next concrete action
 
-On `knit-only`: implement the approved assigned-set `status` design above,
-then commit the branch (the user commits). The dashboard / SQL Server
+On `knit-only`: commit the branch (the user commits); the next feature is the
+user's call — the parked items above are the open candidates. The dashboard / SQL Server
 cut-over notes below predate this branch's work and still apply to the
 debug-log viewer, which this branch has not touched:
 

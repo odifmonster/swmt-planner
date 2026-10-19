@@ -10,7 +10,7 @@ from swmtplanner.support import HasID
 from swmtplanner.products import BeamSet, BeamSetDesc
 from swmtplanner.support import planning_mode
 from swmtplanner.schedule.activity import (
-    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Activity, Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
     HANGING_SINGLE_DURATION, HANGING_BOTH_DURATION,
@@ -75,28 +75,22 @@ def effective_rate(nominal: float, mtype: str) -> float:
     return nominal * planning_mode.efficiency(RUNNING_EFFICIENCY, mtype)
 
 
-def choose_stock(cands: list[BeamSet], prev: 'BeamSet | None') -> BeamSet:
-    """The stock set to hang from `cands` (sets that fit the bar, available
-    and not yet taken), for continuity with `prev`, the set coming off the
-    bar: first a set with the same merge, then one from the same vendor,
-    then any — a tier is skipped when `prev` is None or its merge (vendor)
-    is unknown, since there is nothing to match. Within a tier the oldest
-    received first, then the lowest set number. Sets under
-    `MIN_STOCK_SET_LBS` are ignored unless they are all there is. See
-    "Beam-set inventory" in DESIGN.md."""
+def stock_order(b: BeamSet) -> tuple:
+    """The pull order of stock: large (40 in) sets first — the plant wants
+    them used up — then the oldest received, then the lowest set number.
+    See "Beam-set inventory" and "Large beams" in DESIGN.md."""
+    return (0 if b.is_large else 1, b.avail_date, b.set_no)
+
+
+def choose_stock(cands: list[BeamSet]) -> BeamSet:
+    """The stock set to hang from `cands` (sets that fit the bar, that the
+    machine accepts, available and not yet taken): the first in
+    `stock_order` — a large set before any other, then the oldest received,
+    then the lowest set number. Sets under `MIN_STOCK_SET_LBS` are ignored
+    unless they are all there is. See "Beam-set inventory" in DESIGN.md."""
     heavy = [b for b in cands if b.lbs >= MIN_STOCK_SET_LBS]
     pool = heavy or cands
-    merge = prev.merge if prev is not None else None
-    vendor = prev.vendor if prev is not None else None
-
-    def tier(b: BeamSet) -> int:
-        if merge is not None and b.merge == merge:
-            return 0
-        if vendor is not None and b.vendor == vendor:
-            return 1
-        return 2
-
-    return min(pool, key=lambda b: (tier(b), b.avail_date, b.set_no))
+    return min(pool, key=stock_order)
 
 
 @dataclass(frozen=True)
@@ -160,6 +154,12 @@ class _PlanCtx:
     fill_left: int = 0
     fill_rolls: list[Roll] = field(default_factory=list)
     fill_acts: list[Activity] = field(default_factory=list)
+    # Whether the machine is new: an old one cannot take a large (40 in)
+    # set (see "Large beams" in DESIGN.md).
+    is_new: bool = False
+
+    def accepts(self, beam_set: BeamSet) -> bool:
+        return self.is_new or not beam_set.is_large
 
     def pick(self, desc: BeamSetDesc, at: datetime, bar: str,
              working: 'Status | None' = None,
@@ -193,9 +193,9 @@ class _PlanCtx:
         if set_no is not None:
             return self._take_assigned(set_no, desc, at, bar)
         cands = [b for b in self.inventory.get(desc.physical, ())
-                 if b.available_at(at) and b.id not in self.taken_ids]
+                 if b.available_at(at) and b.id not in self.taken_ids and self.accepts(b)]
         if cands:
-            return self._take(choose_stock(cands, prev))
+            return self._take(choose_stock(cands))
         return BeamSet.new(desc, fresh_beam_lbs(desc), at)
 
     def pass_over(self, working: 'Status', bar: Literal['top', 'btm'],
@@ -207,11 +207,13 @@ class _PlanCtx:
         queue so trimmed (unchanged when the front fits or the queue is
         empty). The set stays at the machine physically, so it does not
         return to stock."""
-        while working.queue(bar) and not working.queue(bar)[0].fits(desc):
+        while working.queue(bar) and not (working.queue(bar)[0].fits(desc)
+                                          and self.accepts(working.queue(bar)[0])):
             front = working.queue(bar)[0]
-            self.passed.append(PassedOver(
-                bar, front, desc, at,
-                reason='blacklisted' if front.blacklisted else 'does not fit'))
+            reason = ('blacklisted' if front.blacklisted
+                      else 'does not fit' if not front.fits(desc)
+                      else 'too large for this machine')
+            self.passed.append(PassedOver(bar, front, desc, at, reason=reason))
             working = working.drop_queued(bar)
         return working
 
@@ -233,6 +235,10 @@ class _PlanCtx:
                     raise ValueError(
                         f'assigned set {set_no!r} ({bar}) is not available '
                         f'until {b.avail_date.isoformat()} (needed {at.isoformat()})'
+                    )
+                if not self.accepts(b):
+                    raise ValueError(
+                        f'assigned set {set_no!r} ({bar}) is too large for this machine'
                     )
                 return self._take(b)
         raise ValueError(
@@ -318,6 +324,8 @@ class Machine(HasID[str]):
         init_roll_lbs_remaining: float = 0.0,
         init_top_queue: Sequence[BeamSet] = (),
         init_btm_queue: Sequence[BeamSet] = (),
+        init_top_threaded: bool = True,
+        init_btm_threaded: bool = True,
     ) -> None:
         if init_roll_lbs_remaining < 0:
             raise ValueError('init_roll_lbs_remaining must be non-negative')
@@ -332,19 +340,27 @@ class Machine(HasID[str]):
         # not fit the item is *foreign* (the plant reported the machine
         # mid-change): no roll can be in progress across it, so the roll is
         # taken as finished — see "Foreign bars" in DESIGN.md.
+        # A bar the plant has hung but not threaded (`init_*_threaded`
+        # False) likewise carries no roll in progress — see "Hung bars".
+        # So does a set the machine cannot take at all (a large beam on an
+        # old machine — see "Large beams"), and a machine on an item it
+        # cannot run (see "An item the machine cannot run").
         cfg = init_item.configuration
         foreign = (not init_top_beam.fits(BeamSetDesc(cfg.top_beam))
-                   or not init_btm_beam.fits(BeamSetDesc(cfg.btm_beam)))
+                   or not init_btm_beam.fits(BeamSetDesc(cfg.btm_beam))
+                   or not self.accepts(init_top_beam) or not self.accepts(init_btm_beam)
+                   or not init_top_threaded or not init_btm_threaded
+                   or not init_item.can_run_on_mchn(id))
         self._initial_status = Status.create(
             as_of=start,
             current_item=init_item,
             is_idle=True,
             top_beam=init_top_beam,
             top_lbs_remaining=init_top_lbs,
-            top_threaded=True,
+            top_threaded=init_top_threaded,
             btm_beam=init_btm_beam,
             btm_lbs_remaining=init_btm_lbs,
-            btm_threaded=True,
+            btm_threaded=init_btm_threaded,
             roll_lbs_remaining=(0.0 if foreign
                                 else min(init_roll_lbs_remaining, init_item.tgt_wt)),
             top_queue=init_top_queue, btm_queue=init_btm_queue,
@@ -361,6 +377,12 @@ class Machine(HasID[str]):
     @property
     def workcal(self) -> 'WorkCal':
         return self._workcal
+
+    def accepts(self, beam_set: BeamSet) -> bool:
+        """Whether the set can go on this machine: False only for a large
+        (40 in) set on an old machine — see "Large beams" in DESIGN.md. The
+        yarn match is a separate question (`BeamSet.fits`)."""
+        return self._is_new or not beam_set.is_large
 
     @property
     def is_new(self) -> bool:
@@ -386,6 +408,15 @@ class Machine(HasID[str]):
     @property
     def current_status(self) -> Status:
         return self._current_status
+
+    @property
+    def can_run_current_item(self) -> bool:
+        """Whether the machine may knit its current item — the style's
+        machine list names it (`Greige.can_run_on_mchn`; True for `NONE`).
+        False for a machine still set up for a style the plant has pulled
+        from it: no run-up, no fill, the roll in progress zeroed — see "An
+        item the machine cannot run" in DESIGN.md."""
+        return self._current_status.current_item.can_run_on_mchn(self._id)
 
     @property
     def activities(self) -> tuple[Activity, ...]:
@@ -491,9 +522,10 @@ class Machine(HasID[str]):
         plant can first change it over: a plan (via `plan_production` in
         `'schedule_tail'` mode) that finishes the roll in progress and every
         whole roll that *starts* before `t`, so the last roll may run past
-        `t`. A machine with nothing to run (the `NONE` item, or no rate on
-        this machine) gets one `Idle` up to `t` instead, so no changeover
-        can be placed before it. `None` when `t` is not after the schedule
+        `t`. A machine with nothing to run (the `NONE` item, or an item it
+        cannot run — "An item the machine cannot run" in DESIGN.md) gets one
+        `Idle` up to `t` instead, so no changeover can be placed before it.
+        `None` when `t` is not after the schedule
         tail. The caller commits the plan (`commit_plan` / the planner's
         `State.commit_move`)."""
         s = self._current_status
@@ -576,19 +608,23 @@ class Machine(HasID[str]):
         hours += whole * (item.tgt_wt / rate + _doff_hours())
         return n_rolls + whole, hours, None
 
-    @staticmethod
-    def _run_up_lbs(working: Status) -> tuple[float, float]:
+    def _run_up_lbs(self, working: Status) -> tuple[float, float]:
         """`(top, btm)` lbs the run-up may draw on for `working.current_item`:
         each bar's remaining lbs, or 0 for a **foreign** bar — one whose set
         does not fit the item (a machine the plant reported mid-change), which
         holds no usable yarn for the item and so allows no whole roll of it;
         the preamble meets the set with its real lbs (see "Foreign bars" in
-        DESIGN.md)."""
+        DESIGN.md). `(0, 0)` outright for an item the machine cannot run
+        (see "An item the machine cannot run"), whatever its sets."""
+        if not working.current_item.can_run_on_mchn(self._id):
+            return 0.0, 0.0
         cfg = working.current_item.configuration
         out = []
         for bar, label in (('top', cfg.top_beam), ('btm', cfg.btm_beam)):
             beam = working.beam(bar)
-            fits = beam is not None and beam.fits(BeamSetDesc(label))
+            fits = (beam is not None and beam.fits(BeamSetDesc(label))
+                    and self.accepts(beam)            # a large set on an old machine
+                    and working.threaded(bar))        # a hung bar cannot knit yet
             out.append(working.lbs_remaining(bar) if fits else 0.0)
         return out[0], out[1]
 
@@ -900,6 +936,7 @@ class Machine(HasID[str]):
             assigned={bar: deque(sets) for bar, sets in (assign or {}).items()},
             capacity=capacity,
             fill=fill, fill_left=fill.rolls if fill is not None else 0,
+            is_new=self._is_new,
         )
 
         # 0. Optional idle gap at the head of the plan (belongs to no job).
@@ -923,7 +960,7 @@ class Machine(HasID[str]):
         # only `Knit`s / `Doff`s a preamble holds are a fill's, which are
         # the current item's (below).
         setup = [a for a in preamble
-                 if not isinstance(a, (TapeOut, Waste, Idle, Knit, Doff))]
+                 if not isinstance(a, (TapeOut, Unhang, Waste, Idle, Knit, Doff))]
 
         # The fill's rolls join the current item's job: the run-up job, or a
         # new one when the run-up produced nothing.
@@ -1048,13 +1085,19 @@ class Machine(HasID[str]):
 
         def bar_action(bar: Literal['top', 'btm'], want_beam: str) -> str:
             """One of 'load' (empty), 'keep' (matching yarn), 'tape'
-            (mismatch worth preserving), or 'waste' (mismatch to discard).
+            (mismatch worth preserving), 'waste' (mismatch to discard),
+            'thread' (hung by the plant, not threaded, matching yarn) or
+            'unhang' (hung, not threaded, mismatched — see "Hung bars").
             "Matching" is the physical set — split lease aside."""
             usable = working.lbs_remaining(bar) - BEAM_FLOOR_LBS
             if usable <= _FLOAT_EPS:
                 return 'load'
             beam = working.beam(bar)
-            if beam is not None and beam.fits(BeamSetDesc(want_beam)):
+            fits = (beam is not None and beam.fits(BeamSetDesc(want_beam))
+                    and self.accepts(beam))
+            if not working.threaded(bar):
+                return 'thread' if fits else 'unhang'
+            if fits:
                 return 'keep'
             return 'tape' if usable > MAX_BEAM_WASTE_LBS else 'waste'
 
@@ -1080,6 +1123,16 @@ class Machine(HasID[str]):
         elif btm_action == 'tape':
             working = self._emit_tape_out(emitted, working, 'btm', ctx)
 
+        # Unhang phase — a hung, never-threaded set that does not fit comes
+        # straight off again (no tape-out: nothing was threaded), back to
+        # stock with all its lbs. Batched into one 'both' like a tape-out.
+        if top_action == 'unhang' and btm_action == 'unhang':
+            working = self._emit_unhang(emitted, working, 'both', ctx)
+        elif top_action == 'unhang':
+            working = self._emit_unhang(emitted, working, 'top', ctx)
+        elif btm_action == 'unhang':
+            working = self._emit_unhang(emitted, working, 'btm', ctx)
+
         # Waste phase — discard near-empty mismatched residue (the beam
         # currently on the bar). Zero duration; empties the bar.
         if top_action == 'waste':
@@ -1094,15 +1147,18 @@ class Machine(HasID[str]):
             )
 
         # Re-thread phase — every bar that wasn't kept gets a fresh set
-        # (Hanging + Threading). Batch into 'both' when both are re-threaded.
-        rethread_top = top_action != 'keep'
-        rethread_btm = btm_action != 'keep'
-        if rethread_top and rethread_btm:
-            working = self._emit_rethread(emitted, working, 'both', item, ctx)
-        elif rethread_top:
-            working = self._emit_rethread(emitted, working, 'top', item, ctx)
-        elif rethread_btm:
-            working = self._emit_rethread(emitted, working, 'btm', item, ctx)
+        # (Hanging), then every bar owed a threading — freshly hung, or
+        # hung by the plant and not yet threaded — is threaded; each batched
+        # into 'both' when both bars need it.
+        actions = (('top', top_action), ('btm', btm_action))
+        hang = [b for b, a in actions if a not in ('keep', 'thread')]
+        thread = [b for b, a in actions if a != 'keep']
+        if hang:
+            working = self._emit_hanging(
+                emitted, working, 'both' if len(hang) == 2 else hang[0], item, ctx)
+        if thread:
+            working = self._emit_threading(
+                emitted, working, 'both' if len(thread) == 2 else thread[0])
 
         # Changeover phase — the right changeover type when the item changes.
         if item != working.current_item:
@@ -1369,6 +1425,32 @@ class Machine(HasID[str]):
             THREADING_BOTH_DURATION if bars == 'both' else THREADING_SINGLE_DURATION)
         end = self._workcal.offset_work_hours(start, duration)
         emitted.append(Threading(start=start, end=end, bars=bars))
+        return working.apply_activity(emitted[-1])
+
+    def _emit_unhang(
+        self, emitted: list[Activity], working: Status,
+        bars: Literal['top', 'btm', 'both'], ctx: _PlanCtx,
+    ) -> Status:
+        """Emit an `Unhang` of `bars` — a hung, never-threaded set taken off
+        again (see "Hung bars" in DESIGN.md): zero duration, no ration slot,
+        the set recorded as returned to inventory with all its lbs (not when
+        it is no longer worth stocking, or blacklisted)."""
+        start = working.as_of
+
+        def off(bar: Literal['top', 'btm']) -> 'BeamSet | None':
+            beam = working.beam(bar)
+            if beam is None:
+                return None
+            back = beam.returned(working.lbs_remaining(bar), start)
+            if worth_stocking(back):
+                ctx.returned.append(back)
+            ctx.removed[bar] = beam
+            return back
+
+        top_beam = off('top') if bars in ('top', 'both') else None
+        btm_beam = off('btm') if bars in ('btm', 'both') else None
+        emitted.append(Unhang(start=start, end=start, bars=bars,
+                              top_beam=top_beam, btm_beam=btm_beam))
         return working.apply_activity(emitted[-1])
 
     def _emit_rethread(

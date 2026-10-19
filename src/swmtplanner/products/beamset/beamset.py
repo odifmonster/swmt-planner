@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import re
 from datetime import datetime
 
 from ...support import HasID
@@ -81,6 +82,26 @@ class BeamSetDesc(HasID[str]):
                 and self.ends == other.ends and self.spools == other.spools)
 
 
+# A beam of this diameter (inches) or more is a *large* beam: it fits only
+# the new machines (see "Large beams" in schedule/DESIGN.md).
+LARGE_BEAM_DIAMETER = 40.0
+
+
+def parse_size(value) -> 'tuple[float, float] | None':
+    """An export's beam `size` string — `<diam> x <width>` in inches, e.g.
+    `40 x 42`, `21.5x42"` — as `(diameter, width)`; None for nothing, and
+    `ValueError` for a string that is not two numbers around an `x`."""
+    if value in (None, '', 'NULL'):
+        return None
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return float(value[0]), float(value[1])
+    m = re.fullmatch(r'\s*([0-9]+(?:\.[0-9]+)?)\s*"?\s*[xX×]\s*([0-9]+(?:\.[0-9]+)?)\s*"?\s*',
+                     str(value))
+    if m is None:
+        raise ValueError(f'bad beam size {value!r}: expected "<diam> x <width>"')
+    return float(m.group(1)), float(m.group(2))
+
+
 def _make_id_counter():
     ctr = 0
     def _next():
@@ -110,7 +131,8 @@ class BeamSet(HasID[str]):
                  vendor: 'str | None' = None,
                  denier: 'int | None' = None, luster: str = '', ytype: str = '',
                  known_merge: bool = False, assigned: bool = False,
-                 blacklisted: bool = False):
+                 blacklisted: bool = False, location: str = '',
+                 size: 'tuple[float, float] | None' = None):
         if desc.split_lease:
             raise ValueError(f'a physical beam set cannot be split lease: {desc.id!r}')
         self._id = set_no
@@ -125,6 +147,8 @@ class BeamSet(HasID[str]):
         self._known_merge = known_merge
         self._assigned = assigned
         self._blacklisted = blacklisted
+        self._location = location
+        self._size = None if size is None else (float(size[0]), float(size[1]))
 
     @classmethod
     def new(cls, desc: BeamSetDesc, lbs: float, avail_date: datetime) -> 'BeamSet':
@@ -143,7 +167,8 @@ class BeamSet(HasID[str]):
         return BeamSet(like.set_no, like.merge, self._lbs, self._desc, self._avail_date,
                        vendor=like.vendor, denier=like.denier, luster=like.luster,
                        ytype=like.ytype, known_merge=like.known_merge,
-                       blacklisted=like.blacklisted)
+                       blacklisted=like.blacklisted, location=like.location,
+                       size=like.size)
 
     def returned(self, lbs: float, at: datetime) -> 'BeamSet':
         """This set as it comes back off a machine: same id and merge, `lbs`
@@ -151,7 +176,8 @@ class BeamSet(HasID[str]):
         return BeamSet(self._id, self._merge, lbs, self._desc, at,
                        vendor=self._vendor, denier=self._denier,
                        luster=self._luster, ytype=self._ytype,
-                       known_merge=self._known_merge, blacklisted=self._blacklisted)
+                       known_merge=self._known_merge, blacklisted=self._blacklisted,
+                       size=self._size)
         # (a returned set is no longer assigned to anything)
 
     @property
@@ -225,6 +251,36 @@ class BeamSet(HasID[str]):
         inventory export's `assigned` flag): not free stock, but the next set
         that bar will hang — see the machines' bar queues."""
         return self._assigned
+
+    def located(self, location: str) -> 'BeamSet':
+        """This set (same identity, lbs and flags) with `location` set."""
+        return BeamSet(self._id, self._merge, self._lbs, self._desc, self._avail_date,
+                       vendor=self._vendor, denier=self._denier, luster=self._luster,
+                       ytype=self._ytype, known_merge=self._known_merge,
+                       assigned=self._assigned, blacklisted=self._blacklisted,
+                       location=location, size=self._size)
+
+    @property
+    def size(self) -> 'tuple[float, float] | None':
+        """`(diameter, width)` of the set's beams in inches, when known."""
+        return self._size
+
+    @property
+    def diameter(self) -> 'float | None':
+        return None if self._size is None else self._size[0]
+
+    @property
+    def is_large(self) -> bool:
+        """A large (40 in) beam set: fits only the new machines. False when
+        the size is unknown."""
+        return self._size is not None and self._size[0] >= LARGE_BEAM_DIAMETER
+
+    @property
+    def location(self) -> str:
+        """For a plant-assigned set, where the plant says it is: `'staged'`
+        at the machine or `'inventory'` still in the warehouse (the
+        assigned-sets record's `status`); empty otherwise. Informational."""
+        return self._location
 
     @property
     def blacklisted(self) -> bool:

@@ -55,6 +55,7 @@ _KNIT_ID = _make_id_counter()
 _WASTE_ID = _make_id_counter()
 _DOFF_ID = _make_id_counter()
 _TAPE_OUT_ID = _make_id_counter()
+_UNHANG_ID = _make_id_counter()
 _HANGING_ID = _make_id_counter()
 _THREADING_ID = _make_id_counter()
 _STYLE_CHANGE_ID = _make_id_counter()
@@ -159,6 +160,23 @@ class TapeOut(Activity):
     @property
     def id(self) -> str:
         return f'TAPEOUT{self._count:08}'
+
+
+@dataclass(frozen=True)
+class Unhang(Activity):
+    """A hung, never-threaded set taken off its bar(s) again — a set the
+    plant mounted that the plan cannot use (see "Hung bars" in DESIGN.md).
+    Zero duration, no ration unit, no job. `top_beam` / `btm_beam` record
+    the set(s) removed, per bar, as they return to inventory with all their
+    lbs, available from this activity's end."""
+    bars: Literal['top', 'btm', 'both']
+    top_beam: 'BeamSet | None' = None
+    btm_beam: 'BeamSet | None' = None
+    _count: int = field(default_factory=_UNHANG_ID, init=False)
+
+    @property
+    def id(self) -> str:
+        return f'UNHANG{self._count:08}'
 
 
 @dataclass(frozen=True)

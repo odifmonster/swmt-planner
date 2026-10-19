@@ -321,7 +321,7 @@ new machines whose mounted sets are built explicitly.
    an old machine's is its yarn and its current pattern family; an item
    that cannot run on the machine is excluded; `cheap_set_after` for a
    move to another yarn is that yarn's items (family-filtered on an old
-   machine).
+   machine); a machine on an item it cannot run has an empty cheap set.
 2. **Urgent orders** — `build_urgent_by_item` lists each item's
    remaining-lbs orders through the reference week only, with `lbs` the
    remaining and `gross_lbs` the week's demand, and omits items with
@@ -351,6 +351,11 @@ new machines whose mounted sets are built explicitly.
    no cheap sets scores 0; `score_after_move` with only `recovery`
    non-zero equals `w.recovery × quantity`; the debug `cost_summary`
    carries a `recovery` row of kind `other`.
+10. **An item the machine cannot run** — an old machine set up for `RY2`
+    (which cannot run on it): any move on it has quantity 0 with nothing
+    stranded; and with a new machine on `RY1` leaving yarn Y against
+    `RY1`'s week-1 demand, that machine does not count as cover (the
+    quantity is positive), where the same machine on `RY1` would (0).
 
 ### 1.3 Candidate enumeration
 
@@ -588,12 +593,25 @@ met *and* it is below safety target; otherwise it gets a regular order.
    order); with only a safety gap of 250, `Fill(3, 'S@A')`; with both, the
    sum of rolls against the regular order.
 2. **None** — for a move continuing the current item, a machine with no
-   item, an item the run does not have, or an item with nothing open.
+   item, an item the run does not have, an item with nothing open, or a
+   machine on an item it cannot run (open demand or not).
 3. **Candidates carry the fill** — with the day's changes booked, a
    changeover candidate's plan knits the current item while it waits: a
    `fill` job of the current item precedes the new item's job in
    `plan.jobs` and the wait is shorter than the fill-less plan's; a
    continuation candidate on the same machine has no fill job.
+
+#### 1.3.6 A machine on an item it cannot run
+
+`_ITEM_X`: `_ITEM_A`'s yarn and family, runnable on `M2` only; `M1` set
+up for it with full bars, with open demand on both `_ITEM_X` and
+`_ITEM_A` (see "An item the machine cannot run" in `schedule/DESIGN.md`
+and the planner design's Inputs).
+
+1. **One decision point** — `eligible_decision_points` lists only
+   `('M1', 'schedule_tail', start)`: the runout coincides with the tail.
+2. **Open to what it can run** — every candidate is for `_ITEM_A` at
+   `schedule_tail`; none has a job of `_ITEM_X` (no run-up, no fill).
 
 ### 1.4 Main loop
 
@@ -763,6 +781,11 @@ For any non-trivial scenario, verify:
    when the set is, and no such key otherwise: the `TapeOut` that takes a
    blacklisted mounted set off a bar shows it, and a passed-over queued
    set's entry reads `reason: blacklisted`.
+6. **Hung and queued sets** — a beam-set object carries `"location"`
+   (`staged` / `inventory`) for a plant-queued set and no such key
+   otherwise; an `Unhang` serialises `bars`, `top_beam`, `btm_beam` like a
+   `TapeOut`; the xlsx `desc` of an `Unhang` reads `unhung, never
+   threaded: …` with the set and its lbs back.
 4. **Knit sets** — a `Knit` serialises `top_beam` / `btm_beam` as
    beam-set objects (null for a bar that held nothing), and the xlsx
    `desc` for a knit reads `<item> [<variant>] top #<set> <merge> / btm

@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Collection, Mapping, TYPE_CHECKING
 
-from swmtplanner.products import BeamSet, BeamSetDesc, beam_set_from_record, is_blacklisted
+from swmtplanner.products import BeamSet, BeamSetDesc, Blacklist, beam_set_from_record, is_blacklisted
 from swmtplanner.support import planning_mode
 from .machine import Machine, fresh_beam_lbs
 
@@ -28,7 +28,7 @@ def machines_from_list(
     beam_sets: Mapping[str, BeamSet] | None = None,
     assigned_sets: 'list[Any] | None' = None,
     source: str = '<machines list>',
-    blacklist: Collection[str] = (),
+    blacklist: 'Blacklist | Collection[str]' = (),
 ) -> dict[str, Machine]:
     """Build a `{machine_id: Machine}` dict from an already-parsed list
     of machine records — the same shape a machines JSON file holds.
@@ -93,7 +93,7 @@ def machines_from_list(
     if not isinstance(cfg, list):
         raise TypeError(f'{source} must be a list of machine objects')
     variant_masters = variant_masters or {}
-    queues = _bar_queues(assigned_sets or [])
+    queues, hung = _bar_queues(assigned_sets or [])
     out: dict[str, Machine] = {}
     for entry in cfg:
         if not isinstance(entry, dict):
@@ -128,18 +128,32 @@ def machines_from_list(
             btm_lbs = planning_mode.beam_lbs(btm_lbs)
         top_set = _set_ref(entry.get('init_top_set'), f'{source} {machine_id} init_top_set')
         btm_set = _set_ref(entry.get('init_btm_set'), f'{source} {machine_id} init_btm_set')
+        # A set the plant reports hung on a bar but not threaded (an
+        # assigned-sets record with `status: hung`) is that bar's initial
+        # set in place of the file's, unthreaded, with its own lbs — see
+        # "Hung bars" in DESIGN.md.
+        bars = {}
+        for bar, label, lbs, merge, ref in (('top', item_cfg.top_beam, top_lbs, top_merge, top_set),
+                                             ('btm', item_cfg.btm_beam, btm_lbs, btm_merge, btm_set)):
+            rec = hung.get((_norm_id(machine_id), bar))
+            if rec is not None:
+                beam = _hung_set(rec, label, start, beam_sets, variant_map, blacklist,
+                                 f'{source} {machine_id} hung set')
+                bars[bar] = (beam, beam.lbs, False)
+            else:
+                beam = _initial_set(machine_id, bar, label, lbs, start, merge, ref,
+                                    beam_sets, variant_map, blacklist)
+                bars[bar] = (beam, lbs, True)
         machine = Machine(
             id=machine_id,
             init_item=init_item,
             start=start,
-            init_top_beam=_initial_set(machine_id, 'top', item_cfg.top_beam,
-                                       top_lbs, start, top_merge, top_set,
-                                       beam_sets, variant_map, blacklist),
-            init_top_lbs=top_lbs,
-            init_btm_beam=_initial_set(machine_id, 'btm', item_cfg.btm_beam,
-                                       btm_lbs, start, btm_merge, btm_set,
-                                       beam_sets, variant_map, blacklist),
-            init_btm_lbs=btm_lbs,
+            init_top_beam=bars['top'][0],
+            init_top_lbs=bars['top'][1],
+            init_btm_beam=bars['btm'][0],
+            init_btm_lbs=bars['btm'][1],
+            init_top_threaded=bars['top'][2],
+            init_btm_threaded=bars['btm'][2],
             workcal=workcal,
             is_new=bool(entry['is_new']),
             init_variant=init_variant,
@@ -162,12 +176,35 @@ def _norm_id(machine_id: str) -> str:
     return f'{m.group(1).upper()}{int(m.group(2))}' if m else str(machine_id).strip()
 
 
-def _bar_queues(records: list[Any]) -> dict[tuple[str, str], list[dict]]:
+_STATUSES = ('inventory', 'staged', 'hung')
+
+
+def _status_of(rec: dict) -> str:
+    """An assigned-set record's `status` — `inventory` (the default: still
+    in the warehouse), `staged` (at the machine) or `hung` (on the bar, not
+    threaded); anything else raises `ValueError`."""
+    status = rec.get('status')
+    if status in (None, '', 'NULL'):
+        return 'inventory'
+    status = str(status).strip().lower()
+    if status not in _STATUSES:
+        raise ValueError(
+            f"assigned set {rec.get('set_no')!r}: status must be one of "
+            f"{', '.join(_STATUSES)}, got {rec.get('status')!r}")
+    return status
+
+
+def _bar_queues(records: list[Any]) -> tuple[dict[tuple[str, str], list[dict]],
+                                             dict[tuple[str, str], dict]]:
     """Assigned-set records grouped by (normalised machine id, bar name), in
-    file order. Bar 1 is the bottom; any higher bar is the top — on a style
-    whose split pair sits on bars 1 and 2 the top set is reported as bar 3,
-    on one whose split pair is on bars 2 and 3 as bar 2."""
-    out: dict[tuple[str, str], list[dict]] = {}
+    file order: the queued ones (`status` inventory / staged) and, apart, the
+    one record per bar whose set is already hung (`status` hung; two for one
+    bar raise `ValueError`). Bar 1 is the bottom; any higher bar is the top
+    — on a style whose split pair sits on bars 1 and 2 the top set is
+    reported as bar 3, on one whose split pair is on bars 2 and 3 as bar
+    2."""
+    queued: dict[tuple[str, str], list[dict]] = {}
+    hung: dict[tuple[str, str], dict] = {}
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -178,8 +215,42 @@ def _bar_queues(records: list[Any]) -> dict[tuple[str, str], list[dict]]:
         if n < 1:
             continue
         bar = 'btm' if n == 1 else 'top'
-        out.setdefault((_norm_id(rec['machine']), bar), []).append(rec)
-    return out
+        key = (_norm_id(rec['machine']), bar)
+        if _status_of(rec) == 'hung':
+            if key in hung:
+                raise ValueError(
+                    f'two sets hung on {key[0]} {bar}: {hung[key].get("set_no")!r} '
+                    f'and {rec.get("set_no")!r}')
+            hung[key] = rec
+        else:
+            queued.setdefault(key, []).append(rec)
+    return queued, hung
+
+
+def _copy(bs: BeamSet, **over: Any) -> BeamSet:
+    """`bs` with the named constructor fields overridden."""
+    fields = dict(set_no=bs.set_no, merge=bs.merge, lbs=bs.lbs, desc=bs.desc,
+                  avail_date=bs.avail_date, vendor=bs.vendor, denier=bs.denier,
+                  luster=bs.luster, ytype=bs.ytype, known_merge=bs.known_merge,
+                  assigned=bs.assigned, blacklisted=bs.blacklisted, location=bs.location,
+                  size=bs.size)
+    fields.update(over)
+    return BeamSet(fields.pop('set_no'), fields.pop('merge'), fields.pop('lbs'),
+                   fields.pop('desc'), fields.pop('avail_date'), **fields)
+
+
+def _hung_set(rec: dict, label: str, start: datetime,
+              beam_sets: Mapping[str, BeamSet] | None,
+              variant_map: 'VariantMapFile | None', blacklist: 'Blacklist | Collection[str]',
+              source: str) -> BeamSet:
+    """The set an assigned-sets record says is hung on a bar, built as a
+    queued one is (`_queued_sets`) but as a mounted set: not `assigned`, no
+    location. A record whose yarn normalises to nothing raises `ValueError`
+    — a set on a bar cannot be skipped."""
+    built = _queued_sets([rec], label, start, beam_sets, variant_map, source, blacklist)
+    if not built:
+        raise ValueError(f'{source}: set {rec.get("set_no")!r} has no usable yarn')
+    return _copy(built[0], assigned=False, location='')
 
 
 _YARN_FIELDS = ('denier', 'luster', 'desc', 'ends', 'beams', 'lbs')
@@ -189,7 +260,7 @@ def _queued_sets(
     records: list[dict], label: str, start: datetime,
     beam_sets: Mapping[str, BeamSet] | None,
     variant_map: 'VariantMapFile | None', source: str,
-    blacklist: Collection[str] = (),
+    blacklist: 'Blacklist | Collection[str]' = (),
 ) -> list[BeamSet]:
     """The `BeamSet`s for a bar's assigned records: the export's set when
     the record matches one (set number and vendor; flagged assigned); else,
@@ -200,14 +271,18 @@ def _queued_sets(
     the bar's requirement, the record's merge and vendor and a fresh-beam
     weight, since the plant put it at the machine for exactly that bar. A
     set whose merge is on `blacklist` is stamped `blacklisted` (the export's
-    sets already are)."""
+    sets already are). Each carries its record's `status` as `location`
+    (`inventory`, the default, or `staged`; a `hung` record is the caller's
+    to place on the bar)."""
     out: list[BeamSet] = []
     for rec in records:
         set_no = str(rec['set_no'])
         vendor = _opt_str(rec.get('vendor'))
+        status = _status_of(rec)
+        location = '' if status == 'hung' else status
         known = _export_set(beam_sets, set_no, vendor)
         if known is not None:
-            out.append(known)
+            out.append(known.located(location))
             continue
         if variant_map is not None and all(rec.get(f) not in (None, '') for f in _YARN_FIELDS):
             built = beam_set_from_record(
@@ -215,13 +290,15 @@ def _queued_sets(
                 f'{source} assigned set {set_no!r}', blacklist,
             )
             if built is not None:
-                out.append(built)
+                out.append(built.located(location))
             continue
         desc = BeamSetDesc(label).physical
         merge = _opt_str(rec.get('merge'))
         out.append(BeamSet(set_no, merge, fresh_beam_lbs(desc), desc, start,
                            vendor=vendor, known_merge=merge is not None,
-                           assigned=True, blacklisted=is_blacklisted(merge, blacklist)))
+                           assigned=True,
+                           blacklisted=is_blacklisted(merge, blacklist, vendor=vendor, set_no=set_no),
+                           location=location))
     return out
 
 
@@ -283,7 +360,7 @@ def _initial_set(
     ref: tuple[str | None, str | None, str | None],
     beam_sets: Mapping[str, BeamSet] | None,
     variant_map: 'VariantMapFile | None' = None,
-    blacklist: Collection[str] = (),
+    blacklist: 'Blacklist | Collection[str]' = (),
 ) -> BeamSet:
     """The physical set on a machine's `bar` at `start`. `ref` is the
     machines file's `(set_no, merge, vendor)` (see `_set_ref`). The set's id
@@ -310,7 +387,9 @@ def _initial_set(
                    luster=known.luster if known else '',
                    ytype=known.ytype if known else '',
                    known_merge=merge is not None,
-                   blacklisted=is_blacklisted(merge, blacklist))
+                   blacklisted=is_blacklisted(merge, blacklist, vendor=vendor,
+                                              set_no=set_no or f'{machine_id}-{bar}'),
+                   size=known.size if known else None)
 
 
 def _mounted_desc(
@@ -339,7 +418,7 @@ def read_machines(
     variant_map: 'VariantMapFile | None' = None,
     beam_sets: Mapping[str, BeamSet] | None = None,
     assigned_sets: 'list[Any] | None' = None,
-    blacklist: Collection[str] = (),
+    blacklist: 'Blacklist | Collection[str]' = (),
 ) -> dict[str, Machine]:
     """Load machine records from a JSON file. Thin wrapper over
     `machines_from_list`. The file's shape: a top-level list of

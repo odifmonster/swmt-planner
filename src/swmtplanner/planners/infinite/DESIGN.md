@@ -51,7 +51,14 @@ The planner is invoked against:
   starts before `change_date`, committed like any move (machine schedule,
   the item's demand, the inventory); a machine with nothing to run idles
   to `change_date` — so every schedule tail is at or past it and no
-  changeover can be placed earlier.
+  changeover can be placed earlier. A machine on an item it **cannot
+  run** (not in the style's machine list — see "An item the machine
+  cannot run" in `schedule/DESIGN.md`) has nothing to run: it idles to
+  `change_date`, then stands at its tail with no run-up and no fill,
+  open to every item it can run (its one decision point is
+  `schedule_tail`; the current item is never a candidate on it), and a
+  move taking it elsewhere pays no recovery cost (see "Recovery cost").
+  The load echoes each such machine.
 - `weights` — cost-weighting config that the costing module consumes
   (see below).
 
@@ -690,8 +697,9 @@ target — rounded **up** to whole rolls, so the machine runs until that
 demand is completely filled or the slot comes, whichever is first; its
 `tgt_order` is the item's earliest open regular order, else its safety
 order. A move that continues the current item, a machine whose current
-item has no open demand, and a machine with no current item get no fill
-(`None`). The producible cap is laid out with the same fill, so the move
+item has no open demand, a machine with no current item, and a machine
+on an item it cannot run (`Machine.can_run_current_item` False — it has
+nothing to fill with) get no fill (`None`). The producible cap is laid out with the same fill, so the move
 is sized to what is left of the week after it.
 
 The fill is part of the candidate: its rolls are a job of the current
@@ -1081,8 +1089,13 @@ cheap(m) = { items I : I's yarn fits m's bars at its tail (the preamble's fit te
 ```
 
 A new machine's cheap set is everything on its yarn; an old machine's is
-its yarn and its pattern family. `ctx.cheap_sets` holds these for the
-iteration. For a move on machine `M` to item `B`:
+its yarn and its pattern family. A machine on an item it **cannot run**
+(`Machine.can_run_current_item` False) has an **empty** cheap set: it is
+knitting nothing the plant can use, so no move on it strands anything —
+its recovery cost is 0 whatever it changes to — and it covers no other
+machine's departure. (It still counts as a route for getting an item
+back, by what it holds on its bars.) `ctx.cheap_sets` holds these for
+the iteration. For a move on machine `M` to item `B`:
 
 ```
 lost(M, B) = cheap(M at its tail) − cheap(M after the move)      # items M could make cheaply and no longer can
@@ -1243,7 +1256,10 @@ plan variants <input-dir>            # holds greige-master-styles.json + variant
 
 The master list names each master style's **representative variant**; that
 variant's table row defines the master (per bar: runner length, ends, split
-lease, yarn), and another row is a variant of the master when it matches
+lease, yarn — the split-lease pair being the two bars threaded one in, one
+out, whatever their merge codes; every other bar is a set of its own, and a
+row using more than two distinct merges is excluded), and another row is a
+variant of the master when it matches
 the representative on every bar — same construction and beam count, the
 same yarn as the planner tells yarns apart (denier class, colour, cationic
 or recycled finish, textured or flat), and the same runner length: exactly, or failing
@@ -1274,9 +1290,10 @@ same set stitches share a family letter, handed
 out `A`, `B`, … in the order the list first shows each pattern (`Z` is
 `NONE`'s). Its
 `machine_rates` cover every machine in the knit-machine master that can run
-it — gauge equal; the 75-denier set on the top bar needs a `tall` machine;
-over 200" needs a `wide` one — at the nominal rate above (the machine's
-`wide` rpm for a wide style). `safety` — and `tgt_wt` when present — come
+it — gauge equal; the machine at least as wide as the style (the master's
+`width` in inches against the style's); the 75-denier set on the top bar
+needs a `tall` machine — at the nominal rate above, from the machine's
+one `rpm`. `safety` — and `tgt_wt` when present — come
 from the master list's own records, where the safety target is maintained;
 a value the list lacks comes from the previous styles file (`--prior`,
 default the output file when it exists), and failing that from the
@@ -1339,21 +1356,42 @@ The input resolution is shared: `run.load_config(config)` /
 `run.load_inputs(cfg, config_dir, start_date=…, overrides=…)` return an
 `Inputs` record (greiges, variant files, inventory, workcal, demand,
 machines, weights, the blacklist), used by `plan infinite` and by the manual
-scheduler so a config loads identically in both. The `blacklist` (merge
-codes as strings, whitespace trimmed) is handed to the beam-set and machine
-loaders, so every set built from the export or an assigned-sets record is
-stamped `blacklisted` when its merge is on it, and the load echoes how many
-merges are listed, how many stock sets were withheld, and each blacklisted
+scheduler so a config loads identically in both. The `blacklist`
+(`products.Blacklist`: merge codes, vendor names and set numbers, each as a
+string, whitespace trimmed, compared case-insensitively) is handed to the
+beam-set and machine loaders, so every set built from the export or an
+assigned-sets record is stamped `blacklisted` when its merge, its vendor or
+its set number is on it, and the load echoes how many merges, vendors and
+sets are listed, how many stock sets were withheld, and each blacklisted
 set found mounted on a machine or queued at one (the queued ones are passed
 over when their bar next hangs; the mounted ones make their bar foreign, so
 the machine's first plan tapes them out — see "Blacklisted merges" in
 schedule/DESIGN.md). The load also echoes each assigned set applied to a
-bar as **hung** (`"status": "hung"`, with the machines-file set it
-replaced, if any) and how many queued sets are staged at their machines
-against still in the warehouse. The file is a JSON list of merge codes as the export
-writes them (`"292286"`, `"292286BAD"`, `"299029-A"`, …); codes are compared
-trimmed and case-insensitively, each entry matching exactly the merge it
-names, so a code's `BAD` or `-A` variants are listed in their own right.
+bar as **hung** (`"status": "hung"`, and whether the first plan threads
+or unhangs it) and how many queued sets are staged at their machines
+against still in the warehouse. The run's change-date advance (the
+load's own run-up) is that first plan, so a hung set that fits is
+threaded at the start date, before the planner decides anything. It also
+echoes every large (40 in) set found mounted on or queued at an old
+machine, which cannot take it (see "Large beams" in schedule/DESIGN.md),
+and every machine found on an item it cannot run (the style's machine
+list leaves it out), which idles until the planner changes it (see
+"Inputs" above). The blacklist file is either a JSON list of merge codes
+as the export writes them (`"292286"`, `"292286BAD"`, `"299029-A"`, …) or
+an object with any of three lists:
+
+```json
+{"merges":  ["292286", "292286BAD", "299029-A"],
+ "vendors": ["Unifi Manufacturing, Inc"],
+ "sets":    ["2-3824", "W2-2637"]}
+```
+
+`merges` are merge codes, `vendors` the yarn vendor's name as the export
+writes it, `sets` set numbers. Every entry is compared trimmed and
+case-insensitively and matches **exactly** the thing it names: a code's
+`BAD` or `-A` variants are listed in their own right, and so are a
+vendor's spellings (`Unifi Manufacturing, Inc` and `Unifi/Nanya` are two
+vendors). A set is blacklisted when any one of the three names it.
 
 ### Run-config JSON
 
@@ -1385,10 +1423,13 @@ A top-level object with six required keys, plus optional `variant_masters`,
                                                # inventory (products.read_beam_sets):
                                                # set_no, merge, vendor, received,
                                                # lbs, beams, ends, denier, luster,
-                                               # desc, assigned
+                                               # desc, assigned, size (the beams'
+                                               # "<diam> x <width>" in inches; a
+                                               # 40 in set fits only new machines
+                                               # — schedule/DESIGN.md "Large beams")
     "assigned_sets": <path-string | list of {set_no, merge, vendor, machine, bar,
                                               denier, luster, desc, ends, beams,
-                                              lbs, received, status}>,
+                                              lbs, received, size, status}>,
                                                # optional; sets assigned to a
                                                # machine bar. `status` is
                                                # "inventory" (still in the
@@ -1403,12 +1444,16 @@ A top-level object with six required keys, plus optional `variant_masters`,
                                                # The yarn fields are the export's;
                                                # they describe a set the export
                                                # lacks
-    "blacklist":  <path-string | list of merge codes>,
-                                               # optional; yarn merges flagged for
-                                               # quality: a set carrying one is never
-                                               # hung by the planner (see
-                                               # schedule/DESIGN.md, "Blacklisted
-                                               # merges"); absent ⇒ none
+    "blacklist":  <path-string | list of merge codes | blacklist object>,
+                                               # optional; yarn flagged for quality:
+                                               # a list is merge codes; an object
+                                               # {"merges": [...], "vendors": [...],
+                                               #  "sets": [...]} (each optional) also
+                                               # names whole vendors and individual
+                                               # set numbers. A set carrying any of
+                                               # them is never hung by the planner
+                                               # (see schedule/DESIGN.md,
+                                               # "Blacklisted merges"); absent ⇒ none
     "demand":     <path-string | list of demand objects>,
     "weights":    <path-string | weights object>,
     "changeover_capacity": <object>,           # optional; the rations of changes, tape-outs
@@ -1773,9 +1818,10 @@ the changeovers → `from_item`,
 — hung on a `Hanging`, returned to stock on a `TapeOut` or `Unhang`), plus
 `"blacklisted": true` on a set whose merge the run blacklisted (the set a
 `TapeOut` took off a bar it was found mounted on, or a passed-over queued
-set; the key is left out otherwise) and `"location"` on a plant-assigned
+set; the key is left out otherwise), `"location"` on a plant-assigned
 set (`"staged"` / `"inventory"`, the assigned-sets record's `status`; left
-out otherwise). Datetimes are
+out otherwise) and `"size"` (`"<diam> x <width>"`) when the set's size is
+known. Datetimes are
 written the way the plant's systems store them: **UTC**, `YYYY-MM-DD
 HH:MM:SS`, whole seconds. The planner's clock is plant local time (see
 "Clock"), so the writer converts every timestamp through the plant's zone

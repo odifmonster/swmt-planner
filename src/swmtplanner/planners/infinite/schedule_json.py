@@ -24,7 +24,7 @@ from typing import Any, Mapping, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from swmtplanner.schedule import (
-    Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
 )
 
@@ -60,6 +60,10 @@ def _beam_set(bs: 'BeamSet | None') -> dict | None:
            'desc': bs.desc.id, 'lbs': bs.lbs}
     if bs.blacklisted:
         out['blacklisted'] = True
+    if bs.location:
+        out['location'] = bs.location
+    if bs.size is not None:
+        out['size'] = f'{bs.size[0]:g} x {bs.size[1]:g}'
     return out
 
 
@@ -75,7 +79,7 @@ def _activity(a: 'Activity', tz: tzinfo) -> dict[str, Any]:
                    top_beam=_beam_set(a.top_beam), btm_beam=_beam_set(a.btm_beam))
     elif isinstance(a, Waste):
         out.update(beam=_beam_set(a.beam), bar=a.bar, lbs=a.lbs)
-    elif isinstance(a, (TapeOut, Hanging)):
+    elif isinstance(a, (TapeOut, Unhang, Hanging)):
         out.update(bars=a.bars, top_beam=_beam_set(a.top_beam),
                    btm_beam=_beam_set(a.btm_beam))
         if isinstance(a, Hanging) and a.passed_over:

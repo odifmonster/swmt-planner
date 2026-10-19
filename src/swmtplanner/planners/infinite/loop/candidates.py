@@ -211,10 +211,11 @@ def fill_for(state: State, machine, item) -> Fill | None:
     demand — every regular order's remaining lbs, any week, plus its safety
     gap — rounded up to whole rolls, raised against its earliest open
     regular order, else its safety order. None for a move that continues
-    the current item, a machine with no item, an item the run does not
-    have, or one with no open demand."""
+    the current item, a machine with no item or on an item it cannot run
+    (nothing to fill with), an item the run does not have, or one with no
+    open demand."""
     cur = machine.current_status.current_item
-    if cur.id == 'NONE' or cur == item:
+    if cur.id == 'NONE' or cur == item or not machine.can_run_current_item:
         return None
     rls = state.rls_items.get(cur.id)
     if rls is None:

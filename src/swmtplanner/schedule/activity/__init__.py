@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from .activity import (
-    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Activity, Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
     HANGING_SINGLE_DURATION, HANGING_BOTH_DURATION,
@@ -12,7 +12,7 @@ from .activity import (
 )
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Unhang', 'Hanging', 'Threading',
     'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',
     'HANGING_SINGLE_DURATION', 'HANGING_BOTH_DURATION',

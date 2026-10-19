@@ -10,6 +10,7 @@ from typing import Any, Iterable, Literal, Mapping, TYPE_CHECKING
 
 from swmtplanner.products import BeamSetDesc
 from swmtplanner.schedule import Hanging, Idle, TAPE_OUT_BOTH_DURATION
+from swmtplanner.schedule.machine import stock_order
 from swmtplanner.planners.infinite.state import Move, State
 from swmtplanner.planners.infinite.run import load_config
 from swmtplanner.planners.infinite.schedule_json import (
@@ -127,7 +128,9 @@ class ManualSchedule:
         """Where each machine stands: current item, schedule tail, predicted
         next runout and the whole rolls doffed before it
         (`rolls_before_runout`, `Machine.whole_rolls_before_runout`), lbs left
-        on the roll in progress, each bar's set, lbs remaining and queue, and
+        on the roll in progress, each bar's set, lbs remaining, whether it is
+        threaded (False for a bar the plant hung and has not threaded), its
+        queue and each queued set's location (`staged` / `inventory`), and
         whether a plan is staged on it."""
         out = []
         for m_id, m in self._state.machines.items():
@@ -150,23 +153,29 @@ class ManualSchedule:
                 row[f'{bar}_set'] = None if b is None else b.set_no
                 row[f'{bar}_desc'] = None if b is None else b.desc.id
                 row[f'{bar}_lbs'] = round(s.lbs_remaining(bar), 1)
+                row[f'{bar}_threaded'] = s.threaded(bar)
                 row[f'{bar}_queue'] = [q.set_no for q in s.queue(bar)]
+                row[f'{bar}_queue_location'] = [q.location for q in s.queue(bar)]
             out.append(row)
         return out
 
-    def stock(self, desc: str, at: datetime | None = None) -> list['BeamSet']:
+    def stock(self, desc: str, at: datetime | None = None,
+              machine: str | None = None) -> list['BeamSet']:
         """Stock sets that fit the beam-set label `desc` (`S/L` or not), are
-        available at `at` (default: the start date) and are not assigned by
-        hand in any staged plan, oldest received first then by set number —
-        the order the warehouse wants them pulled. A set another staging
-        picked automatically is still listed: assigning it moves that pick
-        on (see `rolls`)."""
+        available at `at` (default: the start date), are not assigned by
+        hand in any staged plan and — with `machine` — that machine accepts
+        (a large beam fits only a new machine), in pull order: large sets
+        first, then oldest received, then by set number. A set another
+        staging picked automatically is still listed: assigning it moves
+        that pick on (see `rolls`)."""
         want = BeamSetDesc(desc)
         when = at or self._state.start_date
         held = {s for s, (_m, manual) in self._holds().items() if manual}
+        m = self._state.machines[machine] if machine is not None else None
         sets = [b for b in self._state.inventory.get(want.physical, ())
-                if b.available_at(when) and b.id not in held]
-        return sorted(sets, key=lambda b: (b.avail_date.date(), b.set_no))
+                if b.available_at(when) and b.id not in held
+                and (m is None or m.accepts(b))]
+        return sorted(sets, key=stock_order)
 
     # ----- write side ----------------------------------------------------
 
@@ -287,8 +296,9 @@ class ManualSchedule:
                         options = [
                             b for b in self._state.inventory.get(bs.desc.physical, ())
                             if b.available_at(a.start) and b.id not in taken_before
+                            and self._state.machines[m_id].accepts(b)
                         ]
-                        options.sort(key=lambda b: (b.avail_date.date(), b.set_no))
+                        options.sort(key=stock_order)
                     out.append({
                         'machine': m_id, 'bar': bar, 'at': a.start, 'desc': bs.desc.id,
                         'prev_set': None if prev is None else prev.set_no,

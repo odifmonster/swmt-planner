@@ -191,3 +191,79 @@ class BlacklistedOnMachinesTests(unittest.TestCase):
         m2 = _Machine('M2', _ITEM, _T0, _set('S3', 'M1', '40D BLACK 1000X4'), 900.0,
                       _set('S4', 'M3', '60D WHITE 1000X4'), 900.0, _CAL)
         self.assertEqual(run.blacklisted_on_machines({'M2': m2}), [])
+
+
+# ---------------------------------------------------------------------------
+# 6. `hung_on_machines` and the manual `pending()` view
+
+from swmtplanner.planners.manual import ManualSchedule as _ManualSchedule
+from swmtplanner.planners.infinite.state import State as _State
+
+
+class HungOnMachinesTests(unittest.TestCase):
+
+    def _machines(self):
+        m1 = _Machine('M1', _ITEM, _T0, _set('S1', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S2', 'M3', '60D WHITE 1000X4'), 900.0, _CAL, init_top_threaded=False,
+                      init_btm_queue=(_set('Q1', 'M3', '60D WHITE 1000X4', assigned=True, location='staged'),
+                                      _set('Q2', 'M3', '60D WHITE 1000X4', assigned=True, location='inventory')))
+        m2 = _Machine('M2', _ITEM, _T0, _set('S3', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S4', 'MX', '90D GREEN 1000X4'), 900.0, _CAL, init_btm_threaded=False)
+        return {'M2': m2, 'M1': m1}
+
+    def test_lines(self):
+        lines = run.hung_on_machines(self._machines())
+        self.assertEqual(len(lines), 2)
+        self.assertIn('M1', lines[0]); self.assertIn('top', lines[0]); self.assertIn('set S1', lines[0])
+        self.assertIn('900 lbs', lines[0]); self.assertTrue(lines[0].endswith('threads it'))
+        self.assertIn('M2', lines[1]); self.assertIn('btm', lines[1]); self.assertIn('unhangs it', lines[1])
+        self.assertEqual(run.hung_on_machines({'M1': _Machine(
+            'M1', _ITEM, _T0, _set('S1', 'M1', '40D BLACK 1000X4'), 900.0,
+            _set('S2', 'M3', '60D WHITE 1000X4'), 900.0, _CAL)}), [])
+
+    def test_pending(self):
+        machines = self._machines()
+        state = _State(machines=machines, rls_items={}, start_date=_T0, window_end=_T0)
+        row = next(r for r in _ManualSchedule(state).pending() if r['machine'] == 'M1')
+        self.assertEqual((row['top_threaded'], row['btm_threaded']), (False, True))
+        self.assertEqual((row['btm_queue'], row['btm_queue_location']), (['Q1', 'Q2'], ['staged', 'inventory']))
+
+
+# ---------------------------------------------------------------------------
+# 7. `large_on_old_machines`
+
+class LargeOnOldMachinesTests(unittest.TestCase):
+
+    def test_lines(self):
+        big = _set('BIG', 'M1', '40D BLACK 1000X4', size=(40.0, 42.0))
+        big_q = _set('BQ', 'M3', '60D WHITE 1000X4', assigned=True, size=(40.0, 42.0))
+        old = _Machine('M1', _ITEM, _T0, big, 900.0, _set('S2', 'M3', '60D WHITE 1000X4'), 900.0, _CAL,
+                       init_btm_queue=(big_q,))
+        new = _Machine('M2', _ITEM, _T0, big, 900.0, _set('S4', 'M3', '60D WHITE 1000X4'), 900.0, _CAL,
+                       is_new=True, init_btm_queue=(big_q,))
+        lines = run.large_on_old_machines({'M2': new, 'M1': old})
+        self.assertEqual(len(lines), 2)
+        self.assertIn('M1', lines[0]); self.assertIn('mounted set BIG (40 in)', lines[0])
+        self.assertIn('queued set BQ (40 in)', lines[1]); self.assertIn('passed over', lines[1])
+        self.assertEqual(run.large_on_old_machines({'M2': new}), [])
+
+
+# ---------------------------------------------------------------------------
+# 8. `cannot_run_on_machines`
+
+_ITEM_X = _Greige('AU000X', family='A', tgt_wt=100.0, top_beam='40D BLACK 1000X4', top_pct=0.5,
+                  btm_beam='60D WHITE 1000X4', btm_pct=0.5, safety=0.0, machines={'M2': 100.0})
+
+
+class CannotRunOnMachinesTests(unittest.TestCase):
+
+    def test_lines(self):
+        m1 = _Machine('M1', _ITEM_X, _T0, _set('S1', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S2', 'M3', '60D WHITE 1000X4'), 900.0, _CAL)
+        m2 = _Machine('M2', _ITEM_X, _T0, _set('S3', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S4', 'M3', '60D WHITE 1000X4'), 900.0, _CAL)
+        lines = run.cannot_run_on_machines({'M2': m2, 'M1': m1})
+        self.assertEqual(len(lines), 1)
+        self.assertIn('M1', lines[0]); self.assertIn('AU000X', lines[0])
+        self.assertIn('cannot run', lines[0]); self.assertIn('idles until', lines[0])
+        self.assertEqual(run.cannot_run_on_machines({'M2': m2}), [])

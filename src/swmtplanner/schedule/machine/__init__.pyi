@@ -11,7 +11,7 @@ from swmtplanner.schedule.job import Job
 
 __all__ = ['Status', 'Machine', 'ProductionPlan', 'PassedOver', 'Fill', 'UnhungAssignments', 'fresh_beam_lbs',
            'RUNNING_EFFICIENCY', 'effective_rate', 'MIN_STOCK_SET_LBS',
-           'choose_stock']
+           'choose_stock', 'stock_order']
 
 RUNNING_EFFICIENCY: float
 """Share of running time a machine actually knits (0.765); every style rate
@@ -29,7 +29,11 @@ def effective_rate(nominal: float, mtype: str) -> float:
     ...
 
 
-def choose_stock(cands: list[BeamSet], prev: BeamSet | None) -> BeamSet:
+def stock_order(b: BeamSet) -> tuple:
+    """The pull order of stock: large (40 in) sets first, then the oldest
+    received, then the lowest set number."""
+    ...
+def choose_stock(cands: list[BeamSet]) -> BeamSet:
     """The stock set to hang from `cands` for continuity with `prev`, the set
     coming off the bar: same merge first, then same vendor, then any (a tier
     is skipped when `prev` or its merge/vendor is unknown); oldest received
@@ -154,6 +158,8 @@ class Machine(HasID[str]):
         init_roll_lbs_remaining: float = ...,
         init_top_queue: Sequence[BeamSet] = ...,
         init_btm_queue: Sequence[BeamSet] = ...,
+        init_top_threaded: bool = ...,
+        init_btm_threaded: bool = ...,
     ) -> None:
         """`init_roll_lbs_remaining`: lbs still to knit on the roll in progress
         at `start` (0 = between rolls); the planner always finishes it first —
@@ -164,6 +170,10 @@ class Machine(HasID[str]):
         ...
     @property
     def workcal(self) -> WorkCal: ...
+    def accepts(self, beam_set: BeamSet) -> bool:
+        """Whether the set can go on this machine: False only for a large
+        (40 in) set on an old machine."""
+        ...
     @property
     def is_new(self) -> bool: ...
     @property
@@ -192,13 +202,19 @@ class Machine(HasID[str]):
     def schedule_tail(self) -> datetime: ...
     @property
     def next_runout(self) -> datetime: ...
+    @property
+    def can_run_current_item(self) -> bool:
+        """Whether the machine may knit its current item (its style's machine
+        list names the machine; True for `NONE`). False: no run-up, no fill,
+        the roll in progress zeroed."""
+        ...
     def run_until(
         self, t: datetime, inventory: InventoryView | None = ...,
     ) -> ProductionPlan | None:
         """A plan keeping the machine on its current item up to `t` (the roll
         in progress plus every whole roll starting before `t`), or an `Idle`
-        to `t` when it has nothing to run; None when `t` is not after the
-        schedule tail. Not committed."""
+        to `t` when it has nothing to run (`NONE`, or an item it cannot run);
+        None when `t` is not after the schedule tail. Not committed."""
         ...
     @property
     def whole_rolls_before_runout(self) -> int:

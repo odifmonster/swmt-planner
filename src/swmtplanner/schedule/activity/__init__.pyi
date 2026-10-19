@@ -6,7 +6,7 @@ from swmtplanner.support import HasID
 from swmtplanner.products import Greige, BeamSet
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Unhang', 'Hanging', 'Threading',
     'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',
     'HANGING_SINGLE_DURATION', 'HANGING_BOTH_DURATION',
@@ -67,6 +67,15 @@ class TapeOut(Activity):
     top_beam: BeamSet | None = ...
     """The set removed from top, as returned to inventory (remaining lbs,
     avail_date = this activity's end); None if top untouched."""
+    btm_beam: BeamSet | None = ...
+
+
+@dataclass(frozen=True)
+class Unhang(Activity):
+    """A hung, never-threaded set taken off again: zero duration, no ration
+    unit, no job; the set(s) removed return to inventory with their lbs."""
+    bars: Literal['top', 'btm', 'both']
+    top_beam: BeamSet | None = ...
     btm_beam: BeamSet | None = ...
 
 

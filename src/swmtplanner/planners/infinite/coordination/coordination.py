@@ -338,7 +338,7 @@ def holds_yarn(machine: 'Machine', item: 'Greige') -> bool:
     top, btm = item_yarn(item)
     for bar, want in (('top', top), ('btm', btm)):
         beam = status.beam(bar)
-        if beam is None or not beam.fits(want):
+        if beam is None or not beam.fits(want) or not machine.accepts(beam):
             return False
     return True
 
@@ -365,10 +365,15 @@ def cheap_set_after(state: 'State', machine_id: str, item: 'Greige') -> frozense
 def build_cheap_sets(state: 'State') -> dict[str, frozenset[str]]:
     """Each machine's cheap set at its `schedule_tail`: the items it can run
     whose yarn fits its mounted sets and whose pattern family is the one
-    it is on (any family on a new machine). See "Changeover capacity —
-    Recovery cost" in DESIGN.md."""
+    it is on (any family on a new machine); empty for a machine on an item
+    it cannot run — it is knitting nothing the plant can use, so no move
+    on it strands anything and it covers no other machine's departure.
+    See "Changeover capacity — Recovery cost" in DESIGN.md."""
     out: dict[str, frozenset[str]] = {}
     for m_id, machine in state.machines.items():
+        if not machine.can_run_current_item:
+            out[m_id] = frozenset()
+            continue
         family = machine.current_status.current_item.family
         items = set()
         for rls in state.rls_items.values():

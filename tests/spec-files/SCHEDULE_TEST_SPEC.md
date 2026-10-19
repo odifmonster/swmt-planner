@@ -1024,11 +1024,21 @@ and the 6.5 queued machine.
    flag and `relabelled(like)` takes `like`'s; `BeamSet.new` is never
    blacklisted; `worth_stocking` is False for a blacklisted set however
    many lbs it holds, so `build_inventory` leaves it out.
-2. **Codes** — `normalize_blacklist` trims, upper-cases and drops empty
-   entries; `is_blacklisted` matches trimmed and case-insensitively and
-   exactly (`292286` is not `292286BAD`), never for `None`;
-   `beam_set_from_record` / `beam_sets_from_list` stamp a record whose
-   merge is listed and leave the others.
+2. **Codes** — `normalize_blacklist` of a list gives a `Blacklist` of
+   merge codes, trimmed, upper-cased, empties dropped; `is_blacklisted`
+   matches trimmed and case-insensitively and exactly (`292286` is not
+   `292286BAD`), never for `None`, and takes a plain collection as merge
+   codes; `beam_set_from_record` / `beam_sets_from_list` stamp a record
+   whose merge is listed and leave the others.
+2a. **Vendors and sets** — `normalize_blacklist` of an object with
+   `merges`, `vendors` and `sets` fills the three lists (a missing key is
+   empty; an unknown key or a non-list value raises `TypeError`, as does
+   a bare string); `covers` / `is_blacklisted` match a set by its vendor
+   (exactly: `Unifi Manufacturing, Inc` is not `Unifi/Nanya`) or its set
+   number, a `None` vendor or set number matching nothing; the loaders
+   stamp an export record by vendor and by set number, an assigned-set
+   record by vendor, and a mounted set by set number
+   (`machines_from_list`), each leaving an unlisted twin alone.
 3. **A mounted set is a foreign bar** — `machines_from_list` with a
    blacklist naming the mounted top set's merge: the machine's top beam is
    `blacklisted`, `whole_rolls_before_runout == 0`, `next_runout` is the
@@ -1043,6 +1053,104 @@ and the 6.5 queued machine.
    comes out `blacklisted`.
 5. **A manual assignment is refused** — `assign={'top': [S]}` naming a
    blacklisted set that would otherwise be in stock raises `ValueError`.
+
+### 6.7 Hung and queued-set status
+
+The assigned-sets record's `status` (`machines_from_list`), the hung bar
+in the machine model (`init_*_threaded`, "Hung bars") and the `Unhang`
+activity. Fixtures: the Phase 6 loader fixtures and the `machine_tests.py`
+sets.
+
+1. **Status parsing** — a record without `status` is `inventory`; `staged`
+   / `hung` are accepted trimmed and case-insensitively; any other value
+   raises `ValueError`. A queued set carries its status as `location`
+   (`'inventory'` / `'staged'`), whether built from the record or taken
+   from the export; a hung set's `location` is empty and it is not
+   `assigned`.
+2. **A hung set replaces the bar** — an entry naming `init_top_set` S0
+   with 200 lbs and a `hung` record for bar 2 naming S2 (900 lbs): the
+   machine's top beam is S2 at 900 lbs, `threaded('top')` is False, the
+   roll in progress is zeroed, and the top queue is empty; the machines
+   file's `init_top_lbs` is ignored. Two `hung` records for one bar raise
+   `ValueError`; a hung record whose yarn normalises to nothing raises.
+3. **A hung bar in the model** — `Machine(..., init_top_threaded=False,
+   init_roll_lbs_remaining=50)`: `roll_lbs_remaining` is 0,
+   `whole_rolls_before_runout` is 0, `next_runout` is the start; the
+   plan for the current item opens `Threading('top')` then `Knit` — no
+   `Hanging`, no `TapeOut` — and the `Threading` is in the new job's
+   activities.
+4. **Batching** — both bars hung: one `Threading('both')`; the top hung
+   and the bottom empty: `Hanging('btm')` then `Threading('both')`.
+5. **A hung set that does not fit** — a foreign top (`_ALT_TOP_BEAM`)
+   hung: the plan opens `Unhang('top')` with `start == end`, carrying the
+   set at all its lbs, then `Hanging('top')` + `Threading('top')`; the
+   set is in `beam_sets_returned` with those lbs; with the per-kind and
+   change rations given, `capacity_taken` is empty (no tape-out unit, no
+   change unit for the current item); a blacklisted hung set is unhung
+   and not returned. Both bars hung and foreign give one `Unhang('both')`.
+6. **Guard rails** — applying an `Unhang` to a threaded bar, or to an
+   empty one, raises `ValueError`; on a hung bar it empties it (beam None,
+   lbs 0, not threaded).
+7. **No job** — the `Unhang` is in neither the previous nor the new job's
+   activities (like `Waste`); `replaced_job` is None.
+
+### 6.8 Large beams
+
+`BeamSet.size` / `is_large`, `products.parse_size`, `Machine.accepts` and
+the places the rule is applied ("Large beams" in `schedule/DESIGN.md`).
+Fixtures: the Phase 6 loader fixtures; `_LARGE` is a `40D BLACK 1000X4`
+set of size `40 x 42`, `_SMALL` one of `21 x 42`; machines built with
+`is_new` True or False.
+
+1. **Size** — `parse_size` reads `40 x 42`, `40x42`, `21.5 x 42"` and a
+   two-element list, gives None for nothing and raises on `big`; a record
+   with `size` builds a set with `size`, `diameter` and `is_large` (40 or
+   more); one without has `size` None and is not large. `returned`,
+   `relabelled` and `located` keep the size.
+2. **`accepts`** — a new machine accepts every set; an old one every set
+   but a large one; a set of unknown size is accepted everywhere.
+3. **Pull order** — `stock_order` puts a large set before an older small
+   one and otherwise sorts by receipt then set number; the plan's
+   automatic pick on a new machine takes `_LARGE` over an older
+   `_SMALL`, on an old machine `_SMALL` with `_LARGE` left in stock; a
+   manual `assign` of `_LARGE` on an old machine raises `ValueError`
+   (`too large for this machine`) and on a new one is honoured.
+4. **Queue** — `_LARGE` at the front of an old machine's queue is passed
+   over with reason `'too large for this machine'` and the next queued
+   set considered; on a new machine it is hung.
+5. **Mounted** — `_LARGE` threaded on an old machine's top: no run-up,
+   the roll zeroed, and the first plan tapes it out (`beam_sets_returned`
+   holds it) and re-threads; hung and not threaded, it is unhung. On a
+   new machine it runs as usual.
+6. **Loader and JSON** — a machines-file `init_top_set` the export holds
+   with a size comes out with that size; the schedule JSON beam object
+   carries `"size": "40 x 42"` and no key for an unknown size.
+
+### 6.9 An item the machine cannot run
+
+`Machine.can_run_current_item` and the run-up rule for a machine whose
+current item's machine list leaves it out ("An item the machine cannot
+run" in `schedule/DESIGN.md`). Fixture: `_ITEM_X`, `_ITEM_A`'s yarn and
+family, runnable on `M2` only; `_ITEM_U` on the `30D RED` / `90D GREEN`
+yarn, runnable on `M1`. Machines built with `_make_machine(init_item=
+_ITEM_X)` — the fitting `_TOP_BEAM` / `_BTM_BEAM` sets, threaded.
+
+1. **Flag and roll** — `can_run_current_item` is False (True for `_ITEM_A`
+   and for `NONE`); `init_roll_lbs_remaining = 50` comes out as
+   `initial_status.roll_lbs_remaining == 0`, the bars still threaded with
+   their lbs.
+2. **No run-up** — `whole_rolls_before_runout == 0`, `next_runout ==
+   start`, and `_can_fill_roll` is False, with plenty of lbs on both
+   bars.
+3. **`run_until`** — one `Idle` from `start` to `t`, no jobs; `None`
+   when `t` is not after the tail.
+4. **Same-yarn move keeps the sets** — `plan_production(_ITEM_A, 1 roll,
+   'schedule_tail')`: no `TapeOut`, `Waste` or `Hanging`; a
+   `RunnerChange` then the knit; one job, of `_ITEM_A`. In
+   `'next_runout'` mode the same, with no run-up job.
+5. **Other-yarn move tapes out the real sets** — `plan_production(_ITEM_U,
+   1 roll, 'schedule_tail')`: a `TapeOut('both')` and
+   `beam_sets_returned` holding the two sets with 200 and 300 lbs.
 
 ## Phase 7 — Assigning sets after planning
 
@@ -1098,9 +1206,11 @@ holds `R1` and `R2` for `B`'s top.
 3. **Availability** — a set received after a hang is not its candidate:
    with `R1` received after `M1`'s hang but before `M2`'s, `M1` stays
    `new` and `M2` takes `R1`.
-4. **Continuity** — with a set of the same merge as the one coming off
-   the bar and an older one of another merge, the same-merge set is
-   chosen (`choose_stock`'s tiers).
+4. **Pull order** — a large (40 in) set is chosen before an older
+   small one on a new machine (`choose_stock`: large first, then oldest
+   received, then set number); on an old machine the large set is not a
+   candidate and the small one is taken. The outgoing set's merge plays
+   no part.
 5. **Returned sets** — `M1` changes to `B` and back to `A` (its `B` set
    taped out) before `M2`'s `B` hang; with one `B` set in stock, both
    hangs get it, and `M2`'s `set_lbs` is the set's pounds less what `M1`

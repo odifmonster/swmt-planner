@@ -27,7 +27,13 @@ each roll lands, demand says *how expensive that when is*.
 `Machine` is constructed with:
 
 - `id` — machine identifier.
-- `init_item` — greige item the machine is configured for at `start`.
+- `init_item` — greige item the machine is configured for at `start`. It
+  need not be an item the machine **may run** (`Greige.can_run_on_mchn`,
+  the style file's machine list — which the plant revises, e.g. a style
+  found to knit badly on old machines while such a machine is still set
+  up for it). A machine on an item it cannot run keeps its real sets but
+  knits nothing of it: see "An item the machine cannot run" under "1.
+  Run-up".
 - `init_variant` — optional; the plant's variant name for that item when the
   machines file named a variant rather than the master (see File I/O). Purely
   informational: it lets the initial state report the exact variant being
@@ -42,14 +48,18 @@ each roll lands, demand says *how expensive that when is*.
   whose set does not fit `init_item`'s requirement for it (`BeamSet.fits`)
   is a **foreign bar** — the plant reported the machine mid-change, its
   item already switched but the bar not yet re-threaded; or the set's
-  merge is blacklisted, which fits nothing (see "Blacklisted merges").
+  merge is blacklisted, which fits nothing (see "Blacklisted merges"); or
+  the set is a large beam on an old machine (see "Large beams").
   The planner does not pretend otherwise: see "Foreign bars" under "1.
   Run-up".
 - `init_roll_lbs_remaining` — lbs still to knit on the roll in progress at
   `start` (`0.0`, the default, means the machine is between rolls). The
   planner always finishes that roll first — the plant never doffs short —
   see "1. Run-up". Taken as `0.0` when either bar is foreign: a roll cannot
-  be in progress across yarn the item does not use.
+  be in progress across yarn the item does not use. Also `0.0` when the
+  machine cannot run `init_item` (see "An item the machine cannot run"):
+  the plant does not finish a roll of a style it has pulled from the
+  machine.
 - `init_top_threaded`, `init_btm_threaded` — whether the set on that bar
   is threaded (default True, a machine running). False for a bar whose
   set the plant has **hung but not threaded** (the assigned-sets file's
@@ -134,6 +144,12 @@ Inventory = dict[BeamSetDesc, list[BeamSet]]   # keyed by desc.physical
 - `blacklisted` is a bool: the set's merge is on the run's blacklist of
   merges flagged for quality, so the planner must not put it on a machine
   (see "Blacklisted merges" below). False for an invented set.
+- `size` is `(diameter, width) | None` in inches: the dimension of every
+  beam in the set, from the export's `size` string (`<diam> x <width>`,
+  e.g. `40 x 42`); `None` when the record has none, or for an invented
+  set. `diameter` reads the first. A set whose diameter is at least
+  `LARGE_BEAM_DIAMETER` (40 in) is a **large** set: it fits only the
+  **new** machines — see "Large beams" below.
 - `location` is a str: for a plant-assigned set, where the plant says it
   is — `'staged'` at the machine or `'inventory'` still in the warehouse
   (the assigned-sets record's `status`, see File I/O); empty for any
@@ -166,18 +182,22 @@ swapped straight back out by the max-waste gate, so it is not usable stock.
 The same threshold applies when a taped-out set is returned: a set that comes
 back with too little usable yarn is not put back into the inventory.
 
-**Blacklisted merges.** The plant flags yarn merges for quality problems,
-and a set carrying such a merge must not go on a machine even though its
-description matches a bar's requirement. The run names them (the config's
-`blacklist`, a list of merge codes — see `planners/infinite/DESIGN.md`)
-and the loaders stamp every set they build from an export or an
-assigned-sets record with `BeamSet.blacklisted` when its merge is on the
-list (`products.beam_sets_from_list` / `read_beam_sets` /
-`beam_set_from_record` and `machines_from_list` / `read_machines`, all
-taking `blacklist=`; an invented set is never blacklisted). The flag
-follows the set: `returned` keeps it, `relabelled` takes it from `like`.
-Then two rules, which between them reach every place a set is chosen or
-kept:
+**Blacklisted merges.** The plant flags yarn for quality problems — a
+**merge**, a whole **vendor**, or an individual **set** — and a set so
+flagged must not go on a machine even though its description matches a
+bar's requirement. The run names them (the config's `blacklist` — see
+`planners/infinite/DESIGN.md`: a `Blacklist` of merge codes, vendor names
+and set numbers, each compared trimmed, case-insensitively and exactly,
+`products.normalize_blacklist`) and the loaders stamp every set they
+build from an export or an assigned-sets record with `BeamSet.blacklisted`
+when its merge, its vendor or its set number is listed
+(`products.is_blacklisted(merge, blacklist, vendor=, set_no=)`;
+`beam_sets_from_list` / `read_beam_sets` / `beam_set_from_record` and
+`machines_from_list` / `read_machines`, all taking `blacklist=`; an
+invented set is never blacklisted; a set with no vendor cannot match a
+vendor entry). The flag follows the set: `returned` keeps it,
+`relabelled` takes it from `like`. Then two rules, which between them
+reach every place a set is chosen or kept:
 
 - a blacklisted set **fits nothing**: `BeamSet.fits` is False for it
   whatever the requirement. So a blacklisted set **mounted** on a bar at
@@ -199,9 +219,38 @@ kept:
   assignment** of a blacklisted set number is therefore refused like any
   set not in stock (`ValueError`).
 
-The merge list is applied at load, so the greedy planner, the manual
+The blacklist is applied at load, so the greedy planner, the manual
 scheduler and the retimer all see the same stock and the same foreign
 bars.
+
+**Large beams.** A 40-inch-diameter beam does not fit an old machine's
+bar; only the new machines (`is_new`) take it. Whether a set can go on a
+machine is therefore a question of the set *and* the machine, apart from
+the yarn match: `Machine.accepts(beam_set)` — True unless the set is
+large and the machine is old (a set of unknown size is accepted
+everywhere). The rule is applied wherever a set is chosen for, or found
+on, a particular machine:
+
+- the **stock pick** (precedence rule 3 below) and the manual planner's
+  `stock()` / `options` list only sets the machine accepts, and put the
+  large ones **first**: the plant wants its 40-inch beams used wherever
+  they can run, so on a new machine a large set is chosen before any
+  other, the rest following by receipt; a **manual
+  assignment** of a set the machine cannot take is refused (`ValueError`,
+  like one not in stock); `assign_sets` skips them for that machine;
+- a **queued** set the machine cannot take is passed over at the hang,
+  reason `'too large for this machine'`;
+- a large set **mounted** on an old machine at the start (threaded or
+  hung) is a foreign bar: `Machine.__init__` treats a set the machine
+  does not accept exactly as one that does not fit — no run-up, the roll
+  zeroed — and the first plan tapes it out (or unhangs it) and returns it
+  to stock, where a new machine can take it;
+- the retimer's `--keep-sets` keeps a prior name only when the machine
+  accepts the set (note `too large for the machine` otherwise).
+
+Large sets stay ordinary stock for the new machines; `build_inventory`
+and the blacklist are unaffected. The load echoes every large set found
+on or queued at an old machine.
 
 **Assigned sets and bar queues.** The plant stages sets at machines ahead of
 need: the inventory export flags such a set `assigned`, and the assigned-sets
@@ -239,17 +288,18 @@ Selecting a set for a `Hanging` (see the walk), in order of precedence:
    not fit, or is blacklisted, is passed over, above, before the rule is
    applied to whatever is behind it.)
 2. a set number the caller assigned for the bar (`assign=`);
-3. among `inventory[key]`, the sets available at the working `as_of` and
-   not already taken earlier in the same plan, chosen for **continuity
-   with the set coming off the bar** (the set a changeover tapes out, or
-   the set that ran out before a reload): first a set with the **same
-   merge**, then one from the **same vendor**, then any set — a tier is
-   skipped when the outgoing set's merge (or vendor) is unknown, since
-   there is nothing to match. Within a tier the **oldest received** set
-   first, then the lowest set number, so the warehouse pulls in the order
-   it stocks. Sets under **`MIN_STOCK_SET_LBS`** (500 lbs) are ignored
+3. among `inventory[key]`, the sets available at the working `as_of`,
+   that the machine accepts (`Machine.accepts`, "Large beams") and not
+   already taken earlier in the same plan, the first in the **pull
+   order** (`stock_order`): a **large** (40 in) set before any other —
+   the plant wants its large beams used up — then the **oldest
+   received**, then the lowest set number, so the warehouse otherwise
+   pulls in the order it stocks. (The continuity-with-the-outgoing-set
+   tiers of the earlier rule — same merge, then same vendor — no longer
+   apply.) Sets under **`MIN_STOCK_SET_LBS`** (500 lbs) are ignored
    throughout — a small set means another swap within hours — unless they
-   are all that is available, in which case the same tiers apply to them;
+   are all that is available, in which case the same order applies to
+   them;
 4. an invented set.
 
 **Manual assignment.** `plan_production(..., assign={'top': [...], 'btm':
@@ -282,11 +332,12 @@ assign_sets(machines: Mapping[str, Machine], inventory: Inventory,
 which walks **every placeholder hang across the machines in time order**
 (a hang's start; ties by machine id, then bar) and gives each the set the
 walk itself would have picked at that moment: among the stock available
-then — the export's sets by receipt, plus the sets earlier assigned hangs
-tape out again (back at the tape-out's end with what the plan left on
-them, when still `worth_stocking`) — the `choose_stock` pick for continuity
-with the set that came off the bar (the initial set, or the one an earlier
-hang put there); nothing suitable leaves the placeholder in place. Each
+then — the export's sets, plus the sets earlier assigned hangs tape out
+again (back at the tape-out's end with what the plan left on them, when
+still `worth_stocking`), less the sets that machine cannot take ("Large
+beams") — the `choose_stock` pick in pull order (large sets first, then by
+receipt, then set number); nothing suitable leaves the placeholder in
+place. Each
 assignment relabels the placeholder throughout the machine's committed
 schedule (`Machine.rebind_sets`: the `Hanging` that mounted it, the
 `Knit`s that ran on it, the `TapeOut` or `Waste` that removed it, the
@@ -530,7 +581,8 @@ PassedOver                        # one queued set a hang passed over
   beam_set: BeamSet               # the set, as the queue described it
   wanted: BeamSetDesc             # the bar's requirement at that hang
   at: datetime                    # the hang's start
-  reason: str = 'does not fit'    # or 'blacklisted' — see "Blacklisted merges"
+  reason: str = 'does not fit'    # or 'blacklisted' / 'too large for this
+                                  # machine' — see "Blacklisted merges", "Large beams"
 
 Fill                              # what the preamble may knit instead of idling
                                   # while it waits for a ration slot — see
@@ -580,6 +632,9 @@ Machine (HasID)
   init_variant: str | None          # plant variant named for the initial item
   status_at(t) -> Status
   duration_of(spec) -> timedelta
+  accepts(beam_set) -> bool         # whether the set can go on this machine:
+                                    # False only for a large (40 in) set on an
+                                    # old machine — see "Large beams"
   plan_production(item, lbs, start_at, idle_for=timedelta(0),
                   tgt_order=None, inventory=None, assign=None,
                   capacity=None, prior_job=None, fill=None) -> ProductionPlan
@@ -614,14 +669,20 @@ Machine (HasID)
                                     # from `next_job_end` now that `Job` no
                                     # longer refers to an activity.
   next_runout: datetime
+  can_run_current_item: bool        # whether the machine may knit its current
+                                    # item (Greige.can_run_on_mchn; True for
+                                    # NONE). False: no run-up, no fill, the
+                                    # roll in progress zeroed — see "An item
+                                    # the machine cannot run" under "1. Run-up".
   run_until(t, inventory=None) -> ProductionPlan | None
                                     # keep running the current item up to t —
                                     # the roll in progress plus every whole
                                     # roll that starts before t (the last may
                                     # run past t) — as a 'schedule_tail'
                                     # plan_production; an Idle to t when the
-                                    # machine has nothing to run (NONE / no
-                                    # rate); None when t <= schedule_tail.
+                                    # machine has nothing to run (NONE, or an
+                                    # item it cannot run); None when
+                                    # t <= schedule_tail.
                                     # Not committed. Used by the planner's
                                     # loader to bring every machine up to the
                                     # change_date before planning starts.
@@ -1097,6 +1158,22 @@ are worth preserving, a `Waste` otherwise — then re-threads the bar, even
 when `item` is the machine's current item. That is the plant's own
 tape-out, shown rather than assumed away.
 
+**An item the machine cannot run.** A machine whose current item is not
+in its style's machine list (`can_run_current_item` False — the plant has
+pulled the style from that machine, and the machine is still set up for
+it) is treated for the run-up exactly like one with foreign bars, whatever
+its sets: `_run_up_lbs` is `(0, 0)`, so no whole roll of the item is
+counted or knit (`whole_rolls_before_runout` 0, `next_runout` immediate,
+nothing to fill a slot wait with), and the roll in progress was zeroed at
+construction. `run_until` idles it to `t`, as for `NONE`. The bars keep
+their **real** sets and lbs, so the preamble that follows is the ordinary
+one: a move to an item on the same yarn keeps the sets and simply
+changes; one on another yarn tapes them out. The model itself does not
+refuse a plan for an item the machine cannot run — its callers keep such
+items out (the planner's candidates, the manual scheduler's `rolls`); it
+only declines to knit the one the machine is on. `'next_runout'` mode to
+another item runs up nothing and changes at the tail.
+
 ### 2. Changeover preamble
 
 The run-up no longer drains a bar to empty, so a bar reaching the preamble
@@ -1558,8 +1635,9 @@ read_machines(
 `merge`, `vendor`, `machine`, `bar` for sets staged at a machine but not yet
 threaded (bar 1 the bottom, any higher bar the top; machine ids zero-padded,
 `N01`), carrying the same yarn fields as an inventory-export record —
-`denier`, `luster`, `desc` (the yarn type), `ends`, `beams`, `lbs` and
-optionally `received`. Each becomes the next entry in that machine bar's
+`denier`, `luster`, `desc` (the yarn type), `ends`, `beams`, `lbs`,
+optionally `received` and `size` (the beams' `<diam> x <width>` in
+inches, see "Large beams"). Each becomes the next entry in that machine bar's
 queue (`init_*_queue`), resolved through `beam_sets` for its data (the
 export's set with that number and, when both name one, the same vendor —
 see "Beam-set inventory"), or, when the export lacks it, built from the
@@ -1586,7 +1664,7 @@ A record's optional **`status`** says where the set is:
   which sets the floor still has to pull;
 - `"hung"` — already **on the bar, not threaded**. The set becomes the
   bar's initial set in place of whatever the machines file named for it
-  (`init_*_set`, which is then reported as replaced), with the record's
+  (`init_*_set`), with the record's
   own lbs (the file's `init_*_lbs` for that bar is ignored) and
   `init_*_threaded=False`; the machine's `init_roll_lbs` is taken as
   `0.0`. The set is built as any assigned record is (the export's set,

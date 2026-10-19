@@ -132,12 +132,10 @@ def assign_sets(machines: Mapping[str, 'Machine'], inventory: 'Inventory',
         # Only real sets are stock: a placeholder an earlier plan taped out
         # and returned to the inventory is never handed to another hang.
         cands = [b for b in stock.get(want, ())
-                 if not b.is_new and b.available_at(at) and b.id not in taken]
-        prev = prev_of.get(bs.id)
-        if prev is not None and prev.id in mapping:
-            prev = mapping[prev.id]
+                 if not b.is_new and b.available_at(at) and b.id not in taken
+                 and machines[mid].accepts(b)]       # a large set only on a new machine
         if cands:
-            real = choose_stock(cands, prev)
+            real = choose_stock(cands)
             taken.add(real.id)
             mapping[bs.id] = real
             short = max(0.0, consumed[bs.id] - (real.lbs - BEAM_FLOOR_LBS))

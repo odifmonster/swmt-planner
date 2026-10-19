@@ -230,7 +230,7 @@ function draw() {
       parts.push(`<line x1="0" y1="${y0}" x2="${W}" y2="${y0}" stroke="var(--line)"/>`);
       // activity segments
       m.acts.forEach(a => {
-        const w = Math.max(x(a.e) - x(a.s), a.k === 'Waste' ? 2 : 1);
+        const w = Math.max(x(a.e) - x(a.s), (a.k === 'Waste' || a.k === 'Unhang') ? 2 : 1);
         let fill, op = '', tip, key = a.k;
         if (a.k === 'Knit') {
           key = knitKey(a); fill = knitColor(a);
@@ -242,6 +242,7 @@ function draw() {
         } else {
           fill = mode === 'activity' ? ACT[a.k][0] : 'var(--neutral)';
           if (a.k === 'TapeOut') tip = `<b>Tape-out, ${a.bars}</b><br>${(a.off || []).join('<br>')}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
+          else if (a.k === 'Unhang') tip = `<b>Unhung (never threaded), ${a.bars}</b><br>${(a.off || []).join('<br>')}<br>${fmt(a.s)}`;
           else if (a.k === 'Hanging') tip = `<b>Hanging, ${a.bars}</b><br>${esc(a.sets || '')}<br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
           else if (a.k === 'Threading') tip = `<b>Threading, ${a.bars}</b><br>${fmt(a.s)} → ${fmt(a.e)} (${hrs(a.s, a.e)})`;
           else if (a.k === 'Waste') tip = `<b>Waste</b> ${a.lbs} lbs of ${a.set} ${a.desc} on ${a.bar}<br>${fmt(a.s)}`;

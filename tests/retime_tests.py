@@ -698,6 +698,17 @@ class KeepSetsTests(unittest.TestCase):
         r2 = self._run(machines=self._BOTH_A, prior=self._prior(m1_top=(None,)), beam_sets=[])
         self.assertEqual((_note(r2, 'M1').note, _note(r2, 'M1').source), ('invented', 'new'))
 
+    def test_prior_set_too_large_for_the_machine(self):
+        old = [dict(_machine('M1', 'A'), is_new=False), _machine('M2', 'A')]
+        big = dict(_set('S1'), size='40 x 42')
+        r = self._run(machines=old, prior=self._prior(), beam_sets=[big, _set('S2')])
+        m1 = _note(r, 'M1')
+        self.assertEqual((m1.prior, m1.note), ('S1', 'too large for the machine'))
+        self.assertNotEqual(m1.hung, 'S1')
+        self.b.close()
+        r2 = self._run(machines=self._BOTH_A, prior=self._prior(), beam_sets=[big, _set('S2')])
+        self.assertEqual(_note(r2, 'M1').hung, 'S1')
+
     def test_named_by_an_earlier_step(self):
         prior = _prior([_plan_job('J0', 'A', None, 1, _h(0)), _plan_job('J1', 'B', 'P1@B', 1, _h(1), top=('S1',))],
                        [_plan_job('J9', 'A', None, 1, _h(0)), _plan_job('J2', 'B', 'P2@B', 1, _h(2), top=('S1',))])

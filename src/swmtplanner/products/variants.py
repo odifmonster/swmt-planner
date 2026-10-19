@@ -46,8 +46,15 @@ the representative).
 Plant conventions applied (see `VariantMap.report()` for what actually occurred):
 
 - Our styles are 2-bar in the planner but appear as **3-bar rows**: one set runs
-  **split lease** (`S/L`) across two half-bars — visible as the *same merge on two
-  bars* — so bars sharing a merge are merged (ends / pct summed) and marked `S/L`.
+  **split lease** (`S/L`) across two half-bars. The split pair is told by its
+  **threading** (`bar{i}_thread`): the two bars threaded one in, one out
+  (`1 IN, 1 OUT` / `1 OUT, 1 IN`, either order on either bar) are merged into
+  one set (ends / pct summed) and marked `S/L`; they must carry the same yarn
+  as the planner describes it, whether or not their merge codes agree. Every
+  other bar (`SOLID`, or any other threading) is a set of its own — two
+  solid bars of the **same** merge are two distinct sets that happen to be
+  beamed from one merge. A row still needs exactly two sets, and a row using
+  **more than two distinct merges** is excluded.
 - Denier classes: 70/75 -> **75D**, 40/45 -> **40D** (others as-is: 50D, 80D).
 - Colour: a luster naming a colour (`BK`/`BLK` -> `BLK`, `GY`/`GRY` -> `GRY`,
   the recycled greener black `RGB` -> `GBK`) else white; a `BLK ID` /
@@ -414,19 +421,48 @@ def _bars(row: Mapping[str, str]) -> list[dict]:
             'den': _str(row, f'bar{i}_denier', f'b{i}_denier') or '',
             'lus': _str(row, f'bar{i}_luster', f'b{i}_luster') or '',
             'yt': _str(row, f'bar{i}_desc', f'b{i}_ytype') or '',
+            'thread': _str(row, f'bar{i}_thread', f'b{i}_thread') or '',
         })
     return out
 
 
-def _sets(bars: list[dict]) -> list[dict]:
-    """Bars sharing a merge collapse into one split-lease set. The merge code
-    is the identity when the file has it; otherwise the yarn's attributes."""
-    groups: dict[tuple, list[dict]] = {}
-    for b in bars:
-        key = ('merge', b['merge']) if b['merge'] else ('attrs', b['den'], b['lus'], b['yt'])
-        groups.setdefault(key, []).append(b)
+# The split-lease threading: one end in, one out — `1 IN, 1 OUT` or
+# `1 OUT, 1 IN`, spacing and the comma optional.
+_SPLIT_THREAD = re.compile(r'^1(IN|OUT),?1(IN|OUT)$')
+
+
+def _is_split_thread(thread: str) -> bool:
+    m = _SPLIT_THREAD.match(re.sub(r'\s+', '', (thread or '').upper()))
+    return bool(m) and m.group(1) != m.group(2)
+
+
+def _sets(bars: list[dict]) -> tuple[list[dict], list[str]]:
+    """The row's beam sets from its bars, by **threading**: the bars threaded
+    one in, one out are the split-lease pair and collapse into one `S/L` set
+    (ends / pct summed; they must carry the same planner yarn, merge codes
+    aside); every other bar is a set of its own, even one sharing another
+    bar's merge. Returns `(sets, problems)` — the problems (`!`-prefixed, the
+    row is unusable) being a split threading on other than two bars, a split
+    pair of two different yarns, or more than two distinct merge codes."""
+    problems: list[str] = []
+    split = [b for b in bars if _is_split_thread(b['thread'])]
+    solo = [b for b in bars if not _is_split_thread(b['thread'])]
+    groups: list[list[dict]] = [[b] for b in solo]
+    if len(split) == 2:
+        yarns = [normalize_merge(b['den'], b['lus'], b['yt']) for b in split]
+        if all(yarns) and yarns[0] != yarns[1]:
+            problems.append(f'!split-lease bars carry different yarns: '
+                            f'{yarns[0].yarn_desc} vs {yarns[1].yarn_desc}')
+        groups.append(split)
+    elif split:
+        problems.append(f'!split-lease threading on {len(split)} bar(s) (need 2)')
+        groups.extend([b] for b in split)
+    groups.sort(key=lambda bs: bs[0]['i'])
+    merges = {b['merge'] for b in bars if b['merge']}
+    if len(merges) > 2:
+        problems.append(f'!{len(merges)} distinct merge(s) (at most 2)')
     sets = []
-    for bs in groups.values():
+    for bs in groups:
         b0 = bs[0]
         sets.append({
             'den': b0['den'], 'lus': b0['lus'], 'yt': b0['yt'],
@@ -437,7 +473,7 @@ def _sets(bars: list[dict]) -> list[dict]:
             'rl': bs[0]['rl'],
             'split': len(bs) > 1,
         })
-    return sets
+    return sets, problems
 
 
 def _n_beams(row: Mapping[str, str]) -> int:
@@ -446,12 +482,16 @@ def _n_beams(row: Mapping[str, str]) -> int:
 
 def _build_master(mid: str, rep: str, row: Mapping[str, str]) -> _Master:
     """The master's definition from its representative variant's row: two
-    polyester sets, the one holding bar 1 being the bottom."""
-    sets = _sets(_bars(row))
+    polyester sets (by threading — see `_sets`), the one holding bar 1 being
+    the bottom."""
+    sets, problems = _sets(_bars(row))
+    if problems:
+        raise ValueError(f'master {mid!r}: representative {rep!r} '
+                         + '; '.join(p[1:] for p in problems))
     if len(sets) != 2:
         raise ValueError(
-            f'master {mid!r}: representative {rep!r} has {len(sets)} distinct '
-            f'merge(s), need 2')
+            f'master {mid!r}: representative {rep!r} has {len(sets)} set(s) by '
+            f'threading, need 2')
     n_beams = _n_beams(row)
     reps = []
     for s in sets:
@@ -557,7 +597,8 @@ def _resolve(row: Mapping[str, str], number: str, cands: list[_Master],
     name = row['variant']
     issues: list[str] = []
     bars = _bars(row)
-    sets = _sets(bars)
+    sets, problems = _sets(bars)
+    issues.extend(problems)
     n_beams = _n_beams(row)
     split_bars = tuple(b for s in sets if s['split'] for b in s['bars'])
 
@@ -568,7 +609,7 @@ def _resolve(row: Mapping[str, str], number: str, cands: list[_Master],
             issues.append(f"!non-polyester yarn: {s['yt']!r}")
         merges.append(mg)
     if len(sets) != 2:
-        issues.append(f'!{len(sets)} distinct merge(s) (need 2)')
+        issues.append(f'!{len(sets)} set(s) by threading (need 2)')
     if issues:
         return Variant(name, number, None, None, None, _num(row.get('rack_wt')),
                        split_bars, None, tuple(issues))

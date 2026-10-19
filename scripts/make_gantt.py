@@ -118,6 +118,13 @@ for m in sorted(plan, key=lambda m: mid_sort(m['id'])):
                         off.append(f"{bar}: {b['set_no']} {norm(b['desc'])} ({round(b['lbs'] or 0)} lbs left)")
                 act.update(bars=a['bars'], off=off)
                 row['tapeouts'].append(dict(t=a0, t1=a1, bars=a['bars'], off=off))
+            elif k == 'Unhang':
+                off = []
+                for bar in ('top', 'btm'):
+                    b = a.get(f'{bar}_beam')
+                    if b:
+                        off.append(f"{bar}: {b['set_no']} {norm(b['desc'])} ({round(b['lbs'] or 0)} lbs back)")
+                act.update(bars=a['bars'], off=off)
             elif k in ('PatternChange', 'RunnerChange', 'StyleChange'):
                 act.update(frm=a['from_item'], to=a['to_item'])
                 if k == 'PatternChange':

@@ -2,7 +2,7 @@ from datetime import datetime
 
 from swmtplanner.support import HasID
 
-__all__ = ['BeamSetDesc', 'BeamSet']
+__all__ = ['BeamSetDesc', 'BeamSet', 'LARGE_BEAM_DIAMETER', 'parse_size']
 
 class BeamSetDesc(HasID[str]):
     """A beam set as the planner describes it — the label string a greige
@@ -49,8 +49,27 @@ class BeamSet(HasID[str]):
         avail_date: datetime, *, vendor: str | None = ...,
         denier: int | None = ..., luster: str = ...,
         ytype: str = ..., known_merge: bool = ..., assigned: bool = ...,
-        blacklisted: bool = ...,
+        blacklisted: bool = ..., location: str = ...,
+        size: tuple[float, float] | None = ...,
     ) -> None: ...
+    @property
+    def size(self) -> tuple[float, float] | None:
+        """`(diameter, width)` of the beams in inches, when known."""
+        ...
+    @property
+    def diameter(self) -> float | None: ...
+    @property
+    def is_large(self) -> bool:
+        """Diameter at least `LARGE_BEAM_DIAMETER`: fits only new machines."""
+        ...
+    def located(self, location: str) -> BeamSet:
+        """This set with `location` set."""
+        ...
+    @property
+    def location(self) -> str:
+        """For a plant-assigned set, `'staged'` or `'inventory'`; empty
+        otherwise."""
+        ...
     @classmethod
     def new(cls, desc: BeamSetDesc, lbs: float, avail_date: datetime) -> BeamSet:
         """A set the planner invents: ids `NEW000001`, …, no merge."""

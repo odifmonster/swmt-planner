@@ -65,7 +65,8 @@ class ManualSchedule:
         (`Machine.whole_rolls_before_runout`), roll_lbs_remaining, per-bar
         set + lbs + queue, and whether a plan is staged on it."""
         ...
-    def stock(self, desc: str, at: datetime | None = ...) -> list[BeamSet]:
+    def stock(self, desc: str, at: datetime | None = ...,
+              machine: str | None = ...) -> list[BeamSet]:
         """Stock fitting `desc`, available at `at`, not assigned by hand in a
         staged plan (another staging's automatic pick is still listed),
         oldest received first (then set number) — the warehouse's pull order."""

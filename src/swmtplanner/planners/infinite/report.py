@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from swmtplanner.schedule import (
-    Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
 )
 from .schedule_json import has_work
@@ -30,7 +30,7 @@ __all__ = [
 # schedule). A maximal run of these is one `knit` step…
 _KNIT_RUN = (Knit, Doff)
 # …and a maximal run of these is one re-thread block (`runout` / `yarn change`).
-_RETHREAD = (Waste, TapeOut, Hanging, Threading)
+_RETHREAD = (Waste, TapeOut, Unhang, Hanging, Threading)
 # Changeover activities pass through one-to-one, each with its own label.
 _CHANGE_LABEL = {
     StyleChange: 'style change',
@@ -475,13 +475,14 @@ def _activity_desc(a: 'Activity') -> str:
         return ', '.join(parts)
     if isinstance(a, Threading):
         return a.bars
-    if isinstance(a, TapeOut):
+    if isinstance(a, (TapeOut, Unhang)):
         parts = []
         if a.top_beam is not None:
             parts.append(f'top {_beam_set_desc(a.top_beam)} ({a.top_beam.lbs:g} lbs back)')
         if a.btm_beam is not None:
             parts.append(f'btm {_beam_set_desc(a.btm_beam)} ({a.btm_beam.lbs:g} lbs back)')
-        return ', '.join(parts) if parts else a.bars
+        text = ', '.join(parts) if parts else a.bars
+        return f'unhung, never threaded: {text}' if isinstance(a, Unhang) else text
     if isinstance(a, (StyleChange, RunnerChange, PatternChange)):
         return f'from {a.from_item.id} to {a.to_item.id}'
     if isinstance(a, Idle):

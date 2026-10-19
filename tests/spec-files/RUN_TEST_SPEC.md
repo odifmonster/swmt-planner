@@ -62,3 +62,27 @@ The config's `state` block spells durations as hours or unit strings (see
    plan tapes it out`) or queued at one (`queued set … passed over at the
    hang`), naming the machine, bar, set number and merge.
 2. **Nothing** — machines with no blacklisted set give an empty list.
+
+## 6. `hung_on_machines` and the manual `pending()` view
+
+1. **Lines** — one line per bar whose set is hung and not threaded, in
+   machine order, naming the machine, bar, set, merge and lbs and whether
+   the first plan threads it (the set fits the item) or unhangs it; none
+   for threaded bars.
+2. **`pending()`** — a `ManualSchedule` over such a machine reports
+   `top_threaded` False, and each queued set's location in
+   `<bar>_queue_location` beside `<bar>_queue`.
+
+## 7. `large_on_old_machines`
+
+1. **Lines** — one line per large (40 in) set mounted on or queued at an
+   old machine, in machine order, naming the machine, bar, set and
+   diameter; large sets on new machines, and small sets anywhere, give
+   none.
+
+## 8. `cannot_run_on_machines`
+
+1. **Lines** — one line per machine whose current item's machine list
+   leaves it out, in machine order, naming the machine and the item and
+   saying it idles until changed; a machine on an item it can run gives
+   none.

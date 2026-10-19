@@ -147,7 +147,9 @@ Each remaining job becomes one manual step, `Step(machine, item, rolls,
   schedule on their pounds. With `--keep-sets`
   they instead name the prior plan's sets, in hang order, **when the
   prior set is still usable**: it is in the new inventory under the bar's
-  requirement and not already named by an earlier step. A prior `NEW…`
+  requirement, the machine accepts it (a large beam fits only a new
+  machine — `schedule/DESIGN.md` "Large beams") and it is not already
+  named by an earlier step. A prior `NEW…`
   placeholder, a set the new export no longer has (taken by the load's
   run-up, or gone), and one an earlier step already named become `None`
   — a placeholder for the second pass to fill — and the reason is noted

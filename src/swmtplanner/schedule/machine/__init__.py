@@ -3,8 +3,9 @@
 from .status import Status
 from .machine import (
     Machine, ProductionPlan, PassedOver, Fill, UnhungAssignments, fresh_beam_lbs, RUNNING_EFFICIENCY,
-    effective_rate, MIN_STOCK_SET_LBS, choose_stock,
+    effective_rate, MIN_STOCK_SET_LBS, choose_stock, stock_order,
 )
 
 __all__ = ['Status', 'Machine', 'ProductionPlan', 'PassedOver', 'Fill', 'UnhungAssignments', 'fresh_beam_lbs',
-           'RUNNING_EFFICIENCY', 'effective_rate', 'MIN_STOCK_SET_LBS', 'choose_stock']
+           'RUNNING_EFFICIENCY', 'effective_rate', 'MIN_STOCK_SET_LBS', 'choose_stock',
+           'stock_order']

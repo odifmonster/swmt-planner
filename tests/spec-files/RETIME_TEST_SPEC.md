@@ -180,6 +180,10 @@ the test (built with `schedule_json`-shaped dicts) placing `A × 2` then
     `assignment refused` and the step still replays. Without `keep_sets`
     every note is empty. (This also covers the manual planner's `'named'`
     and `'none'` stock modes, which have no tests of their own.)
+12a. **A prior set the machine cannot take** — with `keep_sets`, a prior
+    name for a large (40 in) set on an old machine is not kept: the hang
+    gets a placeholder and the record's note reads `too large for the
+    machine`; on a new machine it is kept.
 13. **Placeholders are never stock** — a placeholder a step's tape-out
     returned to the inventory is not handed to a later hang by the second
     pass: with no real set for `B`, both machines' `B` hangs stay `NEW…`.

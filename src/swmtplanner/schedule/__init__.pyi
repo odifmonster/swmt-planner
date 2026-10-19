@@ -2,10 +2,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Collection, Mapping
 
-from swmtplanner.products import BeamSet, Greige, VariantMapFile
+from swmtplanner.products import BeamSet, Blacklist, Greige, VariantMapFile
 from swmtplanner.support import WorkCal
 from .activity import (
-    Activity, Knit, Waste, Doff, TapeOut, Hanging, Threading,
+    Activity, Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle, rebind_sets,
     TAPE_OUT_SINGLE_DURATION, TAPE_OUT_BOTH_DURATION,
     HANGING_SINGLE_DURATION, HANGING_BOTH_DURATION,
@@ -27,7 +27,7 @@ from .capacity import (
 )
 
 __all__ = [
-    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Hanging', 'Threading',
+    'Activity', 'Knit', 'Waste', 'Doff', 'TapeOut', 'Unhang', 'Hanging', 'Threading',
     'StyleChange', 'RunnerChange', 'PatternChange', 'Idle',
     'Roll', 'Job',
     'TAPE_OUT_SINGLE_DURATION', 'TAPE_OUT_BOTH_DURATION',
@@ -54,7 +54,7 @@ def read_machines(
     variant_map: VariantMapFile | None = ...,
     beam_sets: Mapping[str, BeamSet] | None = ...,
     assigned_sets: list[Any] | None = ...,
-    blacklist: Collection[str] = ...,
+    blacklist: Blacklist | Collection[str] = ...,
 ) -> dict[str, Machine]: ...
 def machines_from_list(
     cfg: list[Any], *,
@@ -66,7 +66,7 @@ def machines_from_list(
     beam_sets: Mapping[str, BeamSet] | None = ...,
     assigned_sets: list[Any] | None = ...,
     source: str = ...,
-    blacklist: Collection[str] = ...,
+    blacklist: Blacklist | Collection[str] = ...,
 ) -> dict[str, Machine]:
     """`blacklist` (merge codes, `products.normalize_blacklist`) stamps the
     mounted and queued sets it names `blacklisted`: a mounted one makes its

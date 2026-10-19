@@ -54,11 +54,14 @@ ManualSchedule(state, stock='all' | 'named' | 'none')
                                                # queue (each entry with its
                                                # location: staged / inventory),
                                                # whether a plan is staged
-  stock(desc: str, at: datetime | None = None) -> list[BeamSet]
+  stock(desc: str, at: datetime | None = None, machine: str | None = None) -> list[BeamSet]
                                                # sets fitting a beam-set label,
                                                # available at `at` (default: start),
-                                               # not hung by a staged plan; oldest
-                                               # received first (the pull order)
+                                               # not hung by a staged plan, and —
+                                               # with `machine` — ones it accepts (a
+                                               # large beam fits only a new machine);
+                                               # in pull order: large sets first, then
+                                               # oldest received, then set number
   rolls(machine, item, n, at='schedule_tail', top=(), btm=(), order=None) -> ProductionPlan
                                                # plan (not commit) a step for
                                                # `machine`, replacing that machine's
@@ -125,7 +128,9 @@ records the `Step` *with* the assignments, so a replayed step file
 reproduces the choices.
 
 **Pull order.** Stock is listed — by `stock()` and in each runout's
-`options` — oldest received first, then by set number: the order in which
+`options` (which lists only sets that machine accepts — a large beam fits
+only a new machine, `schedule/DESIGN.md` "Large beams") — large sets
+first, then oldest received, then by set number: the order in which
 the warehouse wants sets pulled (the longest-held set is the easiest to
 reach, and goes first). The scheduler's job is to hand those sets out in
 that order to the runouts as they come, plant-wide. So `runouts()` with no

@@ -21,8 +21,9 @@ from typing import Annotated, Any, Callable, Mapping
 import typer
 
 from swmtplanner.products import (
+    BeamSetDesc,
     read_greige_styles, greige_styles_from_list, read_variant_masters,
-    read_variant_map, read_beam_sets, beam_sets_from_list, normalize_blacklist,
+    read_variant_map, read_beam_sets, beam_sets_from_list, normalize_blacklist, Blacklist,
 )
 from swmtplanner.demand import read_rls_items, rls_items_from_list
 from swmtplanner.schedule import (
@@ -423,10 +424,11 @@ class Inputs:
     """The config's `prior_plan` (a retimed schedule JSON) as
     `retime.PriorJob`s per machine, in start order; empty without one.
     `prior_commits` turns them into the planner's `PriorCommit`s."""
-    blacklist: frozenset[str] = frozenset()
-    """The config's `blacklist` of yarn merges flagged for quality, normalised
-    (`products.normalize_blacklist`); the loaded sets carrying one are
-    stamped `blacklisted` (see "Blacklisted merges" in schedule/DESIGN.md)."""
+    blacklist: Blacklist = Blacklist()
+    """The config's `blacklist` — merge codes, vendors and set numbers flagged
+    for quality, normalised (`products.normalize_blacklist`); the loaded sets
+    any of them names are stamped `blacklisted` (see "Blacklisted merges" in
+    schedule/DESIGN.md)."""
 
 
 def prior_commits(prior_jobs: 'Mapping[str, list[Any]]') -> 'dict[str, list[PriorCommit]]':
@@ -546,22 +548,25 @@ def load_inputs(
         echo(f'  loaded {len(variant_map.masters)} master(s), '
                    f'{len(variant_map.merges)} merge(s)')
 
-    # Optional: yarn merges flagged for quality. A set carrying one is never
-    # hung: it is kept out of stock, passed over in a queue, taped out off a
-    # bar (see "Blacklisted merges" in schedule/DESIGN.md).
-    blacklist: frozenset[str] = frozenset()
+    # Optional: yarn flagged for quality — merge codes, vendors, set numbers.
+    # A set carrying any is never hung: it is kept out of stock, passed over
+    # in a queue, taped out off a bar (see "Blacklisted merges" in
+    # schedule/DESIGN.md).
+    blacklist = Blacklist()
     if cfg.get('blacklist') is not None:
-        codes = _resolve(
+        data = _resolve(
             cli_value=None, config_value=cfg['blacklist'],
             config_dir=config_dir,
             file_loader=lambda p: json.load(open(p)),
             inline_loader=lambda d, source: d,
             label='blacklist', echo=echo,
         )
-        if not isinstance(codes, list):
-            raise TypeError("config['blacklist'] must be a list of merge codes")
-        blacklist = normalize_blacklist(codes)
-        echo(f'  {len(blacklist)} blacklisted merge(s)')
+        if not isinstance(data, (list, dict)):
+            raise TypeError("config['blacklist'] must be a list of merge codes or an "
+                            "object with 'merges', 'vendors' and/or 'sets'")
+        blacklist = normalize_blacklist(data)
+        echo(f'  blacklisted: {len(blacklist.merges)} merge(s), '
+             f'{len(blacklist.vendors)} vendor(s), {len(blacklist.sets)} set(s)')
 
     # Optional: the plant's beam-set export, available from the start date.
     # Becomes the stock inventory below, once the machines say which sets
@@ -642,7 +647,13 @@ def load_inputs(
         label='machines', echo=echo,
     )
     echo(f'  loaded {len(machine_dict)} machine(s)')
+    for line in hung_on_machines(machine_dict):
+        echo(line)
     for line in blacklisted_on_machines(machine_dict):
+        echo(line)
+    for line in large_on_old_machines(machine_dict):
+        echo(line)
+    for line in cannot_run_on_machines(machine_dict):
         echo(line)
 
     # Stock = the export minus the sets the machines report as mounted.
@@ -659,14 +670,16 @@ def load_inputs(
         n_stock = sum(len(v) for v in inventory.values())
         n_mounted = len(mounted & set(beam_sets))
         n_assigned = sum(1 for b in beam_sets.values() if b.assigned)
-        n_queued = sum(len(m.initial_status.queue(bar))
-                       for m in machine_dict.values() for bar in ('top', 'btm'))
+        queued = [q for m in machine_dict.values() for bar in ('top', 'btm')
+                  for q in m.initial_status.queue(bar)]
+        n_staged = sum(1 for q in queued if q.location == 'staged')
         n_later = sum(1 for v in inventory.values() for b in v
                       if not b.available_at(sd))
         echo(f'  {n_stock} beam set(s) stocked under {len(inventory)} '
              f'description(s), {n_later} received after the start date; '
              f'{n_mounted} on machines; {n_assigned} assigned '
-             f'({n_queued} queued on these machines)')
+             f'({len(queued)} queued on these machines: {n_staged} staged, '
+             f'{len(queued) - n_staged} in the warehouse)')
 
     cost_weights = _resolve(
         cli_value=overrides.get('weights'), config_value=cfg['weights'],
@@ -718,6 +731,64 @@ def load_inputs(
         machines=machine_dict, weights=cost_weights, capacity=capacity,
         prior_jobs=prior, blacklist=blacklist,
     )
+
+
+def hung_on_machines(machines: 'Mapping[str, Any]') -> list[str]:
+    """The load's listing of bars whose set the plant has hung but not
+    threaded (the assigned-sets file's `status: hung`): one line per bar,
+    in machine order — the machine's first plan threads the set, or unhangs
+    it when it does not fit. Empty when there are none."""
+    lines = []
+    for mid, m in sorted(machines.items()):
+        s = m.initial_status
+        for bar in ('top', 'btm'):
+            beam = s.beam(bar)
+            if beam is not None and not s.threaded(bar):
+                fits = beam.fits(BeamSetDesc(getattr(s.current_item.configuration,
+                                                     f'{bar}_beam')))
+                lines.append(f'  {mid:4} {bar:3} set {beam.set_no} (merge {beam.merge}, '
+                             f'{beam.lbs:.0f} lbs) is hung, not threaded: the first plan '
+                             + ('threads it' if fits else 'unhangs it (it does not fit)'))
+    return lines
+
+
+def large_on_old_machines(machines: 'Mapping[str, Any]') -> list[str]:
+    """The load's listing of large (40 in) sets found on or queued at an old
+    machine, which cannot take them (see "Large beams" in
+    schedule/DESIGN.md): one line per set, in machine order — a mounted one
+    comes off at the first plan, a queued one is passed over at the hang.
+    Empty when there are none."""
+    lines = []
+    for mid, m in sorted(machines.items()):
+        if m.is_new:
+            continue
+        s = m.initial_status
+        for bar in ('top', 'btm'):
+            beam = s.beam(bar)
+            if beam is not None and beam.is_large:
+                lines.append(f'  {mid:4} {bar:3} mounted set {beam.set_no} ({beam.diameter:g} in) '
+                             f'is too large for this old machine: the first plan takes it off')
+            for q in s.queue(bar):
+                if q.is_large:
+                    lines.append(f'  {mid:4} {bar:3} queued set {q.set_no} ({q.diameter:g} in) '
+                                 f'is too large for this old machine: passed over at the hang')
+    return lines
+
+
+def cannot_run_on_machines(machines: 'Mapping[str, Any]') -> list[str]:
+    """The load's listing of machines found on an item they cannot run (the
+    style's machine list leaves the machine out — see "An item the machine
+    cannot run" in schedule/DESIGN.md): one line per machine, in machine
+    order — it knits nothing of the item and idles until the planner
+    changes it. Empty when there are none."""
+    lines = []
+    for mid, m in sorted(machines.items()):
+        if m.can_run_current_item:
+            continue
+        item = m.initial_status.current_item
+        lines.append(f'  {mid:4} is on {item.id}, which it cannot run (not in the '
+                     f"style's machine list): it idles until the planner changes it")
+    return lines
 
 
 def blacklisted_on_machines(machines: 'Mapping[str, Any]') -> list[str]:
