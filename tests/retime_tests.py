@@ -43,8 +43,9 @@ def _tk(ticket: str, time: datetime, item: str | None, machine: str = 'M1',
 
 
 def _pj(i: int, item: str, order: str | None, rolls: int,
-        start: datetime = _T0, top=(), btm=()) -> PriorJob:
-    return PriorJob(f'J{i}', item, order, rolls, start, tuple(top), tuple(btm))
+        start: datetime = _T0, top=(), btm=(), opens_from: str | None = None) -> PriorJob:
+    return PriorJob(f'J{i}', item, order, rolls, start, tuple(top), tuple(btm),
+                    opens_from=opens_from)
 
 
 def _plan_job(job_id: str, item: str, order: str | None, rolls: int,
@@ -251,6 +252,15 @@ class PriorJobsTests(unittest.TestCase):
         self.assertEqual(j.top, ('s1', None))
         self.assertEqual(j.btm, ('s2',))
 
+    def test_opening_changeover(self):
+        job = _plan_job('J1', 'A', 'P1@A', 1, _h(0))
+        job['activities'] = [
+            {'kind': 'PatternChange', 'id': 'PC1', 'start': _utc(_h(0)), 'end': _utc(_h(1)),
+             'from_item': 'Q', 'to_item': 'A'}] + job['activities']
+        plain = _plan_job('J2', 'B', 'P1@B', 1, _h(2))
+        jobs = prior_jobs([{'id': 'M1', 'schedule': [job, plain]}], ['M1'])['M1']
+        self.assertEqual([j.opens_from for j in jobs], ['Q', None])
+
     def test_machines(self):
         plan = [{'id': 'M01', 'schedule': [_plan_job('J1', 'A', None, 1, _h(0))]},
                 {'id': 'X9', 'schedule': [_plan_job('J1', 'A', None, 1, _h(0))]}]
@@ -354,6 +364,25 @@ class LocateTests(unittest.TestCase):
         self.assertIsNotNone(p.wrong_style)
         self.assertIn('status says C', p.wrong_style)
         self.assertFalse(p.replayable)
+
+    def test_plans_own_opening_change(self):
+        # retimed from the plan's own start: the status is what it changes from
+        p = locate('M1', _JOBS, [], _START, _START, 'Q', 0, False)
+        self.assertIsNone(p.wrong_style)
+        self.assertTrue(p.opening_change)
+        self.assertEqual((p.consumed, p.tickets), (0, 0))
+        self.assertEqual(_left(p), [('A', 2), ('B', 2), ('A', 1)])
+        self.assertTrue(p.replayable)
+        # a day later the plan has to say so itself
+        self.assertIsNotNone(_locate([], status_item='Q').wrong_style)
+        opening = [_pj(1, 'A', 'P1@A', 2, opens_from='Q')] + _JOBS[1:]
+        p2 = _locate([], status_item='Q', jobs=opening)
+        self.assertIsNone(p2.wrong_style)
+        self.assertTrue(p2.opening_change)
+        self.assertEqual(_left(p2), [('A', 2), ('B', 2), ('A', 1)])
+        # a run-up roll is one the plan never had
+        self.assertIsNotNone(_locate([], status_item='Q', run_up=1, in_progress=True,
+                                     jobs=opening).wrong_style)
 
     def test_run_up_rolls_consume(self):
         p = _locate([], run_up=2, in_progress=True)

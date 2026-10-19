@@ -112,6 +112,23 @@ unfinished job's rolls; anything else is the wrong-style deviation above
 (the status is authoritative, the plan is not replayed on that machine). A machine with no remaining rolls — the floor got through
 everything the plan had for it — is reported and left at its status.
 
+One mismatch is the plan's own doing, not the floor's: a machine the
+planner found idle, or on a style it had no more use for, gets a plan that
+**opens with a changeover** — its first job is on another item, and the
+status still says the item the machine was on when the plan was made.
+Nothing is accounted for on such a machine (no ticket, no run-up roll), so
+the mismatch is read as the plan's own opening change, and the machine is
+at its first roll with every job remaining, when either the plan is being
+retimed from its own start (`prior_start` is not before the status
+snapshot — a hand-edited plan replayed on the morning it was made) or the
+first job's changeover activity records the status item as the item it
+changed *from* (`PriorJob.opens_from`, the `from_item` of the job's first
+`StyleChange` / `RunnerChange` / `PatternChange`; the plan knew the machine
+was there). `Position.opening_change` marks it and the report lists it
+under deviations. A plan retimed days later whose machine still shows the
+old item but whose first job does not record it is the wrong style it
+always was, and so is one whose run-up made a roll the plan never had.
+
 Tickets older than the prior plan's start are ignored (they belong to the
 run before it), and so are tickets scanned **after** the config's
 `start_date` — the status snapshot — since the status already describes

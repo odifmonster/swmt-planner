@@ -126,6 +126,12 @@ class PriorJob:
     btm: tuple[str | None, ...] = ()
     # The target order's due date, when the JSON carries one (plant local).
     due_date: datetime | None = None
+    # The item the job's opening changeover changed from, when it has one:
+    # how `locate` tells the plan's own first change from a wrong style.
+    opens_from: str | None = None
+
+
+_CHANGES = ('StyleChange', 'RunnerChange', 'PatternChange')
 
 
 def prior_jobs(plan: list[dict], machines: Iterable[str]) -> dict[str, list[PriorJob]]:
@@ -141,7 +147,10 @@ def prior_jobs(plan: list[dict], machines: Iterable[str]) -> dict[str, list[Prio
         for j in jobs:
             top: list[str | None] = []
             btm: list[str | None] = []
+            opens_from: str | None = None
             for a in j.get('activities', ()):
+                if opens_from is None and a.get('kind') in _CHANGES:
+                    opens_from = str(a['from_item']) if a.get('from_item') else None
                 if a.get('kind') != 'Hanging':
                     continue
                 for bar, lst in (('top', top), ('btm', btm)):
@@ -153,7 +162,8 @@ def prior_jobs(plan: list[dict], machines: Iterable[str]) -> dict[str, list[Prio
                 job_id=str(j['id']), item=str(j['item']), order=j.get('tgt_order'),
                 rolls=len(j.get('rolls', ())), start=_local(j['start']),
                 top=tuple(top), btm=tuple(btm),
-                due_date=_local(j['due_date']) if j.get('due_date') else None))
+                due_date=_local(j['due_date']) if j.get('due_date') else None,
+                opens_from=opens_from))
     return out
 
 
@@ -175,6 +185,7 @@ class Position:
     wrong_style: str | None = None        # how the machine left the plan, if it did
     finished: bool = False                # the plan had nothing left for it
     in_progress_order: str | None = None  # the order of the roll the run-up finishes
+    opening_change: bool = False          # the plan's own first move is a changeover
     remaining: list[PriorJob] = field(default_factory=list)
 
     @property
@@ -263,6 +274,12 @@ def locate(machine: str, jobs: list[PriorJob], tickets: list[Ticket],
             pos.extra_in_progress = roll_in_progress
             if run_up_rolls > (1 if roll_in_progress else 0):
                 pos.extra.append(f'run-up ({run_up_rolls} roll(s) of {status_item})')
+        elif (at == 0 and pos.tickets == 0 and run_up_rolls == 0
+              and (prior_start >= status_at or jobs[0].opens_from == status_item)):
+            # The plan's own opening changeover — see "Where each machine is"
+            # in DESIGN.md: nothing accounted for, and the plan either starts
+            # at this status or says it changed from the status item.
+            pos.opening_change = True
         else:
             pos.wrong_style = (f'the status says {status_item}; the plan expected '
                                f'{next_item} (after {last_item or "nothing"})')
@@ -616,6 +633,8 @@ def retime_text(result: RetimeResult) -> str:
             dev.append(f'{mid}: the floor finished everything the plan had; left at status')
         if p.in_progress_order:
             dev.append(f'{mid}: the roll in progress was for {p.in_progress_order}; finished as a run-up roll')
+        if p.opening_change:
+            dev.append(f'{mid}: the plan opens with a change from {p.status_item}; at its first roll')
     lines += ['', 'DEVIATIONS', ''] + (dev or ['none'])
     real = [h for h in result.hangs if h.source != 'new']
     still_new = [h for h in result.hangs if h.source == 'new']

@@ -47,6 +47,9 @@ export, no demand beyond what the steps need, no ration.
 3. **Machines** — only the machines asked for are returned; one the plan
    lacks gets an empty list; the plan's ids are normalised like the
    tickets'.
+4. **Opening changeover** — a job whose activities start with a
+   `PatternChange` from `Q` has `opens_from = 'Q'`; a job with no
+   changeover activity has `None`.
 
 ## 3. `locate`
 
@@ -89,6 +92,14 @@ A prior plan of three jobs on one machine: `A` × 2 (order `P1@A`),
 8. **The status must match** — with no tickets, a status item `C` (the
    plan expected `A` first, and `C` is not the next job either) is a
    wrong style with the status named in the message.
+8a. **The plan's own opening change** — no tickets, no run-up, status on
+    `Q` (not the first job's item nor the next job's): retimed from the
+    plan's own start (`prior_start = status_at`) the machine is at its
+    first roll — nothing consumed, all three jobs remaining, `replayable`,
+    `opening_change` set, no `wrong_style`. With the prior start a day
+    earlier it is the wrong style of 8, unless the first job's
+    `opens_from` is `Q`, which is accepted the same way; a run-up roll
+    (`run_up_rolls = 1`) makes it a wrong style again.
 9. **Run-up rolls consume scheduled rolls** — status on `A`,
    `run_up_rolls = 2` (the load's run-up finished the roll in progress and
    ran one more), `roll_in_progress = True`: both `A` rolls are consumed,
