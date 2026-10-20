@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swmtplanner"
-version = "0.0.10"
+version = "0.0.11"
 requires-python = ">=3.12"
 dependencies = [
     "pandas[excel]>=2.3.2",
-    "typer>=0.17.3"
+    "typer>=0.17.3",
+    "xlwings>=0.37.4,<1.0",
+    "pyodbc>=5.3.0"
 ]
 authors = [
     {name = "Lam An Wyner", email = "lwyner@shawmutcorporation.com"},
