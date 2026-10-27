@@ -9,13 +9,35 @@ name in `.tables`.
 doubled, as for `str.format`); `get_query(*args)` renders each `date` /
 `datetime` argument with `date_fmt` — which carries whatever quoting the SQL
 needs — and substitutes them in the order passed. `date_fmt` is `None` only
-for a query with no arguments.
+for a query with no arguments. The format is `strftime`'s, plus the
+unpadded directives `%-d`, `%-m`, `%-H` … (a numeric directive with `-`
+after the `%`), which `render_date` handles itself so they work on every
+platform.
 
 See `planners/infinite/swmtio/DESIGN.md` ("Queries with date arguments").
 """
 
+import re
 from dataclasses import dataclass
 from datetime import date
+
+_UNPADDED = re.compile(r'%%|%-([A-Za-z])')
+
+
+def render_date(value: date, fmt: str) -> str:
+    """`value.strftime(fmt)`, with `%-<directive>` rendered as that numeric
+    directive without zero padding (`%-d` → `7`, not `07`) on every
+    platform; `%%` is left to `strftime`. A non-numeric directive after
+    `%-` raises `ValueError`."""
+    def unpad(m: re.Match) -> str:
+        if m[0] == '%%':
+            return '%%'
+        text = value.strftime('%' + m[1])
+        try:
+            return str(int(text))
+        except ValueError:
+            raise ValueError(f'%-{m[1]} is not a numeric directive') from None
+    return value.strftime(_UNPADDED.sub(unpad, fmt))
 
 
 class QueryArgumentError(ValueError):
@@ -26,7 +48,7 @@ class QueryArgumentError(ValueError):
 class SQLQuery:
     """A query's SQL text (`raw_str`), how many date arguments it takes
     (`num_args`), and the `strftime` format each is rendered with
-    (`date_fmt`; `None` iff `num_args == 0`)."""
+    (`date_fmt`, through `render_date`; `None` iff `num_args == 0`)."""
     raw_str: str
     num_args: int
     date_fmt: str | None
@@ -47,7 +69,7 @@ class SQLQuery:
         if len(args) != self.num_args:
             raise QueryArgumentError(
                 f'query takes {self.num_args} date argument(s), got {len(args)}')
-        rendered = [a.strftime(self.date_fmt) for a in args]  # type: ignore[arg-type]
+        rendered = [render_date(a, self.date_fmt) for a in args]  # type: ignore[arg-type]
         return self.raw_str.format(*rendered)
 
 
@@ -55,10 +77,11 @@ class SQLQuery:
 # One `SQLQuery` constant per input, named for the input; its `Table` is the
 # constant of the same name in `.tables`.
 
-# A date argument rendered as the first six parts of `DATETIMEFROMPARTS(...)`;
-# the query supplies the trailing milliseconds itself. A `date` renders its
-# time parts as zeros; a `datetime` keeps them.
-DATETIMEFROMPARTS_FMT = '%Y, %m, %d, %H, %M, %S'
+# A date argument rendered as the first six parts of `DATETIMEFROMPARTS(...)`,
+# each unpadded (`2026, 10, 7, 0, 0, 0`); the query supplies the trailing
+# milliseconds itself. A `date` renders its time parts as zeros; a `datetime`
+# keeps them.
+DATETIMEFROMPARTS_FMT = '%Y, %-m, %-d, %-H, %-M, %-S'
 
 # Beam-set inventory: active sets with weight on them, not threaded.
 ACTIVE = SQLQuery("""\
@@ -74,11 +97,13 @@ SELECT
     y.new_Denier AS "denier",
     y.new_Luster AS "luster",
     d.new_yarntype AS "yarn_type",
-    sh.new_Comments AS "comments"
+    sh.new_Comments AS "comments",
+    bsz.new_name AS "beam_size"
 FROM new_sethistoryBase AS sh
     LEFT JOIN new_yarnBase AS y ON sh.new_MergeId=y.new_yarnId
     LEFT JOIN new_yarndescriptionBase AS d ON d.new_yarndescriptionId=y.new_YarnDesc
     LEFT JOIN AccountBase AS ac ON y.new_Producer=ac.AccountId
+    LEFT JOIN new_beamsizeBase AS bsz ON sh.new_BeamSizeId=bsz.new_beamsizeId
 WHERE
     sh.new_name NOT LIKE '%_del' AND
     sh.new_EmptyDateandTime IS NULL AND
@@ -119,11 +144,13 @@ WITH ranked_bars AS (
     y.new_Denier AS "denier",
     ac."Name" AS "vendor",
     y.new_Luster AS "luster",
-    d.new_yarntype AS "yarn_type"
+    d.new_yarntype AS "yarn_type",
+    bsz.new_name AS "beam_size"
     FROM ranked_bars
         LEFT JOIN new_yarnBase AS y ON y.new_yarnId=ranked_bars.new_MergeId
         LEFT JOIN AccountBase AS ac ON y.new_Producer=ac.AccountId
         LEFT JOIN new_yarndescriptionBase AS d ON y.new_YarnDesc=d.new_yarndescriptionId
+        LEFT JOIN new_beamsizeBase AS bsz ON ranked_bars.new_BeamSizeId=bsz.new_beamsizeId
     WHERE rn<=5
     ORDER BY ranked_bars.new_Location, ranked_bars.new_Bars
 """, 0, None)
@@ -277,6 +304,80 @@ WHERE rn=1
 ORDER BY last_tkt.new_Ticket
 """, 0, None)
 
+# Every ticket in the system whose doff started on or after a date, from the
+# tickets table itself rather than the scans — so it includes rolls on dummy
+# tickets, which cannot be scanned and are created after the fact (once the
+# shipping warehouse processes them) so the rolls can ship. One date
+# argument.
+TKTS_SINCE = SQLQuery("""\
+SELECT
+    tkt.new_Location AS "machine",
+    tkt.new_Ticket AS "ticket",
+    tkt.new_DSDate AS "start_ts",
+    tkt.new_DDDate AS "end_ts",
+    stl.new_Style AS "style",
+    stl.new_RackWt AS "rack_wt",
+    tkt.new_DRacks AS "racks"
+FROM new_ticketsBase AS tkt
+    LEFT JOIN new_styleBase AS stl ON stl.new_styleId=tkt.new_StyleId
+WHERE tkt.new_DSDate IS NOT NULL AND
+    tkt.new_DSDate>=DATETIMEFROMPARTS({}, 0)
+""", 1, DATETIMEFROMPARTS_FMT)
+
+# Every threading ticket scanned since a date. A threading ticket's text
+# encodes the machine, the item and the set and bars it was threaded on
+# (`<machine>-<...><item>##<set_no>B<bars>`), which the CTEs split apart;
+# the scan carries the racks wound on the machine's current roll at the
+# time, and the set's record supplies its initial weight, merge and vendor.
+# One date argument.
+THREADINGS_SINCE = SQLQuery("""\
+WITH split_idx AS (
+    SELECT
+        *,
+        CHARINDEX('##', new_Ticket, 6) AS "hash_idx"
+    FROM new_scanneditemsBase
+    WHERE new_TicketType='THREADING' AND
+        new_Isvalid=1 AND
+        new_Ticket<>''
+), split1 AS (
+    SELECT
+        LEFT(new_Ticket, 3) AS "machine",
+        SUBSTRING(new_Ticket, 6, "hash_idx" - 6) AS "item",
+        RIGHT(new_Ticket, LEN(new_Ticket) - "hash_idx" - 1) AS "rem",
+        *
+    FROM split_idx
+), split1_idx AS (
+    SELECT
+        CHARINDEX('B', REVERSE("rem"), 1) AS "b_idx",
+        *
+    FROM split1
+), split2 AS (
+    SELECT
+        "machine",
+        "item",
+        LEFT("rem", LEN("rem") - "b_idx") AS "set_no",
+        RIGHT("rem", "b_idx" - 1) AS "bars",
+        new_RacksAtRO AS "racks",
+        new_ScanCreatedDate AS "start_ts"
+    FROM split1_idx
+)
+SELECT
+    split2."machine" AS "machine",
+    split2."item" AS "item",
+    split2."set_no" AS "set_no",
+    split2."bars" AS "bars",
+    split2."racks" AS "racks",
+    split2."start_ts" AS "start_ts",
+    sh.new_Weight AS "init_lbs",
+    y.new_merge AS "merge",
+    ac."Name" AS "vendor"
+FROM split2
+    LEFT JOIN new_sethistoryBase AS sh ON sh.new_name=split2."set_no"
+    LEFT JOIN new_yarnBase AS y ON y.new_yarnId=sh.new_MergeId
+    LEFT JOIN AccountBase AS ac ON ac.AccountId=y.new_Producer
+WHERE start_ts>=DATETIMEFROMPARTS({}, 0)
+""", 1, DATETIMEFROMPARTS_FMT)
+
 # Every ticket (any type) scanned since a date, its latest scan. One date
 # argument.
 SCANNED = SQLQuery("""\
@@ -356,7 +457,7 @@ WHERE
 """, 0, None)
 
 __all__ = [
-    'QueryArgumentError', 'SQLQuery', 'DATETIMEFROMPARTS_FMT',
-    'ACTIVE', 'ASSIGNED', 'DOFFED', 'THREADED', 'LAST_TKT', 'SCANNED',
-    'ALL_VARIANTS',
+    'QueryArgumentError', 'SQLQuery', 'render_date', 'DATETIMEFROMPARTS_FMT',
+    'ACTIVE', 'ASSIGNED', 'DOFFED', 'THREADED', 'LAST_TKT', 'TKTS_SINCE',
+    'THREADINGS_SINCE', 'SCANNED', 'ALL_VARIANTS',
 ]

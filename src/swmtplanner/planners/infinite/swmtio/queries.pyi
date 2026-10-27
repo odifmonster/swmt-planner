@@ -16,11 +16,16 @@ class SQLQuery:
 
 DATETIMEFROMPARTS_FMT: str
 
+
+def render_date(value: date, fmt: str) -> str: ...
+
 ACTIVE: SQLQuery
 ASSIGNED: SQLQuery
 DOFFED: SQLQuery
 THREADED: SQLQuery
 LAST_TKT: SQLQuery
+TKTS_SINCE: SQLQuery
+THREADINGS_SINCE: SQLQuery
 SCANNED: SQLQuery
 ALL_VARIANTS: SQLQuery
 

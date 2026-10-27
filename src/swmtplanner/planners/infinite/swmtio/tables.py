@@ -12,9 +12,9 @@ depends on whether the rows came from pyodbc or a CSV:
   machine / style / variant / merge / vendor / luster / yarn type / stitch /
   thread pattern, comments. A merge code looks numeric but is a code.
 - **count** (`COUNT_DTYPE`, nullable integer): the bar on a machine,
-  beams / nbeams, ends.
+  beams / nbeams, ends, denier.
 - **number** (`NUMBER_DTYPE`, float): weights and quantities (lbs, rem_lbs,
-  rack_wt, racks), denier, pct, gauge, width, rl.
+  init_lbs, rack_wt, racks), pct, gauge, width, rl.
 - **timestamp**: the plant's systems store timestamps in UTC and the
   planner's clock is plant-local, so every timestamp column is converted to
   `PLANT_TZ` (`utc_to_plant`) and left naive.
@@ -93,7 +93,8 @@ _BAR_KINDS = {
     'set_no': _s, 'merge': _s, 'vendor': _s, 'luster': _s, 'desc': _s,
     'stitch': _s, 'thread': _s,
     'ends': _i,
-    'denier': _n, 'pct': _n, 'rl': _n,
+    'denier': _i,
+    'pct': _n, 'rl': _n,
 }
 
 
@@ -105,14 +106,15 @@ def _bars(*fields: str) -> tuple[Column, ...]:
 ACTIVE = Table('ACTIVE', (
     _s('set_no'), _ts('rcv_date'), _ts('assign_date'),
     _n('lbs'), _i('beams'), _i('ends'),
-    _s('merge'), _s('vendor'), _n('denier'), _s('luster'), _s('yarn_type'),
-    _s('comments'),
+    _s('merge'), _s('vendor'), _i('denier'), _s('luster'), _s('yarn_type'),
+    _s('comments'), _s('beam_size'),
 ))
 
 ASSIGNED = Table('ASSIGNED', (
     _s('machine'), _i('bar'), _ts('assn_ts'),
     _s('set_no'), _n('lbs'), _i('beams'), _i('ends'),
-    _s('merge'), _n('denier'), _s('vendor'), _s('luster'), _s('yarn_type'),
+    _s('merge'), _i('denier'), _s('vendor'), _s('luster'), _s('yarn_type'),
+    _s('beam_size'),
 ))
 
 DOFFED = Table('DOFFED', (
@@ -122,7 +124,7 @@ DOFFED = Table('DOFFED', (
 
 THREADED = Table('THREADED', (
     _s('machine'), _i('bar'), _n('rem_lbs'), _i('nbeams'),
-    _s('set_no'), _s('merge'), _s('vendor'), _n('denier'),
+    _s('set_no'), _s('merge'), _s('vendor'), _i('denier'),
 ))
 
 LAST_TKT = Table('LAST_TKT', (
@@ -130,6 +132,19 @@ LAST_TKT = Table('LAST_TKT', (
     _s('style'), _i('nbeams'),
     *_bars('set_no', 'merge', 'vendor', 'denier', 'pct'),
     _n('rack_wt'), _n('racks'),
+))
+
+# Tickets whose doff started since a date, from the tickets table (dummy
+# tickets included): the same shape as DOFFED.
+TKTS_SINCE = Table('TKTS_SINCE', DOFFED.columns)
+
+# Threading tickets scanned since a date: the machine, item, set and bars
+# the ticket names (`bars` is text — a ticket can name more than one), the
+# racks on the machine's roll at the time, the scan, and the set's initial
+# weight.
+THREADINGS_SINCE = Table('THREADINGS_SINCE', (
+    _s('machine'), _s('item'), _s('set_no'), _s('bars'),
+    _n('racks'), _ts('start_ts'), _n('init_lbs'), _s('merge'), _s('vendor'),
 ))
 
 SCANNED = Table('SCANNED', (
@@ -174,7 +189,7 @@ FLOOR_STATUS = Table('FLOOR_STATUS', (
 
 # The reconciled machine status — the same columns as `LAST_TKT`, as the
 # reconcile skill writes them (timestamps still UTC).
-MACHINE_STATUS = Table('MACHINE_STATUS', LAST_TKT.columns)
+MACHINE_STATUS = Table('MACHINE_STATUS', (*LAST_TKT.columns, _s('status')))
 
 # Rack counts per machine; the source's `MC` / `Racks` headers, its machine
 # ids normalised to the database's form.
@@ -186,7 +201,7 @@ RACKS = Table('RACKS', (
 __all__ = [
     'STRING_DTYPE', 'COUNT_DTYPE', 'NUMBER_DTYPE',
     'utc_to_plant', 'to_number', 'to_string', 'norm_machine',
-    'ACTIVE', 'ASSIGNED', 'DOFFED', 'THREADED', 'LAST_TKT', 'SCANNED',
-    'ALL_VARIANTS',
+    'ACTIVE', 'ASSIGNED', 'DOFFED', 'THREADED', 'LAST_TKT', 'TKTS_SINCE',
+    'THREADINGS_SINCE', 'SCANNED', 'ALL_VARIANTS',
     'FLOOR_STATUS', 'MACHINE_STATUS', 'RACKS',
 ]
