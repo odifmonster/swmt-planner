@@ -90,6 +90,12 @@ each roll lands, demand says *how expensive that when is*.
   (see "Beam-swap decision"). Changeover durations are no longer per-machine —
   they are module-level constants (see Constants), so the constructor no
   longer takes `simple_change_duration` / `family_change_duration`.
+- `standing` — `True` for a machine the plant has **stood down**: it is not
+  knitting at `start`, though its item, its sets and their lbs are as
+  reported (the machines file's `"status": "standing"`, see File I/O).
+  Defaults to `False`. A standing machine knits nothing until a plan
+  puts a job on it — see "Standing machines" under "1. Run-up" — and
+  `Machine.standing` stays True until then.
 
 The constructor builds `initial_status` from these fields. The status is then
 exposed read-only.
@@ -263,30 +269,51 @@ schedule like every other piece of status; hanging some other set (a manual
 assignment) leaves it in place. A queued set is described by what the plant
 says is on it — its merge's yarn per the variant map, else its recorded
 denier / luster / type — never by what the bar happens to need (see File
-I/O), so a set staged at the wrong machine does not fit and is **passed
-over**: at the first hang on that bar that it does not fit, the set is
-dropped from the queue (`Status.drop_queued(bar)` on the plan's working
-status), the next queued set is considered in its place, the `Hanging`
-carries the dropped sets (`Hanging.passed_over`, so applying it drops them
-from any status the activity is replayed against — a commit, `status_at`)
-and the plan records the pass-over (`ProductionPlan.queue_passed_over`:
-bar, set, the requirement it failed, the hang time, and the `reason` —
-`'does not fit'`, or `'blacklisted'` for a set whose merge the run has
-blacklisted, which is passed over the same way whether or not it fits)
-for the machine to keep (`Machine.queue_passed_over`) and the planners to
-report. The set is still at the machine physically, so it never re-enters
-free stock; the floor decides what to do with it.
+I/O), so a set staged for a style the bar is not about to run does not
+fit that hang and is **passed over**. What happens to it depends on why:
+
+- A set that merely **does not fit this hang's requirement** is
+  **skipped, not dropped**: it stays in the bar's queue, in its place,
+  because the plant staged it for the style the machine is going to
+  next and the planner may well run something else first (a machine
+  staged for 8154 that the plan sends through 4583 first must still
+  find its 8154 sets in the queue when it gets there — otherwise the
+  plan pulls different sets from stock and the plant ends up with both
+  assigned). The hang looks past it to the first queued set that fits
+  (`pass_over` records the skip; `pick` takes the first usable set in
+  queue order, not necessarily the front).
+- A set that is **blacklisted** or **too large for this machine** can
+  never be used here, so it is **dropped** from the queue at the first
+  hang on that bar (`Status.drop_queued(bar, set_no)` on the plan's
+  working status); the `Hanging` carries the dropped sets
+  (`Hanging.passed_over`, so applying it drops them from any status the
+  activity is replayed against — a commit, `status_at`).
+
+Either way the plan records a `PassedOver` (`ProductionPlan.queue_passed_over`:
+bar, set, the requirement it failed, the hang time, the `reason` —
+`'does not fit'`, `'blacklisted'`, `'too large for this machine'` — and
+`dropped`, False for a skip) for the machine to keep
+(`Machine.queue_passed_over`) and the planners to report; a skipped set
+is recorded again at every later hang that skips it, and the `Hanging`
+lists the sets it skipped (`Hanging.skipped`, informational — applying
+it leaves them queued). Applying a `Hanging` removes the set it hung
+from its bar's queue wherever that set sat. A passed-over set is still at
+the machine physically, so it never re-enters free stock; one dropped, or
+skipped and never hung by the plan's end, is what the planners' `unassign`
+sheet lists for the floor.
 
 Selecting a set for a `Hanging` (see the walk), in order of precedence:
 
-1. the front of the bar's queue — the set the plant assigned to that bar —
-   when it fits the requirement, is not blacklisted and has been received
-   by then. It is **locked in**: a caller assignment for that hang
-   (`assign=`, below) must be `None` or that set's own number, else
-   `ValueError`. (A set the plant assigned before it arrived waits at the
-   front of the queue until a hang at or after its receipt; one that does
-   not fit, or is blacklisted, is passed over, above, before the rule is
-   applied to whatever is behind it.)
+1. the **first usable** set in the bar's queue — the sets the plant
+   assigned to that bar, in queue order: the first that fits the
+   requirement, that the machine accepts and that is not blacklisted —
+   when it has been received by then. It is **locked in**: a caller
+   assignment for that hang (`assign=`, below) must be `None` or that
+   set's own number, else `ValueError`. (A set the plant assigned before
+   it arrived waits in its place until a hang at or after its receipt,
+   stock serving the hang meanwhile; sets ahead of the usable one that do
+   not fit are skipped and stay queued, blacklisted or too-large ones are
+   dropped — "passed over", above.)
 2. a set number the caller assigned for the bar (`assign=`);
 3. among `inventory[key]`, the sets available at the working `as_of`,
    that the machine accepts (`Machine.accepts`, "Large beams") and not
@@ -627,6 +654,8 @@ Machine (HasID)
   activities: tuple[Activity, ...]  # activity schedule; append-only
   jobs: tuple[Job, ...]             # production schedule; append-only
   current_status: Status            # status at the activity-schedule tail
+  standing: bool                    # True until a stood-down machine has a
+                                    # committed job — see "Standing machines"
   is_new: bool                      # default False; selects StyleChange (new)
                                     # vs RunnerChange / PatternChange (legacy)
   init_variant: str | None          # plant variant named for the initial item
@@ -1174,6 +1203,20 @@ items out (the planner's candidates, the manual scheduler's `rolls`); it
 only declines to knit the one the machine is on. `'next_runout'` mode to
 another item runs up nothing and changes at the tail.
 
+**Standing machines.** A machine constructed `standing=True` is one the
+plant has stopped — not needed for now, or waiting on something — with
+its item and sets still as reported. It is treated for the run-up like
+one with foreign bars, whatever its sets: `_run_up_lbs` is `(0, 0)` (no
+whole roll counted or knit, `whole_rolls_before_runout` 0, `next_runout`
+immediate, nothing to fill a slot wait with), the roll in progress is
+zeroed at construction, and `run_until` idles it to `t`. Its sets keep
+their real lbs, so the preamble is the ordinary one: a plan for the
+**current item** needs no changeover and no hang — it simply starts the
+machine — and one for another item changes over as usual. `Machine.standing`
+is True until the machine has a committed job, so a planner can tell a
+machine it would be **restarting** from one already running and price
+that; once a job is on it, it is a running machine like any other.
+
 ### 2. Changeover preamble
 
 The run-up no longer drains a bar to empty, so a bar reaching the preamble
@@ -1676,11 +1719,39 @@ A record's optional **`status`** says where the set is:
 
 Any other `status` value raises `ValueError`.
 
+**A set the machines file already has on a bar wins over its assignment.**
+The plant's assigned-sets list lags the floor: a set threaded onto a
+machine is often still listed as assigned to it (or to another machine).
+Loading both as given would queue a set that is already mounted, and a
+later hang on that bar would try to hang it again or pass it over. So
+the loader takes the machines file's mounted sets (`init_top_set` /
+`init_btm_set` of every entry it keeps) as the truth and **drops every
+assigned-sets record naming one of them**: a queued record for a mounted
+set is not queued anywhere, and a `"hung"` record naming the set the
+machines file has on that same bar is dropped too — the file says
+threaded, so the bar is threaded (a `"hung"` record naming a *different*
+set still replaces the file's, as above). The dropped records are
+reported through `mounted_assignments(cfg, assigned_sets)` — `(set_no,
+assigned machine, assigned bar, machine it is on, bar it is on)` — which
+the planners echo, so the person entering the schedule can clear the
+stale assignment.
+
 `path` points to a JSON file with one entry per machine. Per-entry
 fields: machine id, initial item, the lbs remaining on each bar
 (`init_top_lbs`, `init_btm_lbs`), `is_new`, the optional
-`init_roll_lbs` — lbs still to knit on the roll in progress at
-`start_date` (default 0; the planner finishes that roll first) — and the
+`init_roll_lbs` — lbs already **wound** on the roll in progress at
+`start_date` (default 0, between rolls): the model's
+`init_roll_lbs_remaining` is the item's `tgt_wt` less it, 0 when nothing
+is wound or the roll is at or over its target, and the planner finishes
+that roll first — the
+optional **`status`** — `"running"` (the default: the machine is knitting
+its item), `"standing"` (stood down: the entry builds a `Machine` with
+`standing=True`, its item, sets and lbs as given and `init_roll_lbs`
+taken as 0), or `"overhaul"` (out of service: the entry is **left out**
+of the returned dict altogether, so no planner, manual schedule or
+retime sees the machine; `read_machines` / `machines_from_list` report
+the ids they left out through `overhaul_machines(records)`, which the
+planners echo); any other value raises `ValueError` — and the
 optional `init_top_set` / `init_btm_set`, the sets actually mounted: either
 an object `{"set_no", "merge", "vendor"}` (the plant's report of what is on
 the bar; `merge` and `vendor` may be null) or, in the older form, the bare

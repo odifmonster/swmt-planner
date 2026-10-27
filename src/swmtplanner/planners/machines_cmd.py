@@ -203,14 +203,17 @@ def convert_runtime_export(
         else:
             raise KeyError(f'machine {mid!r}: no is_new in the export and not in the machine master')
 
+        # `init_roll_lbs` is the lbs already WOUND on the roll in progress
+        # (the loader turns it into the lbs still to knit from the item's
+        # target weight — see File I/O in schedule/DESIGN.md).
         if 'racks_on_roll' in e:                    # racks already wound
-            wound = float(e['racks_on_roll'] or 0) * lbs_per_rack
+            roll_lbs = float(e['racks_on_roll'] or 0) * lbs_per_rack
+        else:                                       # old form: racks left
+            left = float(e.get('racks-to-doff', 0) or 0) * lbs_per_rack
             # A variant that maps to no master (the planner runs it as NONE)
             # has no roll weight of its own: use the plant default.
             tgt = (tgt_wts or {}).get(str(item), DEFAULT_TGT_WT)
-            roll_lbs = max(tgt - wound, 0.0) if wound > 0 else 0.0
-        else:                                       # old form: racks left
-            roll_lbs = float(e.get('racks-to-doff', 0) or 0) * lbs_per_rack
+            roll_lbs = max(tgt - left, 0.0) if left > 0 else 0.0
 
         entry: dict[str, Any] = {
             'id': mid,
@@ -277,7 +280,7 @@ def machines(runtime: _Runtime, input_dir: _InputDir, out: _Out = None,
     for m in entries:
         note = '' if m['init_item'] in tgt_known else '  (no master: plans as NONE)'
         typer.echo(f"  {m['id']:3} {m['init_item']:18} top {m['init_top_lbs']:8.1f} lbs  "
-                   f"btm {m['init_btm_lbs']:8.1f} lbs  roll {m['init_roll_lbs']:6.1f} lbs left{note}")
+                   f"btm {m['init_btm_lbs']:8.1f} lbs  roll {m['init_roll_lbs']:6.1f} lbs wound{note}")
     unknown = [(m, i) for m, i, why in skipped if why == 'not in the variant table']
     two_set = [(m, i) for m, i, why in skipped if why != 'not in the variant table']
     if two_set:

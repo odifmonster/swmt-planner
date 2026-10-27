@@ -53,7 +53,14 @@ sets"); without it every hang's set is re-decided in runout order.
   ```
 
   The machine id is normalised like the machines file's (`O2`, not
-  `O02`); machines the config does not have are ignored. `doff_ts` carries
+  `O02`); machines the config does not have are ignored — among them any
+  machine the machines file puts on **`overhaul`**, which the loader
+  leaves out (see File I/O in `schedule/DESIGN.md`): its prior jobs are
+  not replayed and its tickets not walked, and the report names it with
+  the rolls the prior plan still had for it. A machine the file marks
+  **`standing`** is replayed like any other when the prior plan has jobs
+  left for it (the prior plan deemed it needed), with the report noting
+  it was standing at the status. `doff_ts` carries
   its UTC offset and is converted to the planner's clock. The style is the
   plant's variant name and resolves to a planner master through
   `variant_masters`, as a machine's `init_item` does; one that resolves to
@@ -81,11 +88,13 @@ for each ticket in time order:
                                           insert one roll of that item before `next`
                                           (the style change shifts past it), consume
                                           it, and record a deviation
-    elif ticket.item == the item of the NEXT job (the one after next's job):
+    elif ticket.item == the item of a LATER job (the first job after next's
+                                          whose item it is):
                                           the machine CHANGED EARLY: the rest of next's
-                                          job is dropped, the walk goes on from that
-                                          next job (this ticket consumes its first roll),
-                                          and the dropped rolls are recorded
+                                          job and every job before that later one are
+                                          dropped, the walk goes on from it (this ticket
+                                          consumes its first roll), and the dropped
+                                          rolls are recorded job by job
     else:                                 the machine is on a style the plan never put
                                           there: record a deviation and stop — the
                                           machine keeps its status and is not replayed
@@ -95,8 +104,15 @@ An early change is the floor answering a customer need the plan did not
 know about; the rolls it skipped are **dropped, not re-added** — if the
 machine did not need to run more of the previous item, the retimer has no
 reason to put those rolls back — and the demand sheet shows whatever
-shortfall that leaves. Only the very next job is checked: a machine found
-on a style two or more jobs ahead has left the plan and is a wrong style.
+shortfall that leaves. The look-ahead runs through **every later job**:
+a machine found on the style of a job two or more jobs ahead has skipped
+everything between (the floor pulled it off a bad yarn, or finished a
+short run the plan had split into two jobs — the load's run-up job and
+the planned job on the same item are a common pair), and each skipped job
+is recorded as dropped. The **first** later job on the item is the one
+taken, so a machine found on a style the plan has twice (now and again
+next week) is read as having reached the earlier run. Only a style the
+plan never has on that machine again is a wrong style.
 
 What is left after the walk is the machine's **remaining rolls**, grouped
 back into jobs: consecutive rolls of one item with one `tgt_order` form a
@@ -106,9 +122,9 @@ status then says where in the first remaining roll the machine is:
 again — the machine model's run-up finishes it (`plan_production` always
 completes a roll in progress). The status's item must be the first
 remaining roll's item, or the style the machine just finished (an extra
-roll in progress), or the next job's item — the early change again, seen
-through the status rather than a ticket, with the same dropping of the
-unfinished job's rolls; anything else is the wrong-style deviation above
+roll in progress), or the item of a later job — the early change again,
+seen through the status rather than a ticket, with the same dropping of
+every job before it; anything else is the wrong-style deviation above
 (the status is authoritative, the plan is not replayed on that machine). A machine with no remaining rolls — the floor got through
 everything the plan had for it — is reported and left at its status.
 

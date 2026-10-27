@@ -9,6 +9,7 @@ __all__ = [
     'schedule_dataframe', 'production_dataframe', 'xref_dataframe',
     'unmet_demand_dataframe',
     'late_orders_dataframe', 'changeovers_dataframe', 'prior_jobs_dataframe',
+    'unassign_dataframe',
     'write_plan_report_xlsx',
 ]
 
@@ -19,6 +20,11 @@ def production_dataframe(report: PlanReport) -> pd.DataFrame: ...
 def xref_dataframe(report: PlanReport) -> pd.DataFrame: ...
 def late_orders_dataframe(report: PlanReport) -> pd.DataFrame: ...
 def unmet_demand_dataframe(report: PlanReport) -> pd.DataFrame: ...
+def unassign_dataframe(report: PlanReport) -> pd.DataFrame:
+    """The `unassign` sheet: assigned sets the plan passed over at a hang
+    (`queued`) or took off a bar unthreaded (`hung`), with the bar's
+    requirement and the reason; empty with the same columns when none."""
+    ...
 def write_plan_report_xlsx(
     report: PlanReport, path: str | Path,
 ) -> None: ...

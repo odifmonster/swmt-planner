@@ -267,3 +267,32 @@ class CannotRunOnMachinesTests(unittest.TestCase):
         self.assertIn('M1', lines[0]); self.assertIn('AU000X', lines[0])
         self.assertIn('cannot run', lines[0]); self.assertIn('idles until', lines[0])
         self.assertEqual(run.cannot_run_on_machines({'M2': m2}), [])
+
+
+# ---------------------------------------------------------------------------
+# 9. `standing_machines`
+
+class StandingMachinesTests(unittest.TestCase):
+
+    def test_lines(self):
+        m1 = _Machine('M1', _ITEM, _T0, _set('S1', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S2', 'M3', '60D WHITE 1000X4'), 900.0, _CAL, standing=True)
+        m2 = _Machine('M2', _ITEM, _T0, _set('S3', 'M1', '40D BLACK 1000X4'), 900.0,
+                      _set('S4', 'M3', '60D WHITE 1000X4'), 900.0, _CAL)
+        lines = run.standing_machines({'M2': m2, 'M1': m1})
+        self.assertEqual(len(lines), 1)
+        self.assertIn('M1', lines[0]); self.assertIn('AU0001', lines[0]); self.assertIn('standing', lines[0])
+        self.assertEqual(run.standing_machines({'M2': m2}), [])
+
+
+# ---------------------------------------------------------------------------
+# 10. `mounted_assignment_lines`
+
+class MountedAssignmentLinesTests(unittest.TestCase):
+
+    def test_lines(self):
+        lines = run.mounted_assignment_lines([('S0', 'M1', 'btm', 'M2', 'top')])
+        self.assertEqual(len(lines), 1)
+        for word in ('S0', 'M1 btm', 'M2 top', 'dropped'):
+            self.assertIn(word, lines[0])
+        self.assertEqual(run.mounted_assignment_lines([]), [])

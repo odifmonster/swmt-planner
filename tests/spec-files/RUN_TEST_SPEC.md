@@ -80,9 +80,20 @@ The config's `state` block spells durations as hours or unit strings (see
    diameter; large sets on new machines, and small sets anywhere, give
    none.
 
+## 9. `standing_machines`
+
+1. **Lines** — one line per standing machine, in machine order, naming
+   the machine and its item and saying it is used only when needed; a
+   running machine gives none.
+
 ## 8. `cannot_run_on_machines`
 
 1. **Lines** — one line per machine whose current item's machine list
    leaves it out, in machine order, naming the machine and the item and
    saying it idles until changed; a machine on an item it can run gives
    none.
+
+## 10. `mounted_assignment_lines`
+
+1. **Lines** — one line per dropped record naming the set, where it was
+   assigned and where it is mounted; empty for no rows.

@@ -191,6 +191,18 @@ one number:
      same item's candidates targets a new machine. New machines are
      faster and easier to change over, so we'd rather route work to
      them whenever the candidate pool offers the choice.
+   - **Restart cost** — `w.restart` per move that targets a **standing**
+     machine (`Machine.standing`: stood down by the plant and not yet
+     given a job by this plan — see "Standing machines" in
+     `schedule/DESIGN.md`). The plant stands a machine down because it
+     is not needed; waking it costs crew time and is only worth it when
+     the demand cannot be met on time on the machines already running.
+     The weight is in the lateness units, so a restart is chosen exactly
+     when it saves more predicted lateness than it costs. It is charged
+     on the first move only — once the machine has a job it is running,
+     and later moves on it pay nothing here — so a woken machine is kept
+     busy rather than woken again. A standing machine never used stays
+     out of every output (it has no work, like an idle machine).
 
    - **Recovery cost** — a move that takes a machine out of the set
      able to make some items cheaply (a tape-out loses the old yarn's
@@ -221,6 +233,7 @@ CostWeights
   priority: float                                        # per whole higher-priority order per predicted day late (same units as lateness)
   level_loading: float                                   # per work-hour delta from earliest DP
   old_machine: float                                     # per move on a legacy machine when a new one is candidate-available
+  restart: float                                         # per move that wakes a standing machine (its first job); lateness units
   # changeover-capacity weight
   recovery: float                                        # per whole stranded order per predicted day late (same units as lateness)
 
@@ -1343,9 +1356,12 @@ Pounds come from the variant table, the knit-machine master and the greige
 styles: racks/hour = rpm × 60 / 480; lbs/rack = `rack_wt` / 100; a `time`
 bar's lbs = hours × racks/hour × lbs/rack × that bar's share of the weight
 (bars grouped by merge, the group holding bar 1 being the bottom), a `lbs`
-bar is taken as is; lbs left on the roll = the master's `tgt_wt` −
-racks_on_roll × lbs/rack, floored at 0 (a roll past target is about to be
-doffed and counts as between rolls).
+bar is taken as is; `init_roll_lbs` = racks_on_roll × lbs/rack, the lbs
+already **wound** on the roll (the old `racks-to-doff` form, racks left,
+is converted: the master's `tgt_wt` − racks left × lbs/rack, floored at
+0). The machines loader turns the wound lbs into the model's roll
+remaining from the item's `tgt_wt` (see File I/O in schedule/DESIGN.md;
+a roll past target is about to be doffed and counts as between rolls).
 Re-run it whenever the floor data is refreshed; it is the source of the
 `init_*` fields the machines loader reads. It writes the mounted sets in the
 bare set-number form; a machines file produced by the plant's own tooling
@@ -1368,7 +1384,10 @@ over when their bar next hangs; the mounted ones make their bar foreign, so
 the machine's first plan tapes them out — see "Blacklisted merges" in
 schedule/DESIGN.md). The load also echoes each assigned set applied to a
 bar as **hung** (`"status": "hung"`, and whether the first plan threads
-or unhangs it) and how many queued sets are staged at their machines
+or unhangs it), each assigned-sets record it **dropped because the
+machines file already has that set mounted** on a bar (the mounted set
+wins — see File I/O in schedule/DESIGN.md: the record names the set,
+where it was assigned and where it actually is) and how many queued sets are staged at their machines
 against still in the warehouse. The run's change-date advance (the
 load's own run-up) is that first plan, so a hung set that fits is
 threaded at the start date, before the planner decides anything. It also
@@ -1376,7 +1395,17 @@ echoes every large (40 in) set found mounted on or queued at an old
 machine, which cannot take it (see "Large beams" in schedule/DESIGN.md),
 and every machine found on an item it cannot run (the style's machine
 list leaves it out), which idles until the planner changes it (see
-"Inputs" above). The blacklist file is either a JSON list of merge codes
+"Inputs" above). The machines file's **`status`** (see File I/O in
+schedule/DESIGN.md) is applied at load too: machines on **`overhaul`**
+are left out of the run entirely — not in `Inputs.machines`, so not in
+any decision, ration, recovery route or output — and the load echoes
+them; machines **`standing`** are loaded with `standing=True`, echoed as
+such, idle to the change date, and join the candidate pool like any
+other machine but with the restart cost on their first move (above), so
+they are used only when needed and otherwise never appear in the plan.
+(A standing machine still counts in the recovery cost's cheap set for
+the yarn it holds: it can make those items after a restart.) The
+blacklist file is either a JSON list of merge codes
 as the export writes them (`"292286"`, `"292286BAD"`, `"299029-A"`, …) or
 an object with any of three lists:
 
@@ -1663,12 +1692,14 @@ resolve against; its `holidays` must also be inlined.
 ### Output
 
 After the plan the CLI prints the score, the unmet (item, week) count and
-— when any — the **assigned sets passed over**: per machine and bar, the
-plant-staged set a hang dropped from the bar's queue because its yarn did
-not fit the requirement or its merge is blacklisted, the requirement, the
-hang time and the reason
-(`PlanReport.queue_passed_over`, from `Machine.queue_passed_over`; see
-"Assigned sets and bar queues" in schedule/DESIGN.md). It then writes a
+— when any — the **assigned sets passed over**: per machine and bar, each
+plant-staged set a hang could not use — skipped because its yarn did not
+fit the requirement then (it stays queued for a later hang), or dropped
+because its merge is blacklisted or it is too large for the machine —
+with the requirement, the hang time, the reason and whether it was kept
+or dropped (`PlanReport.queue_passed_over`, from
+`Machine.queue_passed_over`; see "Assigned sets and bar queues" in
+schedule/DESIGN.md). It then writes a
 single Excel workbook at
 `<output_dir>/knit_plan_<YYYYMMDD>.xlsx` where the YYYYMMDD is the
 resolved `start_date`. Eight sheets:
@@ -1750,6 +1781,33 @@ resolved `start_date`. Eight sheets:
 - `prior_jobs` — only when the run had a prior plan: one row per prior
   job (`machine, prior_job, item, rolls, order, due_date, start, status,
   job_id, note`) — see "Sticking to the prior plan".
+- `unassign` — the plant-assigned sets the plan found at a machine and
+  could not use, which the person entering the schedule should
+  **unassign in the system** (and the floor should pull back): one row
+  per set, `machine, bar, set_no, merge, vendor, yarn, lbs, state,
+  location, when, bar_needed, reason`. Two kinds, told apart by `state`:
+  a **`queued`** set the plan **dropped** at a hang — blacklisted, or too
+  large for the machine — or **skipped** at one or more hangs because it
+  did not fit the bar's requirement then and **never hung by the plan's
+  end** (it is still in the bar's queue, `PlanReport.queues_left`; a
+  skipped set the machine did get to later is not listed — see
+  "Assigned sets and bar queues" in schedule/DESIGN.md). `location` is
+  the queue's `staged` / `inventory`, `bar_needed` the requirement at
+  the (last) hang that passed it over, `when` that hang's start, `reason`
+  the `PassedOver` reason, and `ends_on` the item the machine is on at
+  the end of the plan — a skipped set that fits that item may just be
+  waiting for a hang beyond the horizon, which the reader can judge; and a
+  **`hung`** set — hung on the bar but never threaded — the plan took off
+  with an `Unhang` because it did not fit the item the machine was given
+  (`when` the unhang's start, `bar_needed` the item's requirement,
+  `reason` `does not fit`; a blacklisted or too-large one says so). A set
+  the plan **threaded** is not here: it was used. Rows in machine order,
+  then by `when`. The sheet is always written, empty when there was
+  nothing to unassign, so its absence never has to be interpreted. Both
+  `plan infinite` and `plan retime` write the workbook, so the retimed
+  plan carries it too; the same sets are also echoed by the load
+  (`run.passed_over_lines`), listed in the retime text report and carried
+  on the schedule JSON's `Hanging.passed_over` / `Unhang` entries.
 
 When `--verbose` is set, the planner additionally builds and populates
 an in-memory `DebugLog` audit trail during the run — see "Verbose
@@ -1810,7 +1868,9 @@ the type's own fields: `Knit` → `item`, `lbs`, `variant`, `top_beam`,
 `bar`, `lbs`; `TapeOut` / `Unhang` / `Hanging` → `bars`, `top_beam`, `btm_beam` (null
 for an untouched bar), a `Hanging` also `passed_over` — a list of
 `{"bar", "set_no", "merge", "vendor", "desc", "lbs", "reason"}` for the
-queued sets it passed over — only when it passed any; `Threading` → `bars`;
+queued sets it **dropped** (blacklisted, too large) — and `skipped` — the
+same shape, reason `does not fit`, for the queued sets it looked past and
+left queued — each only when there were any; `Threading` → `bars`;
 the changeovers → `from_item`,
 `to_item`; `Doff` / `Idle` nothing more. A `Greige` reduces to its id; a
 `BeamSet` to `{"set_no", "merge", "vendor", "desc", "lbs"}` (`merge` and

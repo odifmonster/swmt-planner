@@ -2736,11 +2736,15 @@ class MountedSetDescriptionTests(unittest.TestCase):
         self.assertEqual((top.merge, top.desc.id), ('M1', '40D BLACK 1000X4'))
         self.assertTrue(top.fits(BeamSetDesc('40D BLACK 1000X4')))
 
-    def test_roll_in_progress_on_a_foreign_bar_is_zeroed(self):
-        foreign = _load([_entry(init_roll_lbs=50.0, init_top_set={'set_no': 'S2', 'merge': 'M2'})])['M1']
+    def test_roll_in_progress_is_the_wound_lbs(self):
+        fitting = _load([_entry(init_roll_lbs=30.0, init_top_set={'set_no': 'S2', 'merge': 'M1'})])['M1']
+        self.assertEqual(fitting.initial_status.roll_lbs_remaining, 70.0)
+        self.assertEqual(_load([_entry(init_roll_lbs=120.0)])['M1'].initial_status.roll_lbs_remaining, 0.0)
+        self.assertEqual(_load([_entry(init_roll_lbs=0.0)])['M1'].initial_status.roll_lbs_remaining, 0.0)
+        with self.assertRaises(ValueError):
+            _load([_entry(init_roll_lbs=-5.0)])
+        foreign = _load([_entry(init_roll_lbs=30.0, init_top_set={'set_no': 'S2', 'merge': 'M2'})])['M1']
         self.assertEqual(foreign.initial_status.roll_lbs_remaining, 0.0)
-        fitting = _load([_entry(init_roll_lbs=50.0, init_top_set={'set_no': 'S2', 'merge': 'M1'})])['M1']
-        self.assertEqual(fitting.initial_status.roll_lbs_remaining, 50.0)
 
 
 class AssignedSetRecordTests(unittest.TestCase):
@@ -2841,6 +2845,7 @@ _Q_BAD2 = BeamSet('QB2', 'MX', 900.0, BeamSetDesc('90D GREEN 1000X4'), _FIXTURE_
                   known_merge=True, assigned=True)
 _Q_OK = BeamSet('QO', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
                 known_merge=True, assigned=True)
+_RED_TOP_ITEM = _ITEM_D        # the style `_Q_BAD` (30D RED top) is staged for
 
 
 def _queued_machine(top_queue=(), btm_queue=(), top_lbs=BEAM_FLOOR_LBS, btm_lbs=300.0) -> Machine:
@@ -2856,48 +2861,49 @@ def _first_hang(plan, bar='top'):
 class PassOverTests(unittest.TestCase):
     """6.5"""
 
-    def test_dropped_and_recorded(self):
+    def test_skipped_and_recorded(self):
         plan = _queued_machine((_Q_BAD,)).plan_production(_ITEM_A, 100.0, 'schedule_tail')
         hang = _first_hang(plan)
         self.assertTrue(hang.top_beam.is_new)
-        self.assertEqual(hang.passed_over, (('top', _Q_BAD),))
+        self.assertEqual((hang.skipped, hang.passed_over), ((('top', _Q_BAD),), ()))
         self.assertEqual(len(plan.queue_passed_over), 1)
         p = plan.queue_passed_over[0]
-        self.assertEqual((p.bar, p.beam_set, p.wanted.physical.id, p.at),
-                         ('top', _Q_BAD, '40D BLACK 1000X4', hang.start))
+        self.assertEqual((p.bar, p.beam_set, p.wanted.physical.id, p.at, p.reason, p.dropped),
+                         ('top', _Q_BAD, '40D BLACK 1000X4', hang.start, 'does not fit', False))
         self.assertNotIn('QB', [b.set_no for b in plan.beam_sets_returned])
 
-    def test_next_queued_set_is_considered(self):
+    def test_first_usable_queued_set_is_taken(self):
         m = _queued_machine((_Q_BAD, _Q_OK))
         plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
         hang = _first_hang(plan)
         self.assertEqual(hang.top_beam.set_no, 'QO')
-        self.assertEqual(hang.passed_over, (('top', _Q_BAD),))
+        self.assertEqual((hang.skipped, hang.passed_over), ((('top', _Q_BAD),), ()))
         m.commit_plan(plan)
-        self.assertEqual(m.current_status.queue('top'), ())
+        self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])
 
     def test_fitting_front_untouched(self):
         m = _queued_machine((_Q_OK, _Q_BAD))
         plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
         hang = _first_hang(plan)
-        self.assertEqual((hang.top_beam.set_no, hang.passed_over), ('QO', ()))
+        self.assertEqual((hang.top_beam.set_no, hang.passed_over, hang.skipped), ('QO', (), ()))
         m.commit_plan(plan)
         self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])
 
-    def test_commit_keeps_it(self):
+    def test_commit_keeps_the_record_and_the_set(self):
         m = _queued_machine((_Q_BAD,), btm_queue=(_Q_BAD2,), btm_lbs=BEAM_FLOOR_LBS + 70.0)
         plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
         self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])   # purity
         m.commit_plan(plan)
         hang = _first_hang(plan)
-        self.assertEqual(m.current_status.queue('top'), ())
-        self.assertEqual(m.status_at(hang.end).queue('top'), ())
+        self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])
+        self.assertEqual([b.set_no for b in m.status_at(hang.end).queue('top')], ['QB'])
         self.assertEqual([p.beam_set.set_no for p in m.queue_passed_over], ['QB'])
-        # the second roll meets the btm bar near-empty: its re-thread passes QB2 over
+        # the second roll meets the btm bar near-empty: its re-thread skips QB2
         plan2 = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
         self.assertEqual([p.beam_set.set_no for p in plan2.queue_passed_over], ['QB2'])
         m.commit_plan(plan2)
         self.assertEqual([p.beam_set.set_no for p in m.queue_passed_over], ['QB', 'QB2'])
+        self.assertEqual([b.set_no for b in m.current_status.queue('btm')], ['QB2'])
 
     def test_drop_queued(self):
         s = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
@@ -2908,17 +2914,21 @@ class PassOverTests(unittest.TestCase):
         self.assertEqual([b.set_no for b in d.queue('top')], ['QO'])
         self.assertEqual((d.as_of, d.beam('top'), d.lbs_remaining('top'), d.current_item),
                          (_START, _TOP_BEAM, 200.0, _ITEM_A))
+        self.assertEqual([b.set_no for b in s.drop_queued('top', 'QO').queue('top')], ['QB'])
         with self.assertRaises(ValueError):
             d.drop_queued('btm')
+        with self.assertRaises(ValueError):
+            s.drop_queued('top', 'QX')
 
-    def test_applying_a_hang_with_passed_over(self):
+    def test_applying_a_hang(self):
         s = Status.create(as_of=_START, current_item=_ITEM_A, is_idle=True,
                           top_beam=None, top_lbs_remaining=0.0, top_threaded=False,
                           btm_beam=_BTM_BEAM, btm_lbs_remaining=300.0, btm_threaded=True,
-                          top_queue=(_Q_OK, _Q_BAD))
+                          top_queue=(_Q_BAD, _Q_OK, _Q_BAD2))
         hang = Hanging(start=_START, end=_START + timedelta(hours=1), bars='top',
-                       top_beam=_Q_OK, passed_over=(('top', _Q_BAD), ('top', _Q_BAD2)))
-        self.assertEqual(s.apply_activity(hang).queue('top'), ())
+                       top_beam=_Q_OK, passed_over=(('top', _Q_BAD2), ('btm', _Q_BAD2)),
+                       skipped=(('top', _Q_BAD),))
+        self.assertEqual([b.set_no for b in s.apply_activity(hang).queue('top')], ['QB'])
 
     def test_manual_assignment_still_locked(self):
         s9 = BeamSet('S9', 'M1', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
@@ -2931,6 +2941,18 @@ class PassOverTests(unittest.TestCase):
                                                           inventory=inv, assign={'top': ['S9']})
         self.assertEqual(_first_hang(plan).top_beam.set_no, 'S9')
         self.assertEqual([p.beam_set.set_no for p in plan.queue_passed_over], ['QB'])
+
+    def test_sets_come_back_after_the_switch(self):                  # 6.5.9
+        m = _queued_machine((_Q_BAD,))
+        m.commit_plan(m.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        self.assertEqual([b.set_no for b in m.current_status.queue('top')], ['QB'])
+        plan = m.plan_production(_RED_TOP_ITEM, 100.0, 'schedule_tail')
+        hang = _first_hang(plan)
+        self.assertEqual((hang.top_beam.set_no, hang.skipped, hang.passed_over), ('QB', (), ()))
+        self.assertTrue(any(isinstance(a, TapeOut) for a in plan.activities))
+        m.commit_plan(plan)
+        self.assertEqual(m.current_status.queue('top'), ())
+        self.assertEqual(m.current_status.beam('top').set_no, 'QB')
 
 
 # ---------------------------- PHASE 7 -----------------------------------
@@ -3790,3 +3812,117 @@ class CannotRunItemTests(unittest.TestCase):
         tos = [a for a in plan.activities if isinstance(a, _TapeOut6_9)]
         self.assertEqual([a.bars for a in tos], ['both'])
         self.assertEqual(sorted(b.lbs for b in plan.beam_sets_returned), [200.0, 300.0])
+
+
+# ---------------------------------------------------------------------------
+# 6.10 Standing machines and overhaul
+
+from swmtplanner.schedule import overhaul_machines as _overhaul_machines
+from swmtplanner.schedule import (
+    TapeOut as _TapeOut6_10, Hanging as _Hanging6_10, RunnerChange as _RunnerChange6_10,
+    StyleChange as _StyleChange6_10, PatternChange as _PatternChange6_10, Idle as _Idle6_10,
+)
+
+
+class StandingMachineTests(unittest.TestCase):
+    """6.10"""
+
+    def _standing(self, **kw):
+        kw.setdefault('init_top_lbs', 2000.0); kw.setdefault('init_btm_lbs', 3000.0)
+        return Machine('M1', _ITEM_A, _START, _TOP_BEAM, kw['init_top_lbs'], _BTM_BEAM,
+                       kw['init_btm_lbs'], _24_7, standing=True,
+                       init_roll_lbs_remaining=kw.get('roll', 0.0))
+
+    def test_flag_and_roll(self):                                       # 6.10.1
+        m = self._standing(roll=50.0)
+        self.assertTrue(m.standing)
+        self.assertEqual(m.initial_status.roll_lbs_remaining, 0.0)
+        self.assertTrue(m.initial_status.threaded('top') and m.initial_status.threaded('btm'))
+        self.assertEqual(m.initial_status.lbs_remaining('top'), 2000.0)
+        self.assertFalse(_make_machine().standing)
+
+    def test_no_run_up_no_fill(self):                                   # 6.10.2
+        m = self._standing()
+        self.assertEqual((m.whole_rolls_before_runout, m.next_runout), (0, _START))
+        self.assertFalse(m._can_fill_roll(m.current_status))
+        t = _START + timedelta(hours=5)
+        plan = m.run_until(t)
+        self.assertEqual(plan.jobs, ())
+        self.assertEqual([type(a) for a in plan.activities], [_Idle6_10])
+        self.assertEqual(plan.activities[-1].end, t)
+
+    def test_restart_is_a_plain_plan(self):                             # 6.10.3
+        m = self._standing()
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        kinds = [type(a) for a in plan.activities]
+        for bad in (_TapeOut6_10, _Hanging6_10, _RunnerChange6_10, _StyleChange6_10, _PatternChange6_10):
+            self.assertNotIn(bad, kinds)
+        self.assertEqual(kinds[0], Knit)
+        self.assertEqual(plan.activities[0].start, _START)
+        m.commit_plan(plan)
+        self.assertFalse(m.standing)
+        self.assertGreater(m.whole_rolls_before_runout, 0)
+
+    def test_loader(self):                                              # 6.10.4
+        standing = _load([_entry(status='standing', init_roll_lbs=50.0)])['M1']
+        self.assertTrue(standing.standing)
+        self.assertEqual(standing.initial_status.roll_lbs_remaining, 0.0)
+        for status in ('running', '', None):
+            e = _entry() if status is None else _entry(status=status)
+            self.assertFalse(_load([e])['M1'].standing)
+        entries = [_entry(), dict(_entry(), id='M2', status=' Overhaul ')]
+        self.assertEqual(list(_load(entries)), ['M1'])
+        self.assertEqual(_overhaul_machines(entries), ['M2'])
+        with self.assertRaises(ValueError) as cm:
+            _load([_entry(status='broken')])
+        self.assertIn('M1', str(cm.exception))
+
+
+# ---------------------------------------------------------------------------
+# 6.7.8 A mounted set wins over its assignment
+
+from swmtplanner.schedule import mounted_assignments as _mounted_assignments
+
+
+class MountedAssignmentTests(unittest.TestCase):
+    """6.7.8"""
+
+    def _rec(self, set_no, machine='M1', bar=2, **over):
+        rec = {'set_no': set_no, 'merge': 'M1', 'vendor': 'V', 'machine': machine, 'bar': bar,
+               'denier': 40, 'luster': 'SD', 'desc': 'POLY', 'ends': 1000, 'beams': 4, 'lbs': 900.0}
+        rec.update(over)
+        return rec
+
+    def test_queued_record_for_a_mounted_set_is_dropped(self):
+        cfg = [_entry(init_top_set={'set_no': 'S0', 'merge': 'M1'}), dict(_entry(), id='M2')]
+        for machine in ('M1', 'M2'):
+            recs = [self._rec('S0', machine=machine, bar=1), self._rec('S5', machine='M1', bar=1)]
+            machines = _load(cfg, assigned_sets=recs)
+            queued = {mid: [b.set_no for bar in ('top', 'btm') for b in m.initial_status.queue(bar)]
+                      for mid, m in machines.items()}
+            self.assertNotIn('S0', queued['M1'] + queued['M2'])
+            self.assertIn('S5', queued['M1'])
+            self.assertEqual(machines['M1'].initial_status.beam('top').set_no, 'S0')
+            self.assertTrue(machines['M1'].initial_status.threaded('top'))
+            self.assertEqual(_mounted_assignments(cfg, recs), [('S0', machine, 'btm', 'M1', 'top')])
+
+    def test_hung_record(self):
+        cfg = [_entry(init_top_set={'set_no': 'S0', 'merge': 'M1'})]
+        same = [self._rec('S0', bar=2, status='hung')]
+        m = _load(cfg, assigned_sets=same)['M1']
+        self.assertTrue(m.initial_status.threaded('top'))
+        self.assertEqual(m.initial_status.beam('top').set_no, 'S0')
+        self.assertEqual(_mounted_assignments(cfg, same), [('S0', 'M1', 'top', 'M1', 'top')])
+        other = [self._rec('S9', bar=2, status='hung')]
+        m = _load(cfg, assigned_sets=other)['M1']
+        self.assertFalse(m.initial_status.threaded('top'))
+        self.assertEqual(m.initial_status.beam('top').set_no, 'S9')
+        self.assertEqual(_mounted_assignments(cfg, other), [])
+
+    def test_overhaul_and_nothing_coinciding(self):
+        cfg = [dict(_entry(init_top_set={'set_no': 'S0', 'merge': 'M1'}), status='overhaul'),
+               dict(_entry(), id='M2')]
+        recs = [self._rec('S0', machine='M2', bar=1)]
+        self.assertEqual(_mounted_assignments(cfg, recs), [])
+        self.assertEqual([b.set_no for b in _load(cfg, assigned_sets=recs)['M2'].initial_status.queue('btm')], ['S0'])
+        self.assertEqual(_mounted_assignments([_entry()], [self._rec('S5', bar=1)]), [])

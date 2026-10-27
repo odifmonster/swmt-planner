@@ -40,7 +40,7 @@ __all__ = [
     'Inventory', 'InventoryView', 'build_inventory', 'worth_stocking',
     'ChangeoverCapacity', 'CapacityView', 'Resource', 'Period', 'Slot',
     'capacity_from_dict', 'DEFAULT_RESOURCES',
-    'read_machines', 'machines_from_list',
+    'read_machines', 'machines_from_list', 'overhaul_machines', 'mounted_assignments',
     'Assigned', 'SetAssignment', 'assign_sets',
 ]
 
@@ -56,6 +56,14 @@ def read_machines(
     assigned_sets: list[Any] | None = ...,
     blacklist: Blacklist | Collection[str] = ...,
 ) -> dict[str, Machine]: ...
+def overhaul_machines(cfg: list, source: str = ...) -> list[str]:
+    """Ids of the machines-file entries left out for `status: overhaul`."""
+    ...
+def mounted_assignments(cfg: list, assigned_sets: list | None, source: str = ...
+                        ) -> list[tuple[str, str, str, str, str]]:
+    """Assigned-sets records dropped because the machines file has their set
+    mounted: (set_no, assigned machine, assigned bar, machine on, bar on)."""
+    ...
 def machines_from_list(
     cfg: list[Any], *,
     start_date: datetime,

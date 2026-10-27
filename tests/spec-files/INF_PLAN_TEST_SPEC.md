@@ -351,6 +351,11 @@ new machines whose mounted sets are built explicitly.
    no cheap sets scores 0; `score_after_move` with only `recovery`
    non-zero equals `w.recovery × quantity`; the debug `cost_summary`
    carries a `recovery` row of kind `other`.
+11. **Restart cost** — with only `restart` non-zero, `score_after_move`
+    for a move on a standing machine exceeds the score of the same move
+    on a running twin by exactly `w.restart`; once a plan is committed
+    on the standing machine, a further move on it pays nothing; the
+    `cost_summary` carries a `restart` row of kind `other`.
 10. **An item the machine cannot run** — an old machine set up for `RY2`
     (which cannot run on it): any move on it has quantity 0 with nothing
     stranded; and with a new machine on `RY1` leaving yarn Y against
@@ -774,9 +779,11 @@ For any non-trivial scenario, verify:
    machine order giving machine, bar, hang time, the set number, its
    description and merge (`?` for an unknown merge), the requirement it
    failed and the reason (`does not fit` / `blacklisted`).
-3. **Schedule JSON** — a `Hanging` with `passed_over` serialises it as a
-   list of `{bar, set_no, merge, vendor, desc, lbs, reason}`; a `Hanging`
-   that passed nothing over has no `passed_over` key.
+3. **Schedule JSON** — a `Hanging` that skipped queued sets serialises
+   them as `skipped`, a list of `{bar, set_no, merge, vendor, desc, lbs,
+   reason}` with reason `does not fit`, and one that dropped sets as
+   `passed_over` in the same shape; a `Hanging` that did neither has
+   neither key.
 5. **Blacklisted sets** — a beam-set object carries `"blacklisted": true`
    when the set is, and no such key otherwise: the `TapeOut` that takes a
    blacklisted mounted set off a bar shows it, and a passed-over queued
@@ -790,6 +797,21 @@ For any non-trivial scenario, verify:
    beam-set objects (null for a bar that held nothing), and the xlsx
    `desc` for a knit reads `<item> [<variant>] top #<set> <merge> / btm
    #<set> <merge>`.
+7. **The `unassign` sheet** — `unassign_dataframe` has the columns
+   `machine, bar, set_no, merge, vendor, yarn, lbs, state, location, when,
+   bar_needed, reason, ends_on` and no rows for a plan that passed
+   nothing over and unhung nothing; for the 1.7 passed-over state (`QB`
+   skipped and still queued at the end) it has one `queued` row for `QB`
+   on `M1` top with its yarn, `inventory` location, the hang time,
+   `bar_needed` the bar's requirement, reason `does not fit` and
+   `ends_on` the machine's item; a skipped set a later plan hung is not
+   listed, while a dropped (blacklisted) queued set is, with its reason;
+   for the 1.7.6 hung machine one `hung` row for `SH` with no location,
+   the unhang's start, the item's top requirement and `does not fit`; a
+   blacklisted hung set reads `blacklisted`. Rows sort by machine then
+   `when`, and `write_plan_report_xlsx` writes the sheet even when empty.
+   `PlanReport.queues_left` holds each machine's remaining queues (empty
+   ones left out) and `item_at_end` each machine's final item.
 
 ### 1.8 Sticking to the prior plan
 

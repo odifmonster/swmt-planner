@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from swmtplanner.products import BeamSetDesc
 from swmtplanner.schedule import (
     Knit, Waste, Doff, TapeOut, Unhang, Hanging, Threading,
     StyleChange, RunnerChange, PatternChange, Idle,
@@ -23,6 +24,7 @@ __all__ = [
     'production_dataframe', 'xref_dataframe',
     'unmet_demand_dataframe',
     'late_orders_dataframe', 'changeovers_dataframe', 'prior_jobs_dataframe',
+    'unassign_dataframe',
     'write_plan_report_xlsx',
 ]
 
@@ -393,6 +395,72 @@ def changeovers_dataframe(report: 'PlanReport') -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+_UNASSIGN_COLUMNS = ['machine', 'bar', 'set_no', 'merge', 'vendor', 'yarn', 'lbs',
+                     'state', 'location', 'when', 'bar_needed', 'reason', 'ends_on']
+
+
+def unassign_dataframe(report: 'PlanReport') -> pd.DataFrame:
+    """The `unassign` sheet (see "Reporting" in DESIGN.md): the plant-assigned
+    sets the plan found at a machine and could not use, for the person
+    entering the schedule to unassign. One row per set: a `queued` set a
+    hang **dropped** (blacklisted, too large), or one a hang **skipped**
+    because it did not fit and that is still queued when the plan ends
+    (`report.queues_left` — a skipped set a later hang did use is not
+    listed), with the queue's `location`, the last such hang's requirement
+    and time and the `PassedOver` reason; or a `hung`, never-threaded set
+    an `Unhang` took off — its requirement and reason read from the item
+    of the machine's first job at or after the unhang (`does not fit`, or
+    `blacklisted` / `too large for this machine` when the set fits that
+    requirement but was removed anyway). `ends_on` is the item the machine
+    is on at the end of the plan, so a skipped set that fits it reads as
+    one waiting for a hang beyond the horizon. Machine order, then by
+    `when`; always the same columns, empty when nothing needs
+    unassigning."""
+    rows: list[dict] = []
+    for mid, passed in report.queue_passed_over.items():
+        left = {b.id for q in report.queues_left.get(mid, {}).values() for b in q}
+        last: dict[tuple[str, str], 'PassedOver'] = {}
+        for p in passed:
+            if p.dropped or p.beam_set.id in left:
+                last[(p.bar, p.beam_set.id)] = p          # the latest record wins
+        for p in last.values():
+            bs = p.beam_set
+            rows.append({
+                'machine': mid, 'bar': p.bar, 'set_no': bs.set_no, 'merge': bs.merge,
+                'vendor': bs.vendor, 'yarn': bs.desc.id, 'lbs': bs.lbs,
+                'state': 'queued', 'location': bs.location or 'inventory', 'when': p.at,
+                'bar_needed': p.wanted.physical.id, 'reason': p.reason,
+                'ends_on': report.item_at_end.get(mid),
+            })
+    for mid, acts in report.schedules.items():
+        jobs = report.jobs_by_machine.get(mid, ())
+        for a in acts:
+            if not isinstance(a, Unhang):
+                continue
+            nxt = next((j for j in sorted(jobs, key=lambda j: j.activities[0].start if j.activities else a.end)
+                        if j.activities and j.activities[0].start >= a.start), None)
+            cfg = nxt.item.configuration if nxt is not None else None
+            for bar, bs in (('top', a.top_beam), ('btm', a.btm_beam)):
+                if bs is None:
+                    continue
+                needed = (getattr(cfg, f'{bar}_beam') if cfg is not None else None)
+                if bs.blacklisted:
+                    reason = 'blacklisted'
+                elif needed is not None and bs.fits(BeamSetDesc(needed)):
+                    reason = 'too large for this machine'
+                else:
+                    reason = 'does not fit'
+                rows.append({
+                    'machine': mid, 'bar': bar, 'set_no': bs.set_no, 'merge': bs.merge,
+                    'vendor': bs.vendor, 'yarn': bs.desc.id, 'lbs': bs.lbs,
+                    'state': 'hung', 'location': None, 'when': a.start,
+                    'bar_needed': needed, 'reason': reason,
+                    'ends_on': report.item_at_end.get(mid),
+                })
+    rows.sort(key=lambda r: (r['machine'], r['when']))
+    return pd.DataFrame(rows, columns=_UNASSIGN_COLUMNS)
+
+
 def unmet_demand_dataframe(report: 'PlanReport') -> pd.DataFrame:
     """One row per `(item, week)` pair with positive remaining lbs in
     the post-plan safety view. Columns: `item`, `week_idx`,
@@ -497,9 +565,11 @@ def _activity_desc(a: 'Activity') -> str:
 def write_plan_report_xlsx(
     report: 'PlanReport', path: str | Path,
 ) -> None:
-    """Write `report` to a single Excel workbook at `path` with seven
-    sheets: `demand`, `schedule`, `collapsed_sched`, `production`, `xref`,
-    `unmet_demand`, and `late_orders`. Each corresponds to a DataFrame builder
+    """Write `report` to a single Excel workbook at `path`: `demand`,
+    `schedule`, `collapsed_sched`, `production`, `xref`, `unmet_demand`,
+    `late_orders`, `changeovers`, `unassign` (the assigned sets to take
+    back — always present) and, with a prior plan, `prior_jobs`. Each
+    sheet corresponds to a DataFrame builder
     in this module — split out so callers who want the data as DataFrames (for
     testing or for other render targets) can use those directly.
 
@@ -533,6 +603,9 @@ def write_plan_report_xlsx(
         )
         changeovers_dataframe(report).to_excel(
             writer, sheet_name='changeovers', index=False,
+        )
+        unassign_dataframe(report).to_excel(
+            writer, sheet_name='unassign', index=False,
         )
         if report.prior:
             prior_jobs_dataframe(report).to_excel(

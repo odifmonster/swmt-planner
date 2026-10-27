@@ -95,17 +95,18 @@ def choose_stock(cands: list[BeamSet]) -> BeamSet:
 
 @dataclass(frozen=True)
 class PassedOver:
-    """A plant-assigned set a hang dropped from a bar's queue because it did
-    not fit the bar's requirement at the time (see "Assigned sets and bar
+    """A plant-assigned set a hang could not use (see "Assigned sets and bar
     queues" in DESIGN.md): the bar, the set as the queue described it, the
-    requirement it failed, the hang's start and the reason: `'does not fit'`,
-    or `'blacklisted'` for a set whose merge the run blacklisted (see
-    "Blacklisted merges" in DESIGN.md)."""
+    requirement it failed, the hang's start, the reason — `'does not fit'`
+    (the set was **skipped** and stays queued for a later hang),
+    `'blacklisted'` or `'too large for this machine'` (the set was
+    **dropped** from the queue) — and `dropped` saying which."""
     bar: Literal['top', 'btm']
     beam_set: BeamSet
     wanted: BeamSetDesc
     at: datetime
     reason: str = 'does not fit'
+    dropped: bool = False
 
 
 class UnhungAssignments(ValueError):
@@ -165,31 +166,34 @@ class _PlanCtx:
              working: 'Status | None' = None,
              prev: 'BeamSet | None' = None) -> BeamSet:
         """The set to hang on `bar` for `desc` at `at`, in order of
-        precedence: (1) the front of the bar's **queue** on `working` — the
-        set the plant has already assigned to that bar and not yet threaded
-        — when it fits `desc` and has been received by `at`; it is locked
-        in, so a caller assignment for this hang must be None or that set's
-        number (else `ValueError`); (2) a set number the caller assigned for
-        `bar` (`plan_production(assign=)`; must be in stock under `desc`,
-        available and not already taken — else `ValueError`); (3) a stock
-        set that is available and not already taken in this plan, chosen
-        by `choose_stock` for continuity with `prev`, the set coming off the
-        bar; (4) an invented set. See "Beam-set inventory" in DESIGN.md.
-        A queue front that does not fit `desc` is expected to have been
-        passed over already (`pass_over`), so it is never hung here."""
+        precedence: (1) the first **usable** set in the bar's queue on
+        `working` — the sets the plant has already assigned to that bar and
+        not yet threaded, in queue order: the first that fits `desc` and
+        that the machine accepts — when it has been received by `at`; it is
+        locked in, so a caller assignment for this hang must be None or that
+        set's number (else `ValueError`); (2) a set number the caller
+        assigned for `bar` (`plan_production(assign=)`; must be in stock
+        under `desc`, available and not already taken — else `ValueError`);
+        (3) a stock set that is available and not already taken in this
+        plan, chosen by `choose_stock` for continuity with `prev`, the set
+        coming off the bar; (4) an invented set. See "Beam-set inventory"
+        in DESIGN.md. Queued sets ahead of the usable one are expected to
+        have been passed over already (`pass_over`): skipped and left
+        queued when they merely do not fit, dropped when blacklisted or too
+        large."""
         queue = self.assigned.get(bar)
         set_no = queue.popleft() if queue else None   # None = "not this hang"
         if working is not None:
-            staged = working.queue(bar)
-            if staged and staged[0].fits(desc) and staged[0].available_at(at):
-                front = staged[0]
-                if set_no is not None and set_no != front.set_no:
+            usable = next((b for b in working.queue(bar)
+                           if b.fits(desc) and self.accepts(b)), None)
+            if usable is not None and usable.available_at(at):
+                if set_no is not None and set_no != usable.set_no:
                     raise ValueError(
-                        f'set {front.set_no!r} is assigned to the {bar} bar by '
+                        f'set {usable.set_no!r} is assigned to the {bar} bar by '
                         f'the plant and hangs at {at.isoformat()}; it cannot be '
                         f'replaced by {set_no!r}'
                     )
-                return front                     # popped by Status on hang
+                return usable                    # removed from the queue by Status on hang
         if set_no is not None:
             return self._take_assigned(set_no, desc, at, bar)
         cands = [b for b in self.inventory.get(desc.physical, ())
@@ -200,21 +204,25 @@ class _PlanCtx:
 
     def pass_over(self, working: 'Status', bar: Literal['top', 'btm'],
                   desc: BeamSetDesc, at: datetime) -> 'Status':
-        """Drop from `bar`'s queue on `working` every front set that does not
-        fit `desc` — the plant staged it for a bar that now needs other
-        yarn, or its merge is blacklisted and it fits nothing — recording
-        each as a `PassedOver` with the reason; returns the status with the
-        queue so trimmed (unchanged when the front fits or the queue is
-        empty). The set stays at the machine physically, so it does not
-        return to stock."""
-        while working.queue(bar) and not (working.queue(bar)[0].fits(desc)
-                                          and self.accepts(working.queue(bar)[0])):
-            front = working.queue(bar)[0]
-            reason = ('blacklisted' if front.blacklisted
-                      else 'does not fit' if not front.fits(desc)
-                      else 'too large for this machine')
-            self.passed.append(PassedOver(bar, front, desc, at, reason=reason))
-            working = working.drop_queued(bar)
+        """Walk `bar`'s queue on `working` up to the first set the hang can
+        use (fits `desc`, accepted by the machine), recording each set ahead
+        of it as a `PassedOver`: one that merely does not fit this hang's
+        requirement is **skipped** — it stays queued, in place, for a later
+        hang it fits (the plant staged it for the style the machine goes to
+        next) — while a blacklisted or too-large one can never be used here
+        and is **dropped** from the queue (`Status.drop_queued`). Returns the
+        status with the drops applied (unchanged when the front is usable or
+        the queue is empty). A passed-over set stays at the machine
+        physically, so it does not return to stock."""
+        for front in list(working.queue(bar)):
+            if front.fits(desc) and self.accepts(front):
+                break
+            if front.blacklisted or not self.accepts(front):
+                reason = 'blacklisted' if front.blacklisted else 'too large for this machine'
+                self.passed.append(PassedOver(bar, front, desc, at, reason=reason, dropped=True))
+                working = working.drop_queued(bar, front.set_no)
+            else:
+                self.passed.append(PassedOver(bar, front, desc, at, reason='does not fit'))
         return working
 
     def _take(self, beam_set: BeamSet) -> BeamSet:
@@ -326,12 +334,16 @@ class Machine(HasID[str]):
         init_btm_queue: Sequence[BeamSet] = (),
         init_top_threaded: bool = True,
         init_btm_threaded: bool = True,
+        standing: bool = False,
     ) -> None:
         if init_roll_lbs_remaining < 0:
             raise ValueError('init_roll_lbs_remaining must be non-negative')
         self._id = id
         self._workcal = workcal
         self._is_new = is_new
+        # A machine the plant has stood down: not knitting until a plan puts
+        # a job on it — see "Standing machines" in DESIGN.md.
+        self._standing = standing
         self._init_variant = init_variant
         self._variant_map = variant_map
         # A machine begins threaded and running the init item on both bars,
@@ -343,14 +355,14 @@ class Machine(HasID[str]):
         # A bar the plant has hung but not threaded (`init_*_threaded`
         # False) likewise carries no roll in progress — see "Hung bars".
         # So does a set the machine cannot take at all (a large beam on an
-        # old machine — see "Large beams"), and a machine on an item it
-        # cannot run (see "An item the machine cannot run").
+        # old machine — see "Large beams"), a machine on an item it cannot
+        # run (see "An item the machine cannot run") and a standing machine.
         cfg = init_item.configuration
         foreign = (not init_top_beam.fits(BeamSetDesc(cfg.top_beam))
                    or not init_btm_beam.fits(BeamSetDesc(cfg.btm_beam))
                    or not self.accepts(init_top_beam) or not self.accepts(init_btm_beam)
                    or not init_top_threaded or not init_btm_threaded
-                   or not init_item.can_run_on_mchn(id))
+                   or not init_item.can_run_on_mchn(id) or standing)
         self._initial_status = Status.create(
             as_of=start,
             current_item=init_item,
@@ -408,6 +420,14 @@ class Machine(HasID[str]):
     @property
     def current_status(self) -> Status:
         return self._current_status
+
+    @property
+    def standing(self) -> bool:
+        """Whether the machine is stood down and still has no job: True for
+        one constructed `standing=True` until a plan with a job is committed
+        on it (see "Standing machines" in DESIGN.md). While True it knits
+        nothing: no run-up, no fill, `run_until` idles it."""
+        return self._standing and not self._jobs
 
     @property
     def can_run_current_item(self) -> bool:
@@ -533,7 +553,8 @@ class Machine(HasID[str]):
             return None
         item = s.current_item
         rate = (self._rate(item)
-                if item.id != 'NONE' and item.can_run_on_mchn(self._id) else 0.0)
+                if item.id != 'NONE' and item.can_run_on_mchn(self._id)
+                and not self.standing else 0.0)
         if rate <= 0.0:
             hours = self._workcal.get_work_hours_between(s.as_of, t)
             if hours <= 0.0:
@@ -615,8 +636,9 @@ class Machine(HasID[str]):
         holds no usable yarn for the item and so allows no whole roll of it;
         the preamble meets the set with its real lbs (see "Foreign bars" in
         DESIGN.md). `(0, 0)` outright for an item the machine cannot run
-        (see "An item the machine cannot run"), whatever its sets."""
-        if not working.current_item.can_run_on_mchn(self._id):
+        (see "An item the machine cannot run") or a standing machine (see
+        "Standing machines"), whatever its sets."""
+        if self.standing or not working.current_item.can_run_on_mchn(self._id):
             return 0.0, 0.0
         cfg = working.current_item.configuration
         out = []
@@ -1392,15 +1414,18 @@ class Machine(HasID[str]):
         def prev(bar: Literal['top', 'btm']) -> 'BeamSet | None':
             return working.beam(bar) or ctx.removed.get(bar)
 
-        # Queued sets that do not fit the bar's requirement are passed over
-        # (dropped from the queue and recorded) before the pick; the hang
-        # carries them so applying it drops them from any status too.
+        # Queued sets ahead of the first usable one are passed over before
+        # the pick: skipped (left queued) when they merely do not fit this
+        # hang, dropped when blacklisted or too large. The hang carries the
+        # dropped ones so applying it drops them from any status too, and
+        # the skipped ones for the record.
         first = len(ctx.passed)
         if bars in ('top', 'both'):
             working = ctx.pass_over(working, 'top', BeamSetDesc(cfg.top_beam), start)
         if bars in ('btm', 'both'):
             working = ctx.pass_over(working, 'btm', BeamSetDesc(cfg.btm_beam), start)
-        passed = tuple((p.bar, p.beam_set) for p in ctx.passed[first:])
+        passed = tuple((p.bar, p.beam_set) for p in ctx.passed[first:] if p.dropped)
+        skipped = tuple((p.bar, p.beam_set) for p in ctx.passed[first:] if not p.dropped)
         top_beam = (ctx.pick(BeamSetDesc(cfg.top_beam), start, 'top', working,
                              prev('top'))
                     if bars in ('top', 'both') else None)
@@ -1409,7 +1434,7 @@ class Machine(HasID[str]):
                     if bars in ('btm', 'both') else None)
         emitted.append(Hanging(
             start=start, end=end, bars=bars,
-            top_beam=top_beam, btm_beam=btm_beam, passed_over=passed,
+            top_beam=top_beam, btm_beam=btm_beam, passed_over=passed, skipped=skipped,
         ))
         return working.apply_activity(emitted[-1])
 

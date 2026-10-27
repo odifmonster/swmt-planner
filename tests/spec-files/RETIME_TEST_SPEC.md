@@ -81,14 +81,22 @@ A prior plan of three jobs on one machine: `A` × 2 (order `P1@A`),
     the `B` ticket is accepted as an early change, the unfinished `A`
     roll is dropped and described in `early` (count, item, order, the
     ticket), `consumed` counts the `A` roll and the `B` roll, and
-    remaining is `B × 1`, `A × 1`. A ticket for an item two jobs ahead
-    (a four-job plan `A, B, C, A` with tickets `A`, `C`) is a wrong
-    style, not an early change.
+    remaining is `B × 1`, `A × 1`. A ticket for an item **two jobs
+    ahead** (a four-job plan `A, B, C, A` with tickets `A`, `C`) is an
+    early change too: the rest of `A` and the whole `B` job are dropped,
+    one `early` entry each, and remaining is `C × 0` after the ticket
+    (the `C` roll consumed) then `A × 1`. A ticket for an item the plan
+    never has again on the machine is still a wrong style.
 7b. **Early change per the status** — no tickets, status on `B`
     (the plan expected `A`, nothing consumed): the `A` job's rolls are
     dropped with `early` saying `per the status`, the run-up then
     consumes `B` rolls as in 9, and the machine is replayable; a status
-    on `C` two jobs ahead is a wrong style.
+    on `C` two jobs ahead (plan `A, B, C`) drops `A` and `B` the same
+    way and leaves `C` remaining. With the plan `A, A', B` — two
+    consecutive jobs on `A`, as the load's run-up job and the planned
+    job are — a status on `B` drops both `A` jobs. A status on an item
+    the plan never has again is a wrong style. When the plan has the
+    item twice (`A, B, C, B`), a status on `B` reaches the first `B`.
 8. **The status must match** — with no tickets, a status item `C` (the
    plan expected `A` first, and `C` is not the next job either) is a
    wrong style with the status named in the message.
@@ -223,3 +231,8 @@ the test (built with `schedule_json`-shaped dicts) placing `A × 2` then
    one `PassedOver` prints it under `ASSIGNED SETS PASSED OVER` with the
    set, its description and merge and the requirement; a result with no
    report (the text tests' fixtures) prints `none` there.
+6. **Overhaul and standing** — a result with `overhaul = [('B4', 7)]`
+   prints a `machines on overhaul` line naming `B4` and its 7 rolls left
+   in the prior plan under the header; a position whose `standing` is
+   True carries `(standing at the status)` on its line; neither appears
+   otherwise.

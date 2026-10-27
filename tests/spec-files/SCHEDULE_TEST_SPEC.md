@@ -926,9 +926,11 @@ Each case loads one machine on `_ITEM_A` and inspects
 4. **Recipe merge** — a machine named by variant whose recipe supplies the
    merge (through `variant_map.masters`) describes the bar with that
    merge's yarn, which fits by construction.
-5. **Roll in progress on a foreign bar** — `init_roll_lbs = 300` with the
-   top set foreign (case 2, merge `M2`): `initial_status.roll_lbs_remaining
-   == 0`; with a fitting set it is 300.
+5. **Roll in progress** — the file's `init_roll_lbs` is the lbs
+   **wound**: `init_roll_lbs = 30` on `_ITEM_A` (target 100) gives
+   `initial_status.roll_lbs_remaining == 70`, `120` (over the target) and
+   `0` give 0, and a negative value raises `ValueError`; with the top set
+   foreign (case 2, merge `M2`) it is 0 whatever was wound.
 
 ### 6.3 Assigned-set records (`machines_from_list`, `assigned_sets`)
 
@@ -983,33 +985,45 @@ Machines built with `init_top_queue` holding sets of the
 `machine_tests.py` fixtures; `Q_BAD` is a `30D RED 1000X4` set, `Q_OK` a
 `40D BLACK 1000X4` one, both `assigned`.
 
-1. **Dropped and recorded** — a top queue `(Q_BAD,)` and a plan that
+1. **Skipped and recorded** — a top queue `(Q_BAD,)` and a plan that
    re-threads the top (the top run down to the floor): the `Hanging`
    mounts the automatic pick (stock, or an invented set), its
-   `passed_over == (('top', Q_BAD),)`, and `plan.queue_passed_over` holds
-   one `PassedOver` with `bar 'top'`, `beam_set Q_BAD`, `wanted` the
-   item's top requirement and `at` the hang's start. `beam_sets_returned`
-   does not list `Q_BAD`.
-2. **The next queued set is considered** — queue `(Q_BAD, Q_OK)`: the hang
-   mounts `Q_OK`, passes over only `Q_BAD`, and the status after the
-   hang has an empty top queue.
+   `skipped == (('top', Q_BAD),)` and `passed_over == ()`, and
+   `plan.queue_passed_over` holds one `PassedOver` with `bar 'top'`,
+   `beam_set Q_BAD`, `wanted` the item's top requirement, `at` the
+   hang's start, reason `does not fit` and `dropped` False.
+   `beam_sets_returned` does not list `Q_BAD`.
+2. **The first usable queued set is taken** — queue `(Q_BAD, Q_OK)`: the
+   hang mounts `Q_OK`, skips only `Q_BAD`, and after `commit_plan` the
+   top queue still holds `Q_BAD` alone.
 3. **A fitting front is untouched** — queue `(Q_OK, Q_BAD)`: `Q_OK` is
    hung, nothing is passed over, `Q_BAD` stays queued.
-4. **Commit keeps it** — after `commit_plan`, `current_status.queue('top')`
-   no longer holds `Q_BAD`, `status_at(hang end)` agrees, and
-   `Machine.queue_passed_over` holds the record; a second plan on the
-   machine does not report it again. Two commits that each pass a set
-   over accumulate in commit order.
+4. **Commit keeps the record, the set stays** — after `commit_plan`,
+   `current_status.queue('top')` still holds `Q_BAD`, `status_at(hang
+   end)` agrees, and `Machine.queue_passed_over` holds the record; a
+   second plan that hangs that bar again records it again. Two commits
+   that each pass a set over accumulate in commit order.
 5. **Purity** — `plan_production` leaves `current_status.queue('top')`
    unchanged until committed.
 6. **`Status.drop_queued`** — drops the front and nothing else (`as_of`,
-   bars, item unchanged); raises `ValueError` on an empty queue.
-7. **Applying a `Hanging` with `passed_over`** removes the named sets
-   from their bars' queues wherever they sit, and then pops the front if
-   it is the set hung; a set already absent is a no-op.
+   bars, item unchanged), or with `set_no` that set wherever it sits;
+   raises `ValueError` on an empty queue or an absent set number.
+7. **Applying a `Hanging`** removes its `passed_over` sets from their
+   bars' queues wherever they sit and the set it hung from its bar's
+   queue wherever that sat, and leaves its `skipped` sets queued; a set
+   already absent is a no-op.
 8. **Manual assignment still locked** — with `Q_OK` at the front, an
    `assign` naming another set raises as before; with `Q_BAD` at the
-   front, the assignment is honoured after the pass-over.
+   front, the assignment is honoured after the skip.
+9. **The sets come back after the switch** — a machine staged with a set
+   of the next style's yarn (`Q_BAD`, red top) that first runs `_ITEM_A`
+   (black top): the first plan's hang skips it; a later plan changing to
+   the red-top item tapes the black set out and hangs `Q_BAD` from the
+   queue, not a stock or invented set, after which the queue is empty.
+10. **Dropped sets** — a blacklisted or too-large queued set is dropped
+   at the hang: it is in `passed_over`, not `skipped`, its record has
+   `dropped` True, and after commit it is gone from the queue (see 6.6.4
+   and 6.8.4).
 
 ### 6.6 Blacklisted merges
 
@@ -1093,6 +1107,15 @@ sets.
    lbs 0, not threaded).
 7. **No job** — the `Unhang` is in neither the previous nor the new job's
    activities (like `Waste`); `replaced_job` is None.
+8. **A mounted set wins over its assignment** — with the machines file
+   naming `init_top_set` S0 on `M1` and the assigned-sets list queuing S0
+   for `M1` btm (and, in a second case, for another machine `M2`): S0 is
+   queued nowhere, `M1`'s top is threaded with S0, and
+   `mounted_assignments` lists `('S0', 'M1', 'btm', 'M1', 'top')` (resp.
+   `M2`); a `"hung"` record naming S0 on `M1` top is dropped too and the
+   bar stays threaded, while a `"hung"` record naming another set S9 on
+   that bar still replaces S0; an `overhaul` entry's sets are not
+   mounted for this purpose; nothing is dropped when no set coincides.
 
 ### 6.8 Large beams
 
@@ -1151,6 +1174,31 @@ _ITEM_X)` — the fitting `_TOP_BEAM` / `_BTM_BEAM` sets, threaded.
 5. **Other-yarn move tapes out the real sets** — `plan_production(_ITEM_U,
    1 roll, 'schedule_tail')`: a `TapeOut('both')` and
    `beam_sets_returned` holding the two sets with 200 and 300 lbs.
+
+### 6.10 Standing machines and overhaul
+
+`Machine(standing=True)`, `Machine.standing`, the machines file's
+`status` and `overhaul_machines` ("Standing machines" and File I/O in
+`schedule/DESIGN.md`). Fixtures: `_make_machine(standing=True)` on
+`_ITEM_A` with full bars; the Phase 6 loader fixtures.
+
+1. **Flag and roll** — `standing` is True; `init_roll_lbs_remaining = 50`
+   comes out as `initial_status.roll_lbs_remaining == 0`, the bars
+   threaded with their lbs; a machine built without the flag is not
+   standing.
+2. **No run-up, no fill** — `whole_rolls_before_runout == 0`,
+   `next_runout == start`, `_can_fill_roll` False; `run_until(t)` is one
+   `Idle` to `t` with no jobs.
+3. **Restart is a plain plan** — `plan_production(_ITEM_A, 1 roll,
+   'schedule_tail')` on the current item has no changeover, tape-out or
+   hang: it knits straight away; after `commit_plan`, `standing` is
+   False and a second plan on the machine runs up as usual.
+4. **Loader** — an entry with `"status": "standing"` builds a standing
+   machine with `init_roll_lbs` ignored; `"running"`, a missing or empty
+   status build a running one; `"overhaul"` (any case, trimmed) leaves
+   the entry out of the returned dict and `overhaul_machines` lists its
+   id (normalised); any other value raises `ValueError` naming the
+   machine.
 
 ## Phase 7 — Assigning sets after planning
 

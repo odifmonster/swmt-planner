@@ -27,7 +27,7 @@ from swmtplanner.products import (
 )
 from swmtplanner.demand import read_rls_items, rls_items_from_list
 from swmtplanner.schedule import (
-    read_machines, machines_from_list, build_inventory,
+    read_machines, machines_from_list, overhaul_machines, mounted_assignments, build_inventory,
     capacity_from_dict,
 )
 from swmtplanner.support import load_workcal, workcal_from_dict, planning_mode
@@ -429,6 +429,10 @@ class Inputs:
     for quality, normalised (`products.normalize_blacklist`); the loaded sets
     any of them names are stamped `blacklisted` (see "Blacklisted merges" in
     schedule/DESIGN.md)."""
+    overhaul: tuple[str, ...] = ()
+    """The machines the machines file put on `overhaul`, left out of
+    `machines` (see File I/O in schedule/DESIGN.md); the retimer reports
+    the prior plan's rolls on them."""
 
 
 def prior_commits(prior_jobs: 'Mapping[str, list[Any]]') -> 'dict[str, list[PriorCommit]]':
@@ -630,23 +634,36 @@ def load_inputs(
     )
     echo(f'  loaded {len(rls_items)} rls item(s)')
 
-    machine_dict = _resolve(
-        cli_value=overrides.get('machines'), config_value=cfg['machines'],
-        config_dir=config_dir,
-        file_loader=lambda p: read_machines(
-            p, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
-            variant_masters=variant_masters, variant_map=variant_map,
-            beam_sets=beam_sets, assigned_sets=assigned_sets, blacklist=blacklist,
-        ),
-        inline_loader=lambda d, source: machines_from_list(
+    # Machines the file puts on `overhaul` are left out by the loader; their
+    # ids are kept to echo and for the retimer (see File I/O in
+    # schedule/DESIGN.md).
+    overhaul: list[str] = []
+
+    mounted_rows: list = []
+
+    def _machines(d, source):
+        overhaul.extend(overhaul_machines(d, source))
+        mounted_rows.extend(mounted_assignments(d, assigned_sets, source))
+        return machines_from_list(
             d, start_date=sd, workcal=wc, greige_by_id=greige_by_id,
             variant_masters=variant_masters, variant_map=variant_map,
             beam_sets=beam_sets, assigned_sets=assigned_sets, source=source,
             blacklist=blacklist,
-        ),
+        )
+
+    machine_dict = _resolve(
+        cli_value=overrides.get('machines'), config_value=cfg['machines'],
+        config_dir=config_dir,
+        file_loader=lambda p: _machines(json.load(open(p)), f'machines file at {str(p)!r}'),
+        inline_loader=_machines,
         label='machines', echo=echo,
     )
-    echo(f'  loaded {len(machine_dict)} machine(s)')
+    echo(f'  loaded {len(machine_dict)} machine(s)'
+         + (f', {len(overhaul)} on overhaul left out: {", ".join(overhaul)}' if overhaul else ''))
+    for line in standing_machines(machine_dict):
+        echo(line)
+    for line in mounted_assignment_lines(mounted_rows):
+        echo(line)
     for line in hung_on_machines(machine_dict):
         echo(line)
     for line in blacklisted_on_machines(machine_dict):
@@ -729,7 +746,7 @@ def load_inputs(
         variant_masters=variant_masters, variant_map=variant_map,
         inventory=inventory, workcal=wc, rls_items=rls_items,
         machines=machine_dict, weights=cost_weights, capacity=capacity,
-        prior_jobs=prior, blacklist=blacklist,
+        prior_jobs=prior, blacklist=blacklist, overhaul=tuple(overhaul),
     )
 
 
@@ -775,6 +792,27 @@ def large_on_old_machines(machines: 'Mapping[str, Any]') -> list[str]:
     return lines
 
 
+def mounted_assignment_lines(rows: 'list[tuple[str, str, str, str, str]]') -> list[str]:
+    """The load's listing of assigned-sets records dropped because the
+    machines file already has the set mounted (`schedule.mounted_assignments`
+    rows): one line per record saying where it was assigned and where it
+    is — the assignment is stale and should be cleared. Empty when none."""
+    return [f'  assigned set {set_no} ({mid} {bar}) is already on {on} {on_bar}: assignment dropped'
+            for set_no, mid, bar, on, on_bar in rows]
+
+def standing_machines(machines: 'Mapping[str, Any]') -> list[str]:
+    """The load's listing of machines the plant has stood down (the machines
+    file's `status: standing`): one line per machine, in machine order —
+    it idles until the planner finds it worth a restart. Empty when there
+    are none."""
+    lines = []
+    for mid, m in sorted(machines.items()):
+        if m.standing:
+            item = m.initial_status.current_item
+            lines.append(f'  {mid:4} is standing on {item.id}: used only when needed '
+                         f'(restart cost on its first job)')
+    return lines
+
 def cannot_run_on_machines(machines: 'Mapping[str, Any]') -> list[str]:
     """The load's listing of machines found on an item they cannot run (the
     style's machine list leaves the machine out — see "An item the machine
@@ -815,15 +853,19 @@ def passed_over_lines(report: 'PlanReport') -> list[str]:
     """The run's listing of plant-assigned sets the plan passed over (see
     "Assigned sets and bar queues" in schedule/DESIGN.md): a header and one
     line per set — machine, bar, hang time, the set and its yarn, the
-    requirement it failed, the reason. Empty when nothing was passed over."""
+    requirement it failed, the reason, and whether the hang kept it in the
+    queue (skipped: it did not fit that hang) or dropped it (blacklisted,
+    too large). Empty when nothing was passed over."""
     rows = [(mid, p) for mid, ps in sorted(report.queue_passed_over.items()) for p in ps]
     if not rows:
         return []
-    lines = [f'  assigned sets passed over (did not fit the bar at the hang, or blacklisted): {len(rows)}']
+    lines = [f'  assigned sets passed over (skipped at a hang they did not fit and left queued, '
+             f'or dropped — blacklisted / too large): {len(rows)}']
     for mid, p in rows:
         lines.append(f'    {mid:4} {p.bar:3} {p.at:%m-%d %H:%M}  set {p.beam_set.set_no} '
                      f'({p.beam_set.desc.id}, merge {p.beam_set.merge or "?"})  '
-                     f'bar needed {p.wanted.physical.id}  {p.reason}')
+                     f'bar needed {p.wanted.physical.id}  {p.reason}'
+                     f'{" — dropped" if p.dropped else " — kept in the queue"}')
     return lines
 
 

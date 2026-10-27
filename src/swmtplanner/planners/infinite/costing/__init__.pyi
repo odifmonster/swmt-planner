@@ -28,6 +28,7 @@ class CostWeights:
     priority: float
     level_loading: float
     old_machine: float
+    restart: float
     recovery: float
     """Per whole stranded order per predicted day late (lateness units)."""
 

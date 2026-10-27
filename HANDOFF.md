@@ -40,7 +40,7 @@ no pytest). Run with:
 `PYTHONPATH=src:. .dev-venv/bin/python -m unittest tests.<module>`
 (e.g. `tests.machine_tests`).
 
-> **Suite state:** **694 tests pass, 4 skip** (`python -m unittest discover -s
+> **Suite state:** **713 tests pass, 4 skip** (`python -m unittest discover -s
 > tests -p '*_tests.py'`; as of 2026-10-15 on branch `knit-only`). The 4 skips are the **SQL Server-gated** classes —
 > `persist_run` end-to-end plus the `sqlload` read layer against a live store —
 > which probe a `SWMT_TEST_*` SQL Server test database in `setUpClass` and skip
@@ -333,6 +333,47 @@ Landed this session, each design → spec → tests (DESIGN.md sections named):
   changed, whole-day period; master.json has 6/day); a move that must wait
   for a slot knits its current item meanwhile as far as demand allows
   (`Fill`, `Job.fill`).
+- **`init_roll_lbs` is the lbs WOUND on the roll in progress** (2026-10-27,
+  `schedule/DESIGN.md` File I/O): the loader turns it into the model's
+  `init_roll_lbs_remaining` (`tgt_wt − wound`, floored at 0; `_roll_remaining`),
+  and `plan machines` now writes the wound lbs (converting the old
+  racks-left form). Before, the field was read as lbs left.
+- **A mounted set wins over its assignment** (2026-10-23, `schedule/DESIGN.md`
+  File I/O): assigned-sets records naming a set the machines file has
+  mounted are dropped at load (`_split_mounted`; `mounted_assignments`
+  lists them, `run.mounted_assignment_lines` echoes them) — a queued
+  record wherever it was assigned, and a `hung` record for the set the
+  file has on that same bar; a `hung` record naming another set still
+  replaces the file's.
+- **Machine `status`** (2026-10-22, `schedule/DESIGN.md` "Standing machines"
+  and File I/O; planner design "Restart cost"): the machines file's
+  `status` is `running` (default) / `standing` / `overhaul`. Overhaul
+  machines are left out of the run entirely (`overhaul_machines`,
+  `Inputs.overhaul`, echoed; the retimer reports their prior rolls).
+  Standing machines (`Machine.standing`: no run-up, no fill, idle to the
+  change date) join the candidate pool with a **`restart`** cost weight on
+  their first move — a NEW REQUIRED WEIGHT: the user must add `restart`
+  to the inline weights in master.json / retime.json (6400 suggested).
+  Echo `run.standing_machines`; manual `pending()` has `standing`.
+- **Retimer look-ahead** (2026-10-20, `planners/retime/DESIGN.md` "Where
+  each machine is"): a ticket or status on the item of *any* later job
+  is an early change — every job before it is dropped and recorded —
+  not only the very next job's; only an item the plan never has again
+  on the machine is a wrong style. Cause: O3 switched to 8154 early and
+  the plan's 4583 run was two jobs (run-up + planned).
+- **Queued sets are skipped, not dropped** (2026-10-20, `schedule/DESIGN.md`
+  "Assigned sets and bar queues"): a plant-assigned set that does not fit
+  a hang stays in the bar's queue for a later hang it fits (the hang
+  takes the first usable queued set — `_PlanCtx.pick` / `pass_over`,
+  `Hanging.skipped`, `PassedOver.dropped`); only blacklisted or too-large
+  sets are dropped. Cause: O3 staged for 8154 ran 4583 first and lost its
+  sets. `PlanReport.queues_left` / `item_at_end` feed the sheet below.
+- **`unassign` sheet** in the plan workbook (`report.unassign_dataframe`,
+  2026-10-19; `planners/infinite/DESIGN.md` Reporting): the assigned
+  sets the plan passed over at a hang (`queued`) or took off a bar
+  unthreaded (`hung`), with the bar's requirement and the reason — for
+  the person entering the schedule to unassign. Always written; both
+  `plan infinite` and `plan retime` produce it.
 - **Blacklisted merges, vendors and sets** (`schedule/DESIGN.md`
   "Blacklisted merges"): config `blacklist` — a JSON list of merge codes,
   or an object `{"merges", "vendors", "sets"}` (`products.Blacklist`,

@@ -17,6 +17,100 @@ if TYPE_CHECKING:
 __all__ = ['read_machines', 'machines_from_list']
 
 
+_MACHINE_STATUSES = ('running', 'standing', 'overhaul')
+
+
+def _machine_status(entry: dict, source: str) -> str:
+    """The entry's `status` (see File I/O in DESIGN.md): `running` (the
+    default), `standing` or `overhaul`, trimmed and lower-cased; any other
+    value raises `ValueError`."""
+    raw = entry.get('status')
+    status = 'running' if raw in (None, '') else str(raw).strip().lower()
+    if status not in _MACHINE_STATUSES:
+        raise ValueError(f"{source}: machine {entry.get('id')!r} has status {raw!r}; "
+                         f"expected one of {_MACHINE_STATUSES}")
+    return status
+
+
+def overhaul_machines(cfg: list, source: str = '<machines list>') -> list[str]:
+    """The ids of the entries `machines_from_list` leaves out because their
+    `status` is `overhaul` (normalised like the machine ids), in file order
+    — for the planners to echo."""
+    return [_norm_id(str(e['id'])) for e in cfg
+            if isinstance(e, dict) and _machine_status(e, source) == 'overhaul']
+
+
+def _roll_remaining(entry: dict, init_item: 'Greige', source: str) -> float:
+    """The roll-in-progress lbs the model wants (still to knit) from the
+    file's `init_roll_lbs`, which is the lbs already **wound** on it: the
+    item's target weight less the wound lbs, 0 when nothing is wound or the
+    roll is at or over its target (between rolls, or about to doff)."""
+    wound = float(entry.get('init_roll_lbs', 0.0) or 0.0)
+    if wound < 0:
+        raise ValueError(f"{source}: machine {entry.get('id')!r} init_roll_lbs must not be negative")
+    if wound <= 0:
+        return 0.0
+    return max(float(init_item.tgt_wt) - wound, 0.0)
+
+
+def _mounted_sets(cfg: list, source: str = '<machines list>') -> dict[str, tuple[str, str]]:
+    """`{set_no: (machine, bar)}` for every set the machines file reports
+    mounted (`init_top_set` / `init_btm_set`) on an entry the loader keeps
+    (not `overhaul`)."""
+    out: dict[str, tuple[str, str]] = {}
+    for entry in cfg:
+        if not isinstance(entry, dict) or _machine_status(entry, source) == 'overhaul':
+            continue
+        mid = _norm_id(str(entry['id']))
+        for bar, key in (('top', 'init_top_set'), ('btm', 'init_btm_set')):
+            set_no, _m, _v = _set_ref(entry.get(key), f'{source} {mid} {key}')
+            if set_no is not None:
+                out.setdefault(str(set_no), (mid, bar))
+    return out
+
+
+def _split_mounted(cfg: list, records: list, source: str = '<machines list>'
+                   ) -> tuple[list, list[tuple[str, str, str, str, str]]]:
+    """The assigned-sets `records` less those naming a set the machines file
+    already has mounted (see "A set the machines file already has on a bar
+    wins" in DESIGN.md): a queued record for a mounted set, wherever it was
+    assigned, and a `hung` record naming the set the file has on that very
+    bar. Returns `(kept, dropped)`, the dropped as `(set_no, assigned
+    machine, assigned bar, machine it is on, bar it is on)` in file order."""
+    mounted = _mounted_sets(cfg, source)
+    kept: list = []
+    dropped: list[tuple[str, str, str, str, str]] = []
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get('set_no') in (None, ''):
+            kept.append(rec)
+            continue
+        set_no = str(rec['set_no'])
+        where = mounted.get(set_no)
+        if where is None:
+            kept.append(rec)
+            continue
+        try:
+            n = int(rec.get('bar', 0))
+        except (TypeError, ValueError):
+            n = 0
+        bar = 'btm' if n == 1 else 'top'
+        mid = _norm_id(str(rec.get('machine', '')))
+        if _status_of(rec) == 'hung' and where != (mid, bar):
+            kept.append(rec)              # hung elsewhere: replaces that bar's set as usual
+            continue
+        dropped.append((set_no, mid, bar, where[0], where[1]))
+    return kept, dropped
+
+
+def mounted_assignments(cfg: list, assigned_sets: list | None,
+                        source: str = '<machines list>') -> list[tuple[str, str, str, str, str]]:
+    """The assigned-sets records `machines_from_list` drops because the
+    machines file already has their set mounted: `(set_no, assigned
+    machine, assigned bar, machine it is on, bar it is on)` each, in file
+    order — for the planners to echo."""
+    return _split_mounted(cfg, list(assigned_sets or []), source)[1]
+
+
 def machines_from_list(
     cfg: list[Any],
     *,
@@ -43,8 +137,10 @@ def machines_from_list(
     with ids `<machine id>-top` / `-btm` (or the mounted set's number,
     below), holding `init_top_lbs` / `init_btm_lbs` and available from
     `start_date`. The optional `init_roll_lbs` (default 0) is how many
-    lbs remain to complete the roll on the machine at `start_date`; the
-    planner always finishes that roll first. In planning mode
+    lbs are already **wound** on the roll in progress at `start_date`: the
+    model's roll remaining is the item's `tgt_wt` less that (0 for nothing
+    wound, or a roll at or over its target weight); the planner always
+    finishes that roll first. In planning mode
     (`support.planning_mode`) a non-empty bar's lbs is replaced by
     `planning_mode.BEAM_LBS`; an empty bar (0) stays empty.
     An entry may name the sets actually mounted, `init_top_set` /
@@ -93,13 +189,17 @@ def machines_from_list(
     if not isinstance(cfg, list):
         raise TypeError(f'{source} must be a list of machine objects')
     variant_masters = variant_masters or {}
-    queues, hung = _bar_queues(assigned_sets or [])
+    records, _dropped = _split_mounted(cfg, list(assigned_sets or []), source)
+    queues, hung = _bar_queues(records)
     out: dict[str, Machine] = {}
     for entry in cfg:
         if not isinstance(entry, dict):
             raise TypeError(
                 f'each entry in {source} must be an object; got {entry!r}'
             )
+        status = _machine_status(entry, source)
+        if status == 'overhaul':
+            continue                      # out of service: not a machine of this run
         item_name = str(entry['init_item'])
         init_variant = None
         if item_name in greige_by_id:
@@ -158,7 +258,9 @@ def machines_from_list(
             is_new=bool(entry['is_new']),
             init_variant=init_variant,
             variant_map=variant_map,
-            init_roll_lbs_remaining=float(entry.get('init_roll_lbs', 0.0)),
+            init_roll_lbs_remaining=(0.0 if status == 'standing'
+                                     else _roll_remaining(entry, init_item, source)),
+            standing=status == 'standing',
             init_top_queue=_queued_sets(queues.get((_norm_id(machine_id), 'top'), ()),
                                         item_cfg.top_beam, start, beam_sets,
                                         variant_map, source, blacklist),

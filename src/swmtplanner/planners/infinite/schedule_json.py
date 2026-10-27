@@ -85,8 +85,11 @@ def _activity(a: 'Activity', tz: tzinfo) -> dict[str, Any]:
         if isinstance(a, Hanging) and a.passed_over:
             out['passed_over'] = [
                 {'bar': bar, **_beam_set(bs),
-                 'reason': 'blacklisted' if bs.blacklisted else 'does not fit'}
+                 'reason': 'blacklisted' if bs.blacklisted else 'too large for this machine'}
                 for bar, bs in a.passed_over]
+        if isinstance(a, Hanging) and a.skipped:
+            out['skipped'] = [{'bar': bar, **_beam_set(bs), 'reason': 'does not fit'}
+                              for bar, bs in a.skipped]
     elif isinstance(a, Threading):
         out.update(bars=a.bars)
     elif isinstance(a, (StyleChange, RunnerChange, PatternChange)):

@@ -119,16 +119,24 @@ class Status:
         return self._evolve(self.as_of, is_idle=self.is_idle,
                             top={'beam': new_top}, btm={'beam': new_btm})
 
-    def drop_queued(self, bar: Bar) -> 'Status':
-        """This status without the front set of `bar`'s queue — a set a hang
-        passed over because it did not fit the bar's requirement (see
+    def drop_queued(self, bar: Bar, set_no: 'str | None' = None) -> 'Status':
+        """This status without one set of `bar`'s queue — the front, or the
+        set numbered `set_no` wherever it sits — a set a hang dropped
+        because it is blacklisted or too large for the machine (see
         "Assigned sets and bar queues" in DESIGN.md). Pure; `as_of` and
-        everything else unchanged. Raises on an empty queue."""
+        everything else unchanged. Raises when the queue is empty or holds
+        no such set."""
         q = self._queues[bar]
         if not q:
             raise ValueError(f'drop_queued: nothing is queued on {bar}')
+        if set_no is None:
+            rest = q[1:]
+        else:
+            rest = tuple(b for b in q if b.set_no != set_no)
+            if len(rest) == len(q):
+                raise ValueError(f'drop_queued: {set_no!r} is not queued on {bar}')
         return self._evolve(self.as_of, is_idle=self.is_idle,
-                            queues={**self._queues, bar: q[1:]})
+                            queues={**self._queues, bar: rest})
 
     @property
     def current_family(self) -> str:
@@ -178,10 +186,12 @@ class Status:
         )
 
     def _popped(self, activity: Hanging) -> 'dict[str, tuple[BeamSet, ...]]':
-        """The queues after `activity`: the sets the hang passed over
+        """The queues after `activity`: the sets the hang dropped
         (`activity.passed_over`) leave their bar's queue, then a bar that
-        hangs the front set of its queue consumes it; hanging any other set
-        leaves the queue alone."""
+        hangs one of its queued sets consumes it wherever it sat (a hang
+        takes the first usable queued set, which need not be the front);
+        hanging any other set leaves the queue alone, as do the sets the
+        hang `skipped`."""
         queues = dict(self._queues)
         for bar, dropped in activity.passed_over:
             queues[bar] = tuple(b for b in queues[bar] if b.id != dropped.id)
@@ -189,9 +199,8 @@ class Status:
             if activity.bars not in (bar, 'both'):
                 continue
             hung = getattr(activity, f'{bar}_beam')
-            q = queues[bar]
-            if q and hung is not None and hung.id == q[0].id:
-                queues[bar] = q[1:]
+            if hung is not None:
+                queues[bar] = tuple(b for b in queues[bar] if b.id != hung.id)
         return queues
 
     def apply_activity(self, activity: Activity) -> 'Status':

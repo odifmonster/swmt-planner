@@ -70,7 +70,7 @@ def _plan_job(job_id: str, item: str, order: str | None, rolls: int,
 _WEIGHTS = {k: 0.0 for k in (
     'lateness', 'priority', 'drainage', 'carrying', 'excess', 'tape_out_single',
     'tape_out_both', 'style_change', 'runner_change', 'pattern_change',
-    'idle_time', 'waste_lbs', 'level_loading', 'old_machine', 'recovery')}
+    'idle_time', 'waste_lbs', 'level_loading', 'old_machine', 'restart', 'recovery')}
 
 
 def _style(sid: str, top: str, machines=('M1', 'M2', 'M3')) -> dict:
@@ -339,13 +339,19 @@ class LocateTests(unittest.TestCase):
             self.assertIn(word, p.early[0])
         self.assertEqual(p.consumed, 3)
         self.assertEqual(_left(p), [('B', 1), ('A', 1)])
-        # two jobs ahead is a wrong style, not an early change
+        # two jobs ahead is an early change too: A's rest and all of B dropped
         four = [_pj(1, 'A', 'P1@A', 2), _pj(2, 'B', 'P1@B', 1), _pj(3, 'C', 'P1@C', 1),
                 _pj(4, 'A', 'P2@A', 1)]
         p2 = _locate([_tk('M1-1', _h(1), 'A'), _tk('M1-2', _h(2), 'C')], jobs=four,
                      status_item='C')
-        self.assertIsNotNone(p2.wrong_style)
-        self.assertEqual(p2.early, [])
+        self.assertIsNone(p2.wrong_style)
+        self.assertEqual(len(p2.early), 2)
+        self.assertIn('1 roll(s) of A', p2.early[0]); self.assertIn('1 roll(s) of B', p2.early[1])
+        self.assertEqual(p2.consumed, 4)             # A, A dropped, B dropped, C by the ticket
+        self.assertEqual(_left(p2), [('A', 1)])
+        # an item the plan never has again is still a wrong style
+        p3 = _locate([_tk('M1-1', _h(1), 'A'), _tk('M1-2', _h(2), 'Z')], jobs=four, status_item='Z')
+        self.assertIsNotNone(p3.wrong_style)
 
     def test_early_change_per_the_status(self):
         p = _locate([], status_item='B', run_up=1, in_progress=True)
@@ -356,8 +362,23 @@ class LocateTests(unittest.TestCase):
         self.assertEqual(p.consumed, 3)         # the two A rolls dropped, one B by the run-up
         self.assertEqual(_left(p), [('B', 1), ('A', 1)])
         self.assertTrue(p.replayable)
-        four = [_pj(1, 'A', 'P1@A', 2), _pj(2, 'B', 'P1@B', 1), _pj(3, 'C', 'P1@C', 1)]
-        self.assertIsNotNone(_locate([], status_item='C', jobs=four).wrong_style)
+        three = [_pj(1, 'A', 'P1@A', 2), _pj(2, 'B', 'P1@B', 1), _pj(3, 'C', 'P1@C', 1)]
+        p2 = _locate([], status_item='C', jobs=three)
+        self.assertIsNone(p2.wrong_style)
+        self.assertEqual([e.split(' dropped')[0] for e in p2.early],
+                         ['2 roll(s) of A (P1@A)', '1 roll(s) of B (P1@B)'])
+        self.assertEqual(_left(p2), [('C', 1)])
+        # the load's run-up job and the planned job on the same item: both dropped
+        split = [_pj(1, 'A', None, 1), _pj(2, 'A', 'P1@A', 1), _pj(3, 'B', 'P1@B', 3)]
+        p3 = _locate([], status_item='B', jobs=split, run_up=1, in_progress=True)
+        self.assertIsNone(p3.wrong_style)
+        self.assertEqual(len(p3.early), 2)
+        self.assertEqual(_left(p3), [('B', 2)])
+        # an item the plan never has again is a wrong style; a repeated item reaches its first run
+        self.assertIsNotNone(_locate([], status_item='Z', jobs=three).wrong_style)
+        twice = [_pj(1, 'A', 'P1@A', 2), _pj(2, 'B', 'P1@B', 1), _pj(3, 'C', 'P1@C', 1), _pj(4, 'B', 'P2@B', 2)]
+        p4 = _locate([], status_item='B', jobs=twice)
+        self.assertEqual(_left(p4), [('B', 1), ('C', 1), ('B', 2)])
 
     def test_status_must_match(self):
         p = _locate([], status_item='C')
@@ -789,3 +810,18 @@ class PassedOverTextTests(unittest.TestCase):
         self.assertIn('merge MX', block); self.assertIn('bar needed 40D WHT 1172X4', block)
         result.report = None
         self.assertIn('none', retime_text(result).split('ASSIGNED SETS PASSED OVER')[1].split('STEPS REPLAYED')[0])
+
+
+class OverhaulAndStandingTextTests(unittest.TestCase):
+    """5.6"""
+
+    def test_lines(self):
+        res = _result({'M1': Position('M1', 'A', remaining=[_pj(1, 'A', 'P1@A', 2)], standing=True)})
+        res.overhaul = [('B4', 7)]
+        text = retime_text(res)
+        self.assertIn('machines on overhaul', text)
+        self.assertIn('B4 (7 roll(s) left in the prior plan)', text)
+        self.assertIn('(standing at the status)', text)
+        plain = retime_text(_result({'M1': Position('M1', 'A', remaining=[_pj(1, 'A', 'P1@A', 2)])}))
+        self.assertNotIn('overhaul', plain)
+        self.assertNotIn('standing', plain)

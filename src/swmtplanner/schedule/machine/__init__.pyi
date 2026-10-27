@@ -45,14 +45,17 @@ def choose_stock(cands: list[BeamSet]) -> BeamSet:
 
 @dataclass(frozen=True)
 class PassedOver:
-    """A plant-assigned set a hang dropped from a bar's queue because it did
-    not fit the bar's requirement at the time, or is blacklisted."""
+    """A plant-assigned set a hang could not use: skipped (left queued for a
+    later hang) when it merely did not fit, dropped from the queue when
+    blacklisted or too large for the machine."""
     bar: Literal['top', 'btm']
     beam_set: BeamSet
     wanted: BeamSetDesc
     at: datetime
     reason: str = ...
-    """`'does not fit'` or `'blacklisted'`."""
+    """`'does not fit'`, `'blacklisted'` or `'too large for this machine'`."""
+    dropped: bool = ...
+    """True when the hang dropped the set from the queue; False for a skip."""
 
 
 class UnhungAssignments(ValueError):
@@ -122,7 +125,7 @@ class Status:
         """Sets assigned to `bar` and not yet threaded, next up first. A
         Hanging of the front set pops it."""
         ...
-    def drop_queued(self, bar: Literal['top', 'btm']) -> Status:
+    def drop_queued(self, bar: Literal['top', 'btm'], set_no: str | None = ...) -> Status:
         """This status without `bar`'s front queued set (a pass-over); pure.
         Raises ValueError on an empty queue."""
         ...
@@ -160,6 +163,7 @@ class Machine(HasID[str]):
         init_btm_queue: Sequence[BeamSet] = ...,
         init_top_threaded: bool = ...,
         init_btm_threaded: bool = ...,
+        standing: bool = ...,
     ) -> None:
         """`init_roll_lbs_remaining`: lbs still to knit on the roll in progress
         at `start` (0 = between rolls); the planner always finishes it first —
@@ -202,6 +206,11 @@ class Machine(HasID[str]):
     def schedule_tail(self) -> datetime: ...
     @property
     def next_runout(self) -> datetime: ...
+    @property
+    def standing(self) -> bool:
+        """True for a stood-down machine until a plan with a job is committed
+        on it: no run-up, no fill, `run_until` idles it."""
+        ...
     @property
     def can_run_current_item(self) -> bool:
         """Whether the machine may knit its current item (its style's machine

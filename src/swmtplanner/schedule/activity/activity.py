@@ -189,13 +189,16 @@ class Hanging(Activity):
     `Threading` replace the old single `BeamLoad`. The set comes from the
     inventory the plan was given, or is invented (`BeamSet.new`) when nothing
     suitable is in stock. `passed_over` lists, per bar, the plant-assigned
-    sets this hang dropped from that bar's queue because they did not fit
-    the requirement (see "Assigned sets and bar queues" in DESIGN.md);
-    applying the hang removes them from the queue."""
+    sets this hang **dropped** from that bar's queue (blacklisted, or too
+    large for the machine — see "Assigned sets and bar queues" in
+    DESIGN.md); applying the hang removes them from the queue. `skipped`
+    lists, per bar, the queued sets it looked past because they did not fit
+    this hang's requirement; they stay queued for a later hang."""
     bars: Literal['top', 'btm', 'both']
     top_beam: 'BeamSet | None' = None
     btm_beam: 'BeamSet | None' = None
     passed_over: 'tuple[tuple[Literal["top", "btm"], BeamSet], ...]' = ()
+    skipped: 'tuple[tuple[Literal["top", "btm"], BeamSet], ...]' = ()
     _count: int = field(default_factory=_HANGING_ID, init=False)
 
     @property

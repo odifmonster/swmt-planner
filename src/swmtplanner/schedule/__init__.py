@@ -20,7 +20,7 @@ from .capacity import (
     ChangeoverCapacity, CapacityView, Resource, Period, Slot,
     capacity_from_dict, DEFAULT_RESOURCES,
 )
-from .io import read_machines, machines_from_list
+from .io import read_machines, machines_from_list, overhaul_machines, mounted_assignments
 from .assign import Assigned, SetAssignment, assign_sets
 
 __all__ = [
@@ -37,6 +37,6 @@ __all__ = [
     'Inventory', 'InventoryView', 'build_inventory', 'worth_stocking',
     'ChangeoverCapacity', 'CapacityView', 'Resource', 'Period', 'Slot',
     'capacity_from_dict', 'DEFAULT_RESOURCES',
-    'read_machines', 'machines_from_list',
+    'read_machines', 'machines_from_list', 'overhaul_machines', 'mounted_assignments',
     'Assigned', 'SetAssignment', 'assign_sets',
 ]

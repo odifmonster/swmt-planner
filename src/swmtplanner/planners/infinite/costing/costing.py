@@ -64,6 +64,8 @@ class CostWeights:
     priority: float
     level_loading: float
     old_machine: float
+    # per move that wakes a standing machine (its first job) — lateness units
+    restart: float
     # changeover-capacity weight (Phase 5): the recovery cost
     recovery: float
 
@@ -256,6 +258,7 @@ class Costing:
         old_q = 1.0 if (
             ctx.new_machine_avail.get(move.item, False) and not machine.is_new
         ) else 0.0
+        restart_q = 1.0 if machine.standing else 0.0
 
         recovery_q, _strands = self.recovery_detail(state, move, ctx)
 
@@ -275,6 +278,7 @@ class Costing:
             ('priority', 'other', priority_q, w.priority),
             ('level_loading', 'other', level_q, w.level_loading),
             ('old_machine', 'other', old_q, w.old_machine),
+            ('restart', 'other', restart_q, w.restart),
             ('recovery', 'other', recovery_q, w.recovery),
         ]
 
@@ -371,8 +375,12 @@ class Costing:
         else:
             old_machine_cost = 0.0
 
+        # Restart: flat penalty for waking a standing machine (its first
+        # job); see "Restart cost" in DESIGN.md.
+        restart_cost = w.restart if machine.standing else 0.0
+
         recovery_q, _ = self.recovery_detail(state, move, ctx)
-        return (priority_cost + level_loading_cost + old_machine_cost
+        return (priority_cost + level_loading_cost + old_machine_cost + restart_cost
                 + w.recovery * recovery_q)
 
     def recovery_detail(

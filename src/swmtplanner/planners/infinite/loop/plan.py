@@ -23,6 +23,7 @@ from .candidates import enumerate_candidates, fill_for
 
 if TYPE_CHECKING:
     from swmtplanner.demand.order import RawOrder
+    from swmtplanner.products import BeamSet
     from swmtplanner.schedule import Activity, Job, ChangeoverCapacity, PassedOver
     from swmtplanner.debuglog import DebugLog
     from swmtplanner.planners.infinite.state import Move
@@ -63,6 +64,12 @@ class PlanReport:
     # see "Assigned sets and bar queues" in schedule/DESIGN.md). Machines
     # with none are left out.
     queue_passed_over: 'dict[str, tuple[PassedOver, ...]]' = field(default_factory=dict)
+    # Per machine and bar, the plant-assigned sets still queued when the plan
+    # ended — never hung by it (a skipped set waits here for a later hang);
+    # and per machine, the item it is on at the end. Both feed the `unassign`
+    # sheet. Machines with empty queues are left out of `queues_left`.
+    queues_left: 'dict[str, dict[str, tuple[BeamSet, ...]]]' = field(default_factory=dict)
+    item_at_end: 'dict[str, str]' = field(default_factory=dict)
     # The prior plan's jobs, each with its fate in this run (see "Sticking
     # to the prior plan" in DESIGN.md); empty without a prior plan.
     prior: 'tuple[PriorCommit, ...]' = ()
@@ -537,5 +544,11 @@ def build_report(state: State, costing: Costing) -> PlanReport:
             m_id: m.queue_passed_over for m_id, m in state.machines.items()
             if m.queue_passed_over
         },
+        queues_left={
+            m_id: {bar: m.current_status.queue(bar) for bar in ('top', 'btm')}
+            for m_id, m in state.machines.items()
+            if m.current_status.queue('top') or m.current_status.queue('btm')
+        },
+        item_at_end={m_id: m.current_status.current_item.id for m_id, m in state.machines.items()},
         prior=tuple(pc for jobs in state.prior.values() for pc in jobs),
     )

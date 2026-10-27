@@ -87,7 +87,10 @@ class Hanging(Activity):
     btm_beam: BeamSet | None = ...
     passed_over: tuple[tuple[Literal['top', 'btm'], BeamSet], ...] = ...
     """Per bar, the plant-assigned sets this hang dropped from the bar's
-    queue because they did not fit; applying the hang removes them."""
+    queue (blacklisted, too large); applying the hang removes them."""
+    skipped: tuple[tuple[Literal['top', 'btm'], BeamSet], ...] = ...
+    """Per bar, the queued sets this hang looked past because they did not
+    fit its requirement; they stay queued for a later hang."""
 
 
 @dataclass(frozen=True)

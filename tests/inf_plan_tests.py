@@ -196,7 +196,7 @@ def _weights(**overrides) -> CostWeights:
         style_change=0.0, runner_change=0.0, pattern_change=0.0,
         idle_time=0.0, waste_lbs=0.0,
         priority=0.0, level_loading=0.0, old_machine=0.0,
-        recovery=0.0,
+        restart=0.0, recovery=0.0,
     )
     defaults.update(overrides)
     return CostWeights(**defaults)
@@ -2878,10 +2878,11 @@ class PassedOverOutputTests(unittest.TestCase):
             return [a for e in data[mid]['schedule'] if e.get('kind') == 'job'
                     for a in e['activities'] if a['kind'] == 'Hanging']
         h1 = hangs('M1')[0]
-        self.assertEqual([(p['bar'], p['set_no'], p['merge'], p['desc']) for p in h1['passed_over']],
-                         [('top', 'QB', 'MX', '30D RED 1000X4')])
+        self.assertEqual([(p['bar'], p['set_no'], p['merge'], p['desc'], p['reason']) for p in h1['skipped']],
+                         [('top', 'QB', 'MX', '30D RED 1000X4', 'does not fit')])
+        self.assertNotIn('passed_over', h1)
         m2_hangs = hangs('M2')
-        self.assertTrue(all('passed_over' not in h for h in m2_hangs))
+        self.assertTrue(all('passed_over' not in h and 'skipped' not in h for h in m2_hangs))
 
     def test_knit_sets_in_json_and_desc(self):
         report = build_report(_make_state_with_plan(), Costing(_weights()))
@@ -3366,9 +3367,9 @@ class BlacklistOutputTests(unittest.TestCase):
         lines = passed_over_lines(report)
         self.assertEqual(len(lines), 2)
         self.assertIn('set QK', lines[1])
-        self.assertTrue(lines[1].endswith('blacklisted'))
+        self.assertTrue(lines[1].endswith('blacklisted — dropped'))
         plain = passed_over_lines(build_report(_passed_over_state(), Costing(_weights())))
-        self.assertTrue(plain[1].endswith('does not fit'))
+        self.assertTrue(plain[1].endswith('does not fit — kept in the queue'))
 
     def test_schedule_json(self):
         data = {m['id']: m for m in schedule_json(build_report(self._state(), Costing(_weights())))}
@@ -3382,8 +3383,9 @@ class BlacklistOutputTests(unittest.TestCase):
         plain = {m['id']: m for m in schedule_json(build_report(_passed_over_state(), Costing(_weights())))}
         acts = [a for e in plain['M1']['schedule'] if e.get('kind') == 'job' for a in e['activities']]
         hang = next(a for a in acts if a['kind'] == 'Hanging')
-        self.assertEqual([(p['set_no'], p['reason']) for p in hang['passed_over']], [('QB', 'does not fit')])
-        self.assertNotIn('blacklisted', hang['passed_over'][0])
+        self.assertEqual([(p['set_no'], p['reason']) for p in hang['skipped']], [('QB', 'does not fit')])
+        self.assertNotIn('blacklisted', hang['skipped'][0])
+        self.assertNotIn('passed_over', hang)
 
 
 # --- 1.7.6 Hung and queued sets in the outputs -----------------------------------
@@ -3415,3 +3417,115 @@ class HungSetOutputTests(unittest.TestCase):
         act = next(a for a in m.activities if isinstance(a, _Unhang))
         self.assertTrue(_desc(act).startswith('unhung, never threaded: top'))
         self.assertIn('500 lbs back', _desc(act))
+
+
+# --- 1.7.7 The `unassign` sheet --------------------------------------------
+
+from swmtplanner.planners.infinite.report import unassign_dataframe as _unassign_df
+
+_UNASSIGN_COLS = ['machine', 'bar', 'set_no', 'merge', 'vendor', 'yarn', 'lbs',
+                  'state', 'location', 'when', 'bar_needed', 'reason', 'ends_on']
+
+
+class UnassignSheetTests(unittest.TestCase):
+    """1.7.7"""
+
+    def test_empty(self):
+        df = _unassign_df(build_report(_make_state(), Costing(_weights())))
+        self.assertEqual(list(df.columns), _UNASSIGN_COLS)
+        self.assertEqual(len(df), 0)
+
+    def test_queued_set_passed_over(self):
+        state = _passed_over_state()
+        report = build_report(state, Costing(_weights()))
+        df = _unassign_df(report)
+        self.assertEqual(len(df), 1)
+        row = df.iloc[0]
+        p = report.queue_passed_over['M1'][0]
+        self.assertEqual((row['machine'], row['bar'], row['set_no'], row['merge'], row['vendor']),
+                         ('M1', 'top', 'QB', 'MX', 'V'))
+        self.assertEqual((row['yarn'], row['lbs'], row['state'], row['location']),
+                         ('30D RED 1000X4', 900.0, 'queued', 'inventory'))
+        self.assertEqual((row['when'], row['bar_needed'], row['reason'], row['ends_on']),
+                         (p.at, '40D BLACK 1000X4', 'does not fit', 'AU0001'))
+        self.assertEqual(report.queues_left, {'M1': {'top': (_QB,), 'btm': ()}})
+        self.assertEqual(report.item_at_end['M1'], 'AU0001')
+
+    def test_skipped_then_hung_is_not_listed_but_dropped_is(self):
+        red = Greige('AU000R', family='A', tgt_wt=100.0, top_beam='30D RED 1000X4', top_pct=0.5,
+                     btm_beam='60D WHITE 1000X4', btm_pct=0.5, safety=0.0, machines={'M1': 100.0})
+        m1 = Machine('M1', _ITEM_A, _START, _TOP_BEAM, _FLOOR, _BTM_BEAM, 1800.0, _24_7,
+                     init_top_queue=(_QB,))
+        m1.commit_plan(m1.plan_production(_ITEM_A, 100.0, 'schedule_tail'))     # skips QB
+        m1.commit_plan(m1.plan_production(red, 100.0, 'schedule_tail'))         # hangs QB
+        self.assertEqual(m1.current_status.beam('top').set_no, 'QB')
+        report = build_report(_make_state(machines={'M1': m1}), Costing(_weights()))
+        self.assertEqual(len(report.queue_passed_over['M1']), 1)
+        self.assertEqual(len(_unassign_df(report)), 0)
+        black = BeamSet('QK', 'MX', 900.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
+                        known_merge=True, assigned=True, blacklisted=True)
+        m2 = Machine('M1', _ITEM_A, _START, _TOP_BEAM, _FLOOR, _BTM_BEAM, 1800.0, _24_7,
+                     init_top_queue=(black,))
+        m2.commit_plan(m2.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        self.assertEqual(m2.current_status.queue('top'), ())
+        df = _unassign_df(build_report(_make_state(machines={'M1': m2}), Costing(_weights())))
+        self.assertEqual(list(zip(df['set_no'], df['state'], df['reason'])), [('QK', 'queued', 'blacklisted')])
+
+    def test_hung_set_unhung(self):
+        m = Machine('M1', _ITEM_A, _START, _HUNG_ALT, 500.0, _BTM_BEAM, 1800.0, _24_7,
+                    init_top_threaded=False, init_top_queue=(_QS,))
+        m.commit_plan(m.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        report = build_report(_make_state(machines={'M1': m}), Costing(_weights()))
+        df = _unassign_df(report)
+        self.assertEqual(len(df), 1)
+        row = df.iloc[0]
+        unhang = next(a for a in m.activities if isinstance(a, _Unhang))
+        self.assertEqual((row['machine'], row['bar'], row['set_no'], row['state']), ('M1', 'top', 'SH', 'hung'))
+        self.assertTrue(_pd.isna(row['location']))
+        self.assertEqual((row['when'], row['bar_needed'], row['reason']),
+                         (unhang.start, '40D BLACK 1000X4', 'does not fit'))
+        black = BeamSet('SB', 'MX', 500.0, BeamSetDesc('40D BLACK 1000X4'), _FIXTURE_DATE, vendor='V',
+                        known_merge=True, assigned=True, blacklisted=True)
+        m2 = Machine('M1', _ITEM_A, _START, black, 500.0, _BTM_BEAM, 1800.0, _24_7,
+                     init_top_threaded=False, init_top_queue=(_QS,))
+        m2.commit_plan(m2.plan_production(_ITEM_A, 100.0, 'schedule_tail'))
+        df2 = _unassign_df(build_report(_make_state(machines={'M1': m2}), Costing(_weights())))
+        self.assertEqual(list(df2['reason']), ['blacklisted'])
+
+    def test_sheet_written_even_when_empty(self):
+        with _tempfile.TemporaryDirectory() as d:
+            path = _Path(d) / 'plan.xlsx'
+            write_plan_report_xlsx(build_report(_make_state(), Costing(_weights())), path)
+            sheet = _pd.read_excel(path, sheet_name='unassign')
+            self.assertEqual(list(sheet.columns), _UNASSIGN_COLS)
+            self.assertEqual(len(sheet), 0)
+            write_plan_report_xlsx(build_report(_passed_over_state(), Costing(_weights())), path)
+            sheet = _pd.read_excel(path, sheet_name='unassign')
+            self.assertEqual(list(sheet['set_no']), ['QB'])
+
+
+# --- 1.2.8 item 11: restart cost --------------------------------------------
+
+class RestartCostTests(unittest.TestCase):
+    """1.2.8 item 11"""
+
+    def _move(self, m):
+        plan = m.plan_production(_ITEM_A, 100.0, 'schedule_tail')
+        return Move(machine_id=m.id, item=_ITEM_A, lbs=100.0, start_at='schedule_tail',
+                    idle_for=timedelta(0), plan=plan)
+
+    def test_restart_charged_once(self):
+        standing = Machine('M1', _ITEM_A, _START, _TOP_BEAM, 2800.0, _BTM_BEAM, 1800.0, _24_7,
+                           standing=True)
+        running = Machine('M2', _ITEM_A, _START, _TOP_BEAM, 2800.0, _BTM_BEAM, 1800.0, _24_7)
+        state = _make_state(machines={'M1': standing, 'M2': running})
+        costing = Costing(_weights(restart=700.0))
+        ctx = _ctx_for(state)
+        s1 = costing.score_after_move(state, self._move(standing), ctx)
+        s2 = costing.score_after_move(state, self._move(running), ctx)
+        self.assertAlmostEqual(s1 - s2, 700.0)
+        state.commit_move(self._move(standing))
+        self.assertFalse(standing.standing)
+        ctx = _ctx_for(state)
+        again = costing.score_after_move(state, self._move(standing), ctx)
+        self.assertAlmostEqual(again, costing.score_after_move(state, self._move(running), ctx))

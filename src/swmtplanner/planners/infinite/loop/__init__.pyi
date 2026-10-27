@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from swmtplanner.products import BeamSet
 from swmtplanner.schedule import Activity, Job, PassedOver
 from swmtplanner.schedule.capacity import ChangeoverCapacity
 from swmtplanner.demand.order import RawOrder
@@ -44,6 +45,11 @@ class PlanReport:
     rls_items: dict[str, RlsItem]
     capacity: ChangeoverCapacity | None = ...
     queue_passed_over: dict[str, tuple[PassedOver, ...]] = ...
+    queues_left: dict[str, dict[str, tuple[BeamSet, ...]]] = ...
+    """Per machine and bar, the plant-assigned sets still queued at the end
+    of the plan (never hung by it); machines with empty queues left out."""
+    item_at_end: dict[str, str] = ...
+    """Per machine, the item it is on when the plan ends."""
     """Per machine, the plant-assigned sets its committed plans passed over
     (`Machine.queue_passed_over`); machines with none are left out."""
     prior: tuple[PriorCommit, ...] = ...

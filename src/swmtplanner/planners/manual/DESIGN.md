@@ -53,7 +53,9 @@ ManualSchedule(state, stock='all' | 'named' | 'none')
                                                # a bar hung but not threaded) +
                                                # queue (each entry with its
                                                # location: staged / inventory),
-                                               # whether a plan is staged
+                                               # standing (a stood-down machine
+                                               # with no job yet), whether a plan
+                                               # is staged
   stock(desc: str, at: datetime | None = None, machine: str | None = None) -> list[BeamSet]
                                                # sets fitting a beam-set label,
                                                # available at `at` (default: start),

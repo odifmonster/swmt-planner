@@ -141,6 +141,8 @@ class ManualSchedule:
                 'rolls_before_runout': m.whole_rolls_before_runout,
                 'roll_lbs_remaining': round(s.roll_lbs_remaining, 1),
                 'jobs': len(m.jobs), 'staged': m_id in self._staged,
+                # a stood-down machine the plan has not yet given a job
+                'standing': m.standing,
                 # when a both-bar tape-out could next be done on this machine
                 # under the ration (None when tape-outs are unrationed)
                 'next_tape_out_slot': (

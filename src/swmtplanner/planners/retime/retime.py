@@ -186,6 +186,7 @@ class Position:
     finished: bool = False                # the plan had nothing left for it
     in_progress_order: str | None = None  # the order of the roll the run-up finishes
     opening_change: bool = False          # the plan's own first move is a changeover
+    standing: bool = False                # the plant has the machine stood down at the status
     remaining: list[PriorJob] = field(default_factory=list)
 
     @property
@@ -210,24 +211,30 @@ def locate(machine: str, jobs: list[PriorJob], tickets: list[Ticket],
         last_item = rolls[at][1]
         at += 1
 
-    def next_job_item() -> str | None:
-        """The item of the job after the one the next scheduled roll is in."""
-        if at >= len(rolls):
+    def later_job_on(item: str | None) -> int | None:
+        """The index of the first job after the one the next scheduled roll
+        is in whose item is `item` — the job an early change skipped to —
+        or None when the plan never has it again on this machine."""
+        if item is None or at >= len(rolls):
             return None
-        nxt = rolls[at][0] + 1
-        return jobs[nxt].item if nxt < len(jobs) else None
+        for k in range(rolls[at][0] + 1, len(jobs)):
+            if jobs[k].item == item:
+                return k
+        return None
 
-    def change_early(because: str) -> None:
-        """The floor moved on to the next job before finishing this one:
-        drop the rest of this job's rolls and go on from the next job."""
+    def change_early(to_job: int, because: str) -> None:
+        """The floor moved on to `to_job` before finishing the current one:
+        drop the rest of this job's rolls and every job before `to_job`,
+        recording each, and go on from `to_job`."""
         nonlocal at
-        cur = rolls[at][0]
-        n = 0
-        while at < len(rolls) and rolls[at][0] == cur:
-            at += 1
-            n += 1
-        pos.early.append(f'{n} roll(s) of {jobs[cur].item} ({jobs[cur].order or "no order"}) '
-                         f'dropped: {because}')
+        while at < len(rolls) and rolls[at][0] < to_job:
+            cur = rolls[at][0]
+            n = 0
+            while at < len(rolls) and rolls[at][0] == cur:
+                at += 1
+                n += 1
+            pos.early.append(f'{n} roll(s) of {jobs[cur].item} ({jobs[cur].order or "no order"}) '
+                             f'dropped: {because}')
 
     for t in tickets:
         if t.time < prior_start:
@@ -240,9 +247,9 @@ def locate(machine: str, jobs: list[PriorJob], tickets: list[Ticket],
             consume()
         elif t.item is not None and t.item == last_item:
             pos.extra.append(t.ticket)
-        elif t.item is not None and t.item == next_job_item():
-            change_early(f'changed early, first seen at ticket {t.ticket} '
-                         f'({t.time:%m-%d %H:%M})')
+        elif (to_job := later_job_on(t.item)) is not None:
+            change_early(to_job, f'changed early, first seen at ticket {t.ticket} '
+                                 f'({t.time:%m-%d %H:%M})')
             consume()
         else:
             pos.wrong_style = (f'ticket {t.ticket} ({t.style}) at {t.time:%m-%d %H:%M}: '
@@ -254,8 +261,9 @@ def locate(machine: str, jobs: list[PriorJob], tickets: list[Ticket],
         # progress or between rolls.
         next_item = rolls[at][1] if at < len(rolls) else None
         if (next_item is not None and status_item != next_item
-                and status_item != last_item and status_item == next_job_item()):
-            change_early('changed early per the status')
+                and status_item != last_item
+                and (to_job := later_job_on(status_item)) is not None):
+            change_early(to_job, 'changed early per the status')
             next_item = rolls[at][1] if at < len(rolls) else None
         if next_item is None:
             pos.finished = True
@@ -343,6 +351,9 @@ class RetimeResult:
     """Sets a round assigned that the next round's replay could not hang
     (not yet back in stock when the step was staged), kept out of the later
     rounds' pool; still free stock for the floor."""
+    overhaul: list[tuple[str, int]] = field(default_factory=list)
+    """Machines the machines file put on `overhaul`, with the rolls the prior
+    plan still had on each: left out of the run, not replayed."""
 
 
 # The cap on re-timing rounds: a round replays the steps with the sets the
@@ -422,8 +433,10 @@ def retime(config: 'str | Path', prior_plan: 'str | Path', tickets: 'str | Path'
             mid, jobs[mid], tix[mid], prior_start, inputs.start_date, s.current_item.id,
             run_up_rolls=run_up, roll_in_progress=in_progress)
         if jobs[mid]:
+            positions[mid].standing = m.standing
             echo(f'{mid}: {positions[mid].tickets} ticket(s), {positions[mid].consumed} roll(s) '
-                 f'accounted for, {sum(j.rolls for j in positions[mid].remaining)} left')
+                 f'accounted for, {sum(j.rolls for j in positions[mid].remaining)} left'
+                 + (' (standing)' if m.standing else ''))
 
     # Steps in the prior plan's order across machines.
     queue = sorted(((j.start, mid, j) for mid, p in positions.items() if p.replayable
@@ -496,8 +509,10 @@ def retime(config: 'str | Path', prior_plan: 'str | Path', tickets: 'str | Path'
                               h.set_lbs, h.short_by, h.prior, h.no_prior, h.note, rolls=n)
     hangs.sort(key=lambda h: (h.at, h.machine, h.bar))
     report = build_report(state, Costing(inputs.weights))
+    on_overhaul = [(mid, sum(j.rolls for j in js))
+                   for mid, js in prior_jobs(plan, inputs.overhaul).items()]
     return RetimeResult(report, inputs.start_date, positions, steps, hangs, failures,
-                        ignored, not_in_plan, rounds, sorted(withheld))
+                        ignored, not_in_plan, rounds, sorted(withheld), on_overhaul)
 
 
 _REFUSED = re.compile(r"assigned set '(?P<name>[^']+)' \((?P<bar>top|btm)\)")
@@ -609,6 +624,10 @@ def retime_text(result: RetimeResult) -> str:
     if result.not_in_plan:
         lines.append(f'machines not in the prior plan (left at status): '
                      f'{", ".join(sorted(result.not_in_plan))}')
+    if result.overhaul:
+        lines.append('machines on overhaul (left out of the run, not replayed): '
+                     + ', '.join(f'{mid} ({n} roll(s) left in the prior plan)'
+                                 for mid, n in sorted(result.overhaul)))
     lines += ['', 'POSITIONS', '']
     for mid, p in sorted(result.positions.items()):
         if mid in result.not_in_plan:
@@ -618,6 +637,7 @@ def retime_text(result: RetimeResult) -> str:
                  else f'{left} roll(s) in {len(p.remaining)} job(s) left')
         lines.append(f'{mid:4} on {p.status_item:12} tickets {p.tickets:3}  accounted {p.consumed:3}'
                      f'  run-up {p.run_up_rolls:2}  {state}'
+                     + ('  (standing at the status)' if p.standing else '')
                      + (f'  ({p.after_status} ticket(s) after the status ignored)' if p.after_status else ''))
     dev = []
     for mid, p in sorted(result.positions.items()):
@@ -662,11 +682,13 @@ def retime_text(result: RetimeResult) -> str:
                      f'rolls {h.rolls:2}{note}')
     by_machine = result.report.queue_passed_over if result.report is not None else {}
     passed = [(mid, p) for mid, ps in sorted(by_machine.items()) for p in ps]
-    lines += ['', 'ASSIGNED SETS PASSED OVER (did not fit the bar at the hang, or blacklisted)', '']
+    lines += ['', 'ASSIGNED SETS PASSED OVER (skipped at a hang they did not fit and left '
+              'queued, or dropped: blacklisted / too large)', '']
     for mid, p in passed:
         lines.append(f'{mid:4} {p.bar:3} {p.at:%m-%d %H:%M}  set {p.beam_set.set_no} '
                      f'({p.beam_set.desc.id}, merge {p.beam_set.merge or "?"})  '
-                     f'bar needed {p.wanted.physical.id}  {p.reason}')
+                     f'bar needed {p.wanted.physical.id}  {p.reason}'
+                     f'{" — dropped" if p.dropped else " — kept in the queue"}')
     if not passed:
         lines.append('none')
     lines += ['', 'STEPS REPLAYED', '']
