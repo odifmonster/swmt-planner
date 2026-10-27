@@ -8,6 +8,7 @@ from .manual_cmd import manual
 from .machines_cmd import machines
 from .styles_cmd import styles
 from .retime_cmd import retime_cmd
+from .infinite.swmtio.loadinputs import make_input_file
 
 app = typer.Typer(no_args_is_help=True)
 app.command('infinite', no_args_is_help=True, help='Run infinite scheduler.')(run)
@@ -32,6 +33,11 @@ app.command(
     help='Generate greige-styles.json from the master list, variants.tsv and '
          'the knit-machine master.',
 )(styles)
+app.command(
+    'inputs', no_args_is_help=True,
+    help="Produce one of the planner's input files from the plant's database "
+         "and the day's status TSVs.",
+)(make_input_file)
 
 if __name__ == '__main__':
     app()

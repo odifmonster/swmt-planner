@@ -1,0 +1,29 @@
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable
+
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class Column:
+    name: str
+    src_name: str | None = ...
+    dtype: str | None = ...
+    converter: Callable[[Any], Any] | None = ...
+    read_na_as: Any = ...
+
+    @property
+    def source(self) -> str: ...
+    def apply(self, values: Iterable[Any]) -> pd.Series: ...
+
+
+@dataclass(frozen=True)
+class Table:
+    name: str
+    columns: tuple[Column, ...]
+
+    @property
+    def names(self) -> tuple[str, ...]: ...
+    @property
+    def sources(self) -> tuple[str, ...]: ...
+    def from_tuples(self, data: Iterable[tuple]) -> pd.DataFrame: ...
