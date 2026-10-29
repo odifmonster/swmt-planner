@@ -33,12 +33,13 @@ distinct products.
 The planner receives and fulfills demand on **master** items: a `Yarn` that
 stands for every interchangeable merge, and a `Greige` that stands for every
 variant of a style. A database variant (a merge, a greige variant) must
-therefore be translated to its master item when it is read in. `products`
-defines the rules for that translation; the readers in `swmtplanner.io`
-apply them. For yarn, the translation is a deterministic function of the
-merge's properties (see `Yarn.from_db_vals`); for greige, it is driven by a
-list of master style names and their representative variants (see the
-master style map).
+therefore be translated to its master item when it is read in. That
+translation is the job of the readers in `swmtplanner.io`; `products`
+defines only the master structures and their ids. For yarn, the translation
+is a deterministic function of the merge's properties; for greige, it is
+driven by a list of master style names and their representative variants
+(see the master style map). The rules are recorded in "Notes for `io`" at
+the end of this document until the `io` design exists.
 
 ### Capabilities
 
@@ -70,9 +71,14 @@ is composed of three submodules, described in this document:
 
 | Submodule | Core objects                                                  |
 |-----------|---------------------------------------------------------------|
-| `beamset` | `YarnAttrs`, `Yarn`, `Merge`, `BeamSetDesc`                   |
+| `beamset` | `YarnAttrs`, `MATERIAL_CODES`, `COLOR_CODES`, `LUSTER_CODES`, `Yarn`, `Merge`, `BeamSetDesc` |
 | `greige`  | `BarConfig`, `BeamConfig`, `Greige`                           |
 | `fabric`  | `Shade`, `DyeFormula`, `Fabric`                               |
+
+`beamset` is a package of three files: `yarnattrs.py` (`YarnAttrs`),
+`yarn.py` (`MATERIAL_CODES`, `COLOR_CODES`, `LUSTER_CODES`, `Yarn`, and
+`Merge`), and `beamsetdesc.py` (`BeamSetDesc`). `greige` is likewise a
+package of three files: `barconfig.py`, `beamconfig.py`, and `greige.py`.
 
 ### `beamset`
 
@@ -85,22 +91,22 @@ class YarnAttrs:
 
     @classmethod
     def from_int(cls, code: int) -> YarnAttrs: ...
-    @classmethod
-    def from_desc(cls, desc: str) -> YarnAttrs: ...
     def __int__(self) -> int: ...
+
+MATERIAL_CODES: dict[str, str]   # valid Yarn.material values -> one-letter id code
+COLOR_CODES: dict[str, str]      # valid Yarn.color values -> two-letter id code
+LUSTER_CODES: dict[str, str]     # valid Yarn.luster values -> one-letter id code
 
 @dataclass(frozen=True)
 class Yarn(HasID[str]):
     denier: int
-    material: str      # "polyester" | "nylon" | "lycra" | "spandex" | "acetate" | "eptfe"
-    color: str         # "white" | "black" | "grey"
+    material: str      # a key of MATERIAL_CODES
+    color: str         # a key of COLOR_CODES
+    luster: str        # a key of LUSTER_CODES
     attrs: YarnAttrs
 
     @property
-    def id(self) -> str: ...   # "<denier><material code><W/G/B><2-digit attribute code>"
-
-    @classmethod
-    def from_db_vals(cls, denier: int, luster: str, desc: str) -> Yarn: ...
+    def id(self) -> str: ...   # "<denier><material code><color code><luster code><2-digit attribute code>"
 
 @dataclass(frozen=True)
 class Merge(HasID[str]):
@@ -110,10 +116,12 @@ class Merge(HasID[str]):
 
 @dataclass(frozen=True)
 class BeamSetDesc(HasID[str]):
-    id: str            # "<yarn id>-<end count>-<beam count>"
     yarn: Yarn
     beam_count: int
     end_count: int
+
+    @property
+    def id(self) -> str: ...   # "<yarn id>-<end count>-<beam count>"
 
     def split(self, n: int) -> list[BeamSetDesc]: ...
     @classmethod
@@ -145,7 +153,8 @@ class Greige(HasID[str]):
     rack_wt: float     # pounds per 100 racks
     std_wt: float      # standard roll weight, pounds
     beam_cfgs: tuple[BeamConfig, ...]
-    _rates: dict[str, float]   # machine id -> lb/hr at 100% efficiency; private, not part of the public API
+    rates: InitVar[dict[str, float]]   # init-only: machine id -> lb/hr at 100% efficiency
+    _rates: dict[str, float]           # copy of rates; private, not part of the public API
 
     @property
     def pattern(self) -> list[tuple[str, ...]]: ...
@@ -215,17 +224,42 @@ order itself is arbitrary; it only needs to be consistent. Examples:
 | Method                                  | Description                                   |
 |-----------------------------------------|-----------------------------------------------|
 | `__int__(self) -> int`                  | The attribute code for this set of attributes |
-| `from_int(cls, code: int) -> YarnAttrs` | Inverse of `__int__`                          |
-| `from_desc(cls, desc: str) -> YarnAttrs` | Parses the attributes from a database yarn description (the `desc` column) |
+| `from_int(cls, code: int) -> YarnAttrs` | Inverse of `__int__`. Raises `ValueError` if `code` is negative or too large for the number of attributes |
 
-`from_desc` recognizes the following markers in the description
-(case-insensitive, whole tokens):
+### `MATERIAL_CODES`, `COLOR_CODES`, and `LUSTER_CODES`
 
-| Attribute  | Markers                                 | Example descriptions                  |
-|------------|-----------------------------------------|---------------------------------------|
-| `textured` | `TEXT`, `TEX`, `TX`                     | `TEXT POLY`, `STR TEX POLY`, `RECYCLE TX P` |
-| `cationic` | `CAT`                                   | `CAT POLY`, `CAT TX POLY`             |
-| `recycled` | `REPREVE`, `REPR`, `RECYCLE`, `RECYCLED` | `REPREVE POLY`, `RECYCLED P`, `FR REPR TX P` |
+Three module constants that define the valid values of `Yarn.material`,
+`Yarn.color`, and `Yarn.luster` and the code each contributes to `Yarn.id`
+(one letter for material and luster, two for color). They are public so that the readers in `io` can validate the
+values they produce against them, and adding a new valid value is a
+one-line change to the relevant map.
+
+| `MATERIAL_CODES` key | Code |
+|----------------------|------|
+| `"polyester"`        | `P`  |
+| `"nylon"`            | `N`  |
+| `"lycra"`            | `L`  |
+| `"spandex"`          | `S`  |
+| `"acetate"`          | `A`  |
+| `"eptfe"`            | `E`  |
+
+| `COLOR_CODES` key  | Code | Description                                  |
+|--------------------|------|----------------------------------------------|
+| `"white"`          | `WT` |                                              |
+| `"grey"`           | `GY` |                                              |
+| `"black"`          | `BK` |                                              |
+| `"greenerblack"`   | `GB` | "Greener black": a recycled solution-dyed black (luster `RGB` in the database) |
+
+| `LUSTER_CODES` key | Code |
+|--------------------|------|
+| `"dull"`           | `D`  |
+| `"semidull"`       | `S`  |
+| `"bright"`         | `B`  |
+| `"clear"`          | `C`  |
+
+Dull and semi-dull are the lusters of the styles planned today; bright and
+clear are included because styles using them are expected soon. Further
+lusters may be added as the list of styles grows.
 
 ### `Yarn`
 
@@ -235,9 +269,10 @@ vendor merge that shares its properties; two merges that resolve to the same
 
 | Field      | Type        | Description                                                  |
 |------------|-------------|--------------------------------------------------------------|
-| `denier`   | `int`       | Nominal denier as prescribed by the vendor (not a measurement); see normalization below |
-| `material` | `str`       | One of `"polyester"`, `"nylon"`, `"lycra"`, `"spandex"`, `"acetate"`, `"eptfe"` |
-| `color`    | `str`       | `"white"`, `"black"`, or `"grey"`                            |
+| `denier`   | `int`       | Nominal denier as prescribed by the vendor (not a measurement) |
+| `material` | `str`       | A key of `MATERIAL_CODES`                                    |
+| `color`    | `str`       | A key of `COLOR_CODES`                                       |
+| `luster`   | `str`       | A key of `LUSTER_CODES`. Dull and semi-dull yarn are not interchangeable |
 | `attrs`    | `YarnAttrs` | Additional distinguishing attributes                         |
 
 The initializer accepts a value for each field directly.
@@ -245,70 +280,20 @@ The initializer accepts a value for each field directly.
 **Id.** `id` is derived from the fields as
 
 ```
-<denier><material code><W/G/B><2-digit attribute code>
+<denier><material code><color code><luster code><2-digit attribute code>
 ```
 
-where the material code is a single letter from the table below, `W`/`G`/`B`
-is the color (white/grey/black), and the attribute code is `int(attrs)`
-zero-padded to two digits (two digits leaves room for more attributes
-later). For example, a 75 denier textured white polyester is `75PW04`.
+where the material, color, and luster codes are the codes from
+`MATERIAL_CODES`, `COLOR_CODES` (two letters), and `LUSTER_CODES`, and the
+attribute code is `int(attrs)` zero-padded to two digits (two digits leaves
+room for more attributes later). For example, a 75 denier semi-dull
+textured white polyester is `75PWTS04`, and its dull counterpart is
+`75PWTD04`.
 
-| Material      | Code |
-|---------------|------|
-| `"polyester"` | `P`  |
-| `"nylon"`     | `N`  |
-| `"lycra"`     | `L`  |
-| `"spandex"`   | `S`  |
-| `"acetate"`   | `A`  |
-| `"eptfe"`     | `E`  |
-
-**`from_db_vals(cls, denier: int, luster: str, desc: str) -> Yarn`** builds
-a `Yarn` from the values stored on a database yarn item:
-
-- **Denier.** Deniers of 70 and 75 are both treated as 75; all other deniers
-  are kept as-is.
-- **Color** is determined only by the `luster` column. The description
-  column sometimes contains what looks like a color and must be ignored. For
-  white yarn the luster is some version of dull, dim, semidull, or semidim
-  (also abbreviated `D`, `SD`, `SD/D`, etc.). For non-white yarn the luster
-  also contains a color abbreviation such as `BK` (black) or `GY` (grey).
-  Anything without a color abbreviation maps to `"white"`; anything with one
-  maps to the corresponding color. For now the only non-white colors are
-  black and grey. Recognized abbreviations (case-insensitive substrings):
-
-  | Color     | Abbreviations              | Example lusters                        |
-  |-----------|----------------------------|----------------------------------------|
-  | `"black"` | `BK`, `BLK`                | `SDBK`, `BLK`, `DBK`, `BKSD`, `OBBK`   |
-  | `"grey"`  | `GY`, `GRY`, `GRAY`        | `SDGY`, `GRY`, `GRAY`, `DGY`, `BRGY`   |
-
-- **Material** is determined by the `desc` column, by the first matching
-  marker below. Markers are matched case-insensitively against the
-  whitespace-separated tokens of the description, so that `POLY` does not
-  match `POLYPRO` and a trailing `P` token is recognized as an abbreviation
-  of polyester.
-
-  | Material      | Markers (tokens)             | Example descriptions                       |
-  |---------------|------------------------------|--------------------------------------------|
-  | `"nylon"`     | starts with `NYL`            | `NYLON`, `TYPE 6 NYL`, `NYL TRI 6.6`, `NYLON/POLY` |
-  | `"lycra"`     | `LYCRA`                      | `LYCRA`, `LYCRA T162B`                     |
-  | `"spandex"`   | `SPANDEX`                    | `SPANDEX`                                  |
-  | `"acetate"`   | `ACETATE`                    | `ACETATE`                                  |
-  | `"eptfe"`     | `EPTFE`                      | `EPTFE`, `TWIST EPTFE`                     |
-  | `"polyester"` | `POLY`, `POLYESTER`, `P`     | `POLY`, `POLYESTER`, `TEXT POLY`, `RECYCLE TX P`, `LOW MELT P` |
-
-  A description that matches none of these (e.g. `POLYPRO`, `PTFE`,
-  `FIBERGLASS`, `ELASTANE`, `DO NOT USE`) has no recognized material.
-  `from_db_vals` raises `ValueError` in that case; it is the caller's
-  responsibility (the readers in `swmtplanner.io`) to catch it, skip the
-  item, and emit a warning naming the item and its description so the data
-  can be checked. `from_db_vals` never guesses a material.
-
-  Demand is currently only handled on polyester styles, but the material is
-  tracked because one material cannot be used in place of another (e.g.
-  nylon yarn cannot substitute for polyester). The non-polyester,
-  non-nylon materials are accommodated for completeness and are not
-  currently relevant.
-- **Attributes** are parsed from `desc` with `YarnAttrs.from_desc`.
+Demand is currently only handled on polyester styles, but the material is
+tracked because one material cannot be used in place of another (e.g. nylon
+yarn cannot substitute for polyester). The non-polyester, non-nylon
+materials are accommodated for completeness and are not currently relevant.
 
 ### `Merge`
 
@@ -440,6 +425,27 @@ combined and fed into a single row. The bars in such a group share the same
 yarn and the same number of ends, and the group's combined ends equal the
 combined ends of every other bar group on the style.
 
+Whether a bar can be part of a group is determined by its **threading**
+(the database's `thread` column):
+
+- A partial threading such as `1 IN, 1 OUT` (or its complement
+  `1 OUT, 1 IN`) means only every other needle is fed from that guide bar.
+  Such bars can be grouped: two complementary partial bars with the same
+  yarn and ends together fill one row, and can be fed either by one beam
+  set split across them or by one beam set each.
+- A `SOLID` threading means the bar feeds every needle in its row by
+  itself. A solid bar cannot be fed by a split beam set and is never part
+  of a group; it always forms a `BeamConfig` on its own.
+
+Master styles use only `SOLID`, `1 IN, 1 OUT`, and `1 OUT, 1 IN`. The
+wider database has many other threading values on styles outside the
+master list: other `N IN, M OUT` patterns, multi-segment repeats, doubled
+threadings, two-yarn patterns, positional instructions, and free text. The
+reader recognizes only `SOLID` and the simple `N IN, M OUT` /
+`N OUT, M IN` forms; anything else is unrecognized and the style is
+skipped with a warning (see "Notes for `io`"). `BarConfig` does not store
+the threading; it is used only to decide the grouping.
+
 Each `BeamConfig` in a `Greige` represents one of these bar groups, so it
 may cover one or more guide bars on the machine. Its `beamset` is the
 group's combined beam set description (the per-bar descriptions merged, so
@@ -457,10 +463,11 @@ group's `BarConfig`s. Consequently:
   are equal.
 
 For example, a 28 gauge, 168 inch style with 4 beams has about 4,704
-needles per row. If bars 1 and 2 each carry 586 ends of the same yarn and
-bar 3 carries 1,172 ends, then bars 1 and 2 form one group (1,172 combined
-ends) and bar 3 forms another, and both groups match the 1,172 ends per
-beam × 4 beams ≈ 4,688 threaded needles per row.
+needles per row. If bars 1 and 2 each carry 586 ends of the same yarn,
+threaded `1 IN, 1 OUT` and `1 OUT, 1 IN`, and bar 3 carries 1,172 ends
+threaded `SOLID`, then bars 1 and 2 form one group (1,172 combined ends)
+and bar 3 forms another, and both groups match the 1,172 ends per beam × 4
+beams ≈ 4,688 threaded needles per row.
 
 ### `Greige`
 
@@ -475,11 +482,12 @@ style name, drawn from the master style map.
 | `std_wt`    | `float`                    | Standard weight of one roll of this style, in pounds |
 | `beam_cfgs` | `tuple[BeamConfig, ...]`   | One `BeamConfig` per bar group (see above)   |
 
-`Greige` is also initialized with a map of machine ids (`str`) to rates
-(`float`). A rate is in pounds per hour at 100% running efficiency; actual
-output is lower because machines stop for defects and errors, and the
-planners must not assume full efficiency. This map is stored in a private
-field and is not part of the public API; it is reached only through
+`Greige` is also initialized with `rates`, a map of machine ids (`str`)
+to rates (`float`). A rate is in pounds per hour at 100% running
+efficiency; actual output is lower because machines stop for defects and
+errors, and the planners must not assume full efficiency. `rates` is an
+init-only argument: a copy of the map is stored in a private field that is
+not part of the public API, and it is reached only through
 `can_run_on_machine` and `get_rate_on_machine`.
 
 | Property   | Type                                   | Description |
@@ -567,3 +575,111 @@ required differs within each pair. `LIGHT0` cannot run immediately after a
 strip, and `BLACK` stains the jet more than solution-dyed black, so it
 requires more strips after it. The exact sequencing and strip rules will be
 detailed later, in the design for dye scheduling.
+
+## Notes for `io`
+
+Rules for translating database values into `products` objects. They were
+worked out while designing `products` and are parked here until the `io`
+design exists, at which point they move there and this section is removed.
+
+### Yarn from a database yarn item (`denier`, `luster`, `desc` columns)
+
+- **Denier.** Deniers of 70 and 75 are both treated as 75; all other deniers
+  are kept as-is.
+- **Color** is determined only by the `luster` column. The description
+  column sometimes contains what looks like a color and must be ignored. For
+  white yarn the luster is some version of dull, dim, semidull, or semidim
+  (also abbreviated `D`, `SD`, etc.). For non-white yarn the luster also
+  contains a color abbreviation. Anything without a color abbreviation is
+  `"white"`. Recognized abbreviations (case-insensitive substrings, checked
+  in the order listed, so e.g. `GYBK` is black):
+
+  | Color            | Abbreviations              | Example lusters                        |
+  |------------------|----------------------------|----------------------------------------|
+  | `"greenerblack"` | `RGB` (the whole luster)   | `RGB`                                  |
+  | `"black"`        | `BK`, `BLK`                | `SDBK`, `BLK`, `DBK`, `BKSD`, `OBBK`   |
+  | `"grey"`         | `GY`, `GRY`, `GRAY`        | `SDGY`, `GRY`, `GRAY`, `DGY`, `BRGY`   |
+
+- **Luster** is also determined by the `luster` column, from whatever
+  remains once the color abbreviation is accounted for. Semi-dull is checked
+  before dull, since every semi-dull marker contains a dull marker.
+  (Case-insensitive; the exact markers below are a first proposal and should
+  be checked against the data when the reader is designed.)
+
+  | Luster       | Markers                                | Example lusters                 |
+  |--------------|----------------------------------------|---------------------------------|
+  | `"semidull"` | `SD`, `SDIM`, `SEMIDULL`, `SEMI DULL`, `RGB` | `SD`, `SDIM`, `SDBK`, `SDGY`, `RGB` |
+  | `"dull"`     | `DULL`, `D`, `DIM`, `OD`, `OBD`        | `DULL`, `DBK`, `DGY`, `OD`, `OBD` |
+  | `"bright"`   | `BRT`, `BR`, `B`                       | `BRT`, `BRGY`, `BR`, `B`        |
+  | `"clear"`    | `CLR`, `CL`                            | `CLR`, `CL`, `CLBK`, `CLBT`     |
+
+  `RGB` ("Recycled Greener-Black") is a special case: it is a semi-dull,
+  greener-black yarn, but the database luster column says only `RGB`, so
+  the reader must map it to color `"greenerblack"` and luster `"semidull"`
+  explicitly.
+
+  A luster that matches none of these (e.g. `SB`, `MD`, `OBRO`) or that
+  is a mixed form (e.g. `SD/D`, `D/B`, `B/SD`) has no recognized luster. As
+  with materials, the reader must not guess: it skips the item and emits a
+  warning naming the item and its luster.
+
+  Mixed lusters always appear on bars whose merge is also two codes joined
+  by `/` (e.g. the `4031` and `SR5572` families). Styles with this sort of
+  configuration have not been run in a long time, and as of the 2026-10-29
+  extract none of the 33 such variants is, or shares a base name with, a
+  master style, so they are deliberately ignored.
+
+- **Material** is determined by the `desc` column, by the first matching
+  marker below. Markers are matched case-insensitively against the
+  whitespace-separated tokens of the description, so that `POLY` does not
+  match `POLYPRO` and a trailing `P` token is recognized as polyester.
+
+  | Material      | Markers (tokens)             | Example descriptions                       |
+  |---------------|------------------------------|--------------------------------------------|
+  | `"nylon"`     | starts with `NYL`            | `NYLON`, `TYPE 6 NYL`, `NYL TRI 6.6`, `NYLON/POLY` |
+  | `"lycra"`     | `LYCRA`                      | `LYCRA`, `LYCRA T162B`                     |
+  | `"spandex"`   | `SPANDEX`                    | `SPANDEX`                                  |
+  | `"acetate"`   | `ACETATE`                    | `ACETATE`                                  |
+  | `"eptfe"`     | `EPTFE`                      | `EPTFE`, `TWIST EPTFE`                     |
+  | `"polyester"` | `POLY`, `POLYESTER`, `P`     | `POLY`, `POLYESTER`, `TEXT POLY`, `RECYCLE TX P`, `LOW MELT P` |
+
+  A description matching none of these (e.g. `POLYPRO`, `PTFE`,
+  `FIBERGLASS`, `ELASTANE`, `DO NOT USE`, `POLY/NYL`) has no recognized
+  material. The reader must not guess: it skips the item and emits a
+  warning naming the item and its description so the data can be checked.
+
+- **Attributes** are parsed from the `desc` column's whitespace-separated
+  tokens (case-insensitive):
+
+  | Attribute  | Markers                                 | Example descriptions                  |
+  |------------|-----------------------------------------|---------------------------------------|
+  | `textured` | `TEXT`, `TEX`, `TX`                     | `TEXT POLY`, `STR TEX POLY`, `RECYCLE TX P` |
+  | `cationic` | `CAT`                                   | `CAT POLY`, `CAT TX POLY`             |
+  | `recycled` | `REPREVE`, `REPR`, `RECYCLE`, `RECYCLED` | `REPREVE POLY`, `RECYCLED P`, `FR REPR TX P` |
+
+  `BIO-MEG` and `SORBTEK` descriptions are left unmarked for now.
+
+### Greige from database variants
+
+See "Mapping variants to master styles" and "How bars are grouped into
+`BeamConfig`s" in the `greige` section above. Both are applied by the
+reader when loading styles.
+
+**Threading.** Grouping uses the `thread` column. The reader recognizes
+exactly two forms, after upper-casing and trimming the value:
+
+| Form                                    | Meaning                                              |
+|-----------------------------------------|------------------------------------------------------|
+| `SOLID`                                 | The bar feeds every needle in its row; it is its own group |
+| `N IN, M OUT` or `N OUT, M IN`          | Partial threading; the bar is grouped with the other partial bars that share its yarn and end count |
+
+The partial form is matched as two integer-plus-keyword segments in either
+order, with the comma optional and whitespace flexible, so `1 IN, 1 OUT`,
+`1 in,1 out`, and `1 OUT 1 IN` all match. Nothing else is accommodated:
+multi-segment patterns (`1 OUT, 1 IN, 1 OUT`), doubled threadings
+(`1 IN (DOUBLED), 1 OUT`), two-yarn patterns (`4 BRIGHT, 4 DULL`),
+positional instructions (`495 THREAD TO THE CENTER OF BEAM`), free text
+(`SEE BELOW`), and typos (`yOLID`) are all unrecognized. Typos are to be
+fixed in the source system rather than tolerated here. A style with an
+unrecognized threading on any bar with ends is skipped, and the reader
+emits a warning naming the style, the bar, and the threading value.
