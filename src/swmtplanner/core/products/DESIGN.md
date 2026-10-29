@@ -78,7 +78,8 @@ is composed of three submodules, described in this document:
 `beamset` is a package of three files: `yarnattrs.py` (`YarnAttrs`),
 `yarn.py` (`MATERIAL_CODES`, `COLOR_CODES`, `LUSTER_CODES`, `Yarn`, and
 `Merge`), and `beamsetdesc.py` (`BeamSetDesc`). `greige` is likewise a
-package of three files: `barconfig.py`, `beamconfig.py`, and `greige.py`.
+package of three files: `barconfig.py`, `beamconfig.py`, and `greige.py`;
+and `fabric` of `shade.py`, `dyeformula.py`, and `fabric.py`.
 
 ### `beamset`
 
@@ -275,7 +276,9 @@ vendor merge that shares its properties; two merges that resolve to the same
 | `luster`   | `str`       | A key of `LUSTER_CODES`. Dull and semi-dull yarn are not interchangeable |
 | `attrs`    | `YarnAttrs` | Additional distinguishing attributes                         |
 
-The initializer accepts a value for each field directly.
+The initializer accepts a value for each field directly. It raises
+`ValueError` if `material`, `color`, or `luster` is not a key of its code
+map, so an invalid yarn can never be constructed.
 
 **Id.** `id` is derived from the fields as
 

@@ -31,6 +31,9 @@ class Yarn(HasID[str]):
     interchangeable.
 
     Equality and hashing are by ``id``.
+
+    :raises ValueError: on construction if ``material``, ``color``, or
+        ``luster`` is not a key of its code map.
     """
 
     denier: int

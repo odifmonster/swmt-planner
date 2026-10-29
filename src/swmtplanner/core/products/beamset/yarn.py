@@ -37,6 +37,13 @@ class Yarn(HasID[str]):
     luster: str
     attrs: YarnAttrs
 
+    def __post_init__(self) -> None:
+        for name, codes in (('material', MATERIAL_CODES), ('color', COLOR_CODES),
+                            ('luster', LUSTER_CODES)):
+            value = getattr(self, name)
+            if value not in codes:
+                raise ValueError(f'invalid yarn {name} {value!r}; expected one of {sorted(codes)}')
+
     @property
     def id(self) -> str:
         return (f'{self.denier}{MATERIAL_CODES[self.material]}'
