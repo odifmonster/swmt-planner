@@ -11,6 +11,7 @@ src/swmtplanner.egg-info/top_level.txt
 src/swmtplanner/data/active_sets.txt
 src/swmtplanner/data/assigned_sets.txt
 src/swmtplanner/data/audit_trail.txt
+src/swmtplanner/data/current_racks.txt
 src/swmtplanner/data/doffed_since_date.txt
 src/swmtplanner/data/greige_assigns.txt
 src/swmtplanner/data/greige_received_since_date.txt
