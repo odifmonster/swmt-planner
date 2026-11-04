@@ -48,11 +48,15 @@ def _load_audit_file(fpath: str):
         header = infile.readline().strip()
         audit_cols.extend(header.split('\t'))
 
-    return pd.read_csv(
+    raw = pd.read_csv(
         fpath,
         sep='\t',
         dtype={ c: 'string' for c in audit_cols if c not in _NON_STR_COLS }
-    ).set_index('Trans ID')
+    )
+
+    first_val = lambda x: list(x)[0]
+
+    return raw.groupby('Trans ID').agg(first_val)
 
 
 def _decode_dt(val):
@@ -295,7 +299,7 @@ def _get_status_table(trail: pd.DataFrame) -> pd.DataFrame:
         ]
 
         max_qty = max(grp['qty'])
-        init_qty = max(grp['init_qty'])
+        init_qty = max(grp['init_qty'].astype('float64'))
         if round(max_qty) <= 0 and (max(grp['kind']) != 'FIN' or init_qty <= 0): continue
         created = min(grp[~grp['created'].isna()]['created'], default=np.nan)
         if pd.isna(created): continue

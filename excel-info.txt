@@ -12,14 +12,15 @@ FOLDER = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling"
 REPORTS = "/Users/lamanwyner/Desktop/Shawmut Projects/Scheduling/Reports"
 ONE_DRIVE = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply"
 ONE_DRIVE_ORDERS = "/Users/lamanwyner/OneDrive - Shawmut Corporation/[EXT] Supply Chain - PA Supply/PA Weekly Order Planning"
-WORKBOOK = "PA plant orders against Lam demand 20261019 lam plant date.xlsx"
-OUTPUT = "output_20261019.xlsx"
+WORKBOOK = "2026-11-03-PA_plant_orders_against_Lam_demand_12wk.xlsx"
+OUTPUT = "output_20261103_12wk.xlsx"
 MASTER = "PA Master Xref.xlsx"
 
 # any values that should be interpreted as a list must be preceded by a *
 *jets = "JET 1", "JET 2", "JET 3", "JET 4", "JET 7", "JET 8", "JET 9", "JET 10"
 *req_wks = "FAB req'd WK0", "FAB req'd WK1", "FAB req'd WK2", "FAB req'd WK3", ...
-    "FAB req'd WK4", "FAB req'd WK5", "FAB req'd WK6", "FAB req'd WK7", "FAB req'd WK8"
+    "FAB req'd WK4", "FAB req'd WK5", "FAB req'd WK6", "FAB req'd WK7", "FAB req'd WK8", ...
+    "FAB req'd WK9", "FAB req'd WK10", "FAB req'd WK11", "FAB req'd WK12"
 
 dye_formulae:
     # This is always required, must be an absolute path to a file
@@ -114,7 +115,8 @@ lam_release:
     col_names="Stock Item", "Lam Item", "Plant", "Ply1 Item", "PA Item", "Active?", "Add'l pull (weeks)", ...
         "Lam On-Hand", "Lam Cust Contain GP12", "PH Raw", "Ply1 On-Hand", "LAM add'l WL factor", ...
         "Conversion to Yards", "SCH PD", "SCH+0", "SCH+1", "SCH+2", "Past Due", "Total Inv", ...
-        "RLS+0", "RLS+1", "RLS+2", "RLS+3", "RLS+4", "RLS+5", "RLS+6", "RLS+7", "RLS+8", "Schedule Day"
+        "RLS+0", "RLS+1", "RLS+2", "RLS+3", "RLS+4", "RLS+5", "RLS+6", "RLS+7", "RLS+8", ...
+        "RLS+9", "RLS+10", "RLS+11", "RLS+12", "Schedule Day"
 
 pa_reqs:
     folder=$ONE_DRIVE_ORDERS

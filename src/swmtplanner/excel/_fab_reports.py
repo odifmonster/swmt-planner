@@ -181,7 +181,7 @@ def _load_pa_fab_only():
     fo_data = {
         'ply1_item': [], 'bill_to': [], 'plant': [], 'pa_item': [], 'past_due': []
     }
-    for i in range(9):
+    for i in range(13):
         fo_data[f'wk{i}'] = []
     fo_data['sched_day'] = []
 
@@ -213,7 +213,7 @@ def _load_pa_fab_only():
         added_sched_day = False
 
         fo_data['past_due'].append(0)
-        for i in range(9):
+        for i in range(13):
             fo_data[f'wk{i}'].append(0)
 
         for i in grp.index:
@@ -255,7 +255,7 @@ def _pa_dmnd_report(writer):
     for i in range(3):
         rls_data[f'sch{i}'] = []
     rls_data['rls_past_due'] = []
-    for i in range(9):
+    for i in range(13):
         rls_data[f'rls{i}'] = []
     rls_data['sched_day'] = []
 
@@ -278,7 +278,7 @@ def _pa_dmnd_report(writer):
 
         rls_total = max(grp['Past Due']) - max(grp['Total Inv'])
         rls_data['rls_past_due'].append(max(0, rls_total) * conv_fact * wl_fact)
-        for i in range(9):
+        for i in range(13):
             cur_rls = max(grp[f'RLS+{i}'])
             rls_total += cur_rls
             rls_data[f'rls{i}'].append(max(0, min(cur_rls, rls_total)) * conv_fact * wl_fact)
@@ -290,7 +290,7 @@ def _pa_dmnd_report(writer):
     lam_data = {
         'plant': [], 'ply1_item': [], 'pa_item': [], 'ph_raw': [], 'ply1_on_hand': [], 'past_due': []
     }
-    for i in range(9):
+    for i in range(13):
         lam_data[f'wk{i}'] = []
     lam_data['sched_day'] = []
 
@@ -318,7 +318,7 @@ def _pa_dmnd_report(writer):
             rls_total += sum(grp[f'rls{i}'])
 
         rls_total -= sch_total
-        for i in range(3, 9+pull):
+        for i in range(3, 13+pull):
             if f'rls{i}' not in stock_df.columns:
                 cur_rls = 0
             else:
@@ -336,7 +336,7 @@ def _pa_dmnd_report(writer):
     ply1_data1 = {
         'ply1_item': [], 'bill_to': [], 'plant': [], 'pa_item': [], 'past_due': []
     }
-    for i in range(9):
+    for i in range(13):
         ply1_data1[f'wk{i}'] = []
     ply1_data1['sched_day'] = []
 
@@ -349,7 +349,7 @@ def _pa_dmnd_report(writer):
 
         total_dmd = sum(grp['past_due']) - max(grp['ply1_on_hand']) - max(grp['ph_raw'])
         ply1_data1['past_due'].append(max(0, total_dmd))
-        for i in range(9):
+        for i in range(13):
             cur_dmd = sum(grp[f'wk{i}'])
             total_dmd += cur_dmd
             ply1_data1[f'wk{i}'].append(max(0, min(total_dmd, cur_dmd)))
@@ -377,12 +377,16 @@ def _pa_dmnd_report(writer):
         wk5 = pd.NamedAgg('wk5', 'sum'),
         wk6 = pd.NamedAgg('wk6', 'sum'),
         wk7 = pd.NamedAgg('wk7', 'sum'),
-        wk8 = pd.NamedAgg('wk8', 'sum')
+        wk8 = pd.NamedAgg('wk8', 'sum'),
+        wk9 = pd.NamedAgg('wk9', 'sum'),
+        wk10 = pd.NamedAgg('wk10', 'sum'),
+        wk11 = pd.NamedAgg('wk11', 'sum'),
+        wk12 = pd.NamedAgg('wk12', 'sum')
     )
 
     mapper = {}
     caps = ['ply1_item', 'bill_to', 'plant']
-    fab_req = [f'wk{i}' for i in range(9)]
+    fab_req = [f'wk{i}' for i in range(13)]
 
     for col in caps:
         words = col.split('_')

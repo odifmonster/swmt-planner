@@ -25,6 +25,7 @@ DOFFED_NAME = 'doffed'
 SETS_ASSN_NAME = 'assigned_sets'
 SETS_ACT_NAME = 'active_sets'
 THREAD_TKT_NAME = 'thread_tkt'
+RACKS_NAME = 'racks'
 ALL_SCAN_NAME = 'scanned'
 
 SQL_MAP = {
@@ -41,6 +42,7 @@ SQL_MAP = {
     SETS_ASSN_NAME: 'assigned_sets.txt',
     SETS_ACT_NAME: 'active_sets.txt',
     THREAD_TKT_NAME: 'threaded_since_date.txt',
+    RACKS_NAME: 'current_racks.txt',
     ALL_SCAN_NAME: 'scanned_since_date.txt'
 }
 
@@ -59,6 +61,7 @@ class _SQLName(str, Enum):
     active_sets = 'active_sets'
     thread_tkt = 'thread_tkt'
     scanned = 'scanned'
+    racks = 'racks'
     all_pa = 'all_pa'
 
 
@@ -87,7 +90,7 @@ def load_sql_config() -> dict[str, str]:
         raise e2
 
 def build_cnxn_str(cnfmap: dict[str, str], driver: str = 'ODBC Driver 17 for SQL Server') -> str:
-    required = frozenset(['HOST', 'DATABASE', 'USER', 'PASSWORD'])
+    required = frozenset(['HOST', 'DATABASE', 'UID', 'PWD'])
     missing = required.difference(cnfmap.keys())
 
     if len(missing) > 0:
@@ -102,8 +105,8 @@ def build_cnxn_str(cnfmap: dict[str, str], driver: str = 'ODBC Driver 17 for SQL
         server += (',' + cnfmap['PORT'])
 
     pairs.append(('SERVER', server))
-    pairs.append(('UID', cnfmap['USER']))
-    pairs.append(('PWD', cnfmap['PASSWORD']))
+    pairs.append(('UID', cnfmap['UID']))
+    pairs.append(('PWD', cnfmap['PWD']))
     pairs.append(('DATABASE', cnfmap['DATABASE']))
 
     for k, v in cnfmap.items():
@@ -199,7 +202,7 @@ def run_query(dt: datetime, fstem: _SQLName, sql: str, cursor: pyodbc.Cursor):
         cursor.execute(sql.format(dt.strftime('%Y, %m, %d, %H, %M, %S')))
     elif fstem == 'assigned_sets':
         cursor.execute(sql.format(start.year))
-    elif fstem in ('variants', 'last_tkt', 'runout', 'threaded', 'active_sets'):
+    elif fstem in ('variants', 'last_tkt', 'runout', 'threaded', 'active_sets', 'racks'):
         cursor.execute(sql)
     else:
         cursor.execute(sql.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d')))

@@ -1,0 +1,15 @@
+WITH ranked AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY MachineLoc
+            ORDER BY SnapShotAt DESC
+        ) AS rn
+    FROM Humbhi_Racks4AllMachine
+    WHERE SnapShotAt IS NOT NULL
+)
+SELECT
+    MachineLoc AS "MC",
+    Racks
+FROM ranked
+WHERE rn=1
