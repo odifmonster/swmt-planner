@@ -202,9 +202,16 @@ sheet to finish loading; the translation of loaded frames into
 
 SQL query text lives in `.sql` files under `catalog/sql/` and is read at
 import time by a private helper, `catalog._sql.read_sql(name) -> str`,
-through `importlib.resources`. (This needs a `package-data` entry for
-`swmtplanner.io.catalog` in `pyproject.toml` so the `.sql` files ship with
-the package.)
+through `importlib.resources`. A `package-data` entry for
+`swmtplanner.io.catalog` in `pyproject.toml` ships the `.sql` files with
+the package.
+
+The value converters shared by the modules (`_strip`, `_is_x`,
+`_is_active`) live in a second private module, `catalog/_converters.py`.
+The package's `__init__` exposes the five source modules by name
+(`catalog.xref`, `catalog.variants`, and so on) rather than re-exporting
+their constants, so every constant is always referred to together with
+the source it belongs to.
 
 Config keys used by the catalog so far:
 

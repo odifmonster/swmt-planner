@@ -1,3 +1,3 @@
-from . import loaders
+from . import loaders, catalog
 
-__all__ = ['loaders']
+__all__ = ['loaders', 'catalog']

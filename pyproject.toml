@@ -26,5 +26,8 @@ classifiers = [
 ]
 
 [tool]
+[tool.setuptools.package-data]
+"swmtplanner.io.catalog" = ["sql/*.sql"]
+
 [tool.pyside6-project]
 files = []
