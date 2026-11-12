@@ -70,26 +70,31 @@ Warping is out of scope (it will get its own planner in phase 2).
 
 Steps, in order:
 
-1. **Products** – define all products except laminated material. Includes
-   both the class structures and the I/O functionality needed to read them
-   in.
-2. **Demand** – define demand structures: how demand gets filled, what is
+1. **Products** (complete) – define all products except laminated
+   material: the class structures in `core.products`, with `support.HasID`
+   underneath them. Reading products in belongs to step 2.
+2. **I/O module** – `io`: formats inputs and outputs. Reads product
+   definitions from the data sources and translates database variants to
+   master items (the rules are parked in the `products` design under
+   "Notes for `io`" and move here). Data will eventually come entirely
+   from a SQL database; today some of it lives in manually edited Excel
+   files, and both sources must be supported.
+3. **App skeleton and report entry points** – a skeleton outline of `app`,
+   plus working CLI entry points for running reports.
+4. **Demand** – define demand structures: how demand gets filled, what is
    tracked, and the I/O functions to read it in.
-3. **Inventory and raw materials** – structures for stock at each stage.
-4. **Machines and activities** – definitions for the equipment at each
+5. **Inventory and raw materials** – structures for stock at each stage.
+6. **Machines and activities** – definitions for the equipment at each
    plant, and what a machine is doing and when.
-5. Remaining steps TBD.
+7. Remaining steps TBD.
 
 Remaining known pieces of work, not yet placed in the sequence above:
 
 - **Planning algorithms** – the logic that produces suggested schedules.
-- **Entry points** – the CLI surface into the app.
+- **Complete CLI app** – the full `app` surface for running the planners,
+  beyond the report entry points of step 3.
 - **Debug mode** – a detailed log of every planner decision at each step, so
   disagreeable decisions can be analyzed after the fact.
-- **I/O module** – formats inputs and outputs. Data will eventually come
-  entirely from a SQL database; today some of it lives in manually edited
-  Excel files, and both sources must be supported. I/O for each data type
-  is built alongside that type in the steps above.
 
 ### Phase 2: Warping scheduler
 

@@ -1,3 +1,4 @@
 # libraries needed in the dev environment
 
 pandas[excel]>=2.3.2
+pyodbc>=5.3.0

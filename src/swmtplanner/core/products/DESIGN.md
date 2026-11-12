@@ -38,8 +38,8 @@ translation is the job of the readers in `swmtplanner.io`; `products`
 defines only the master structures and their ids. For yarn, the translation
 is a deterministic function of the merge's properties; for greige, it is
 driven by a list of master style names and their representative variants
-(see the master style map). The rules are recorded in "Notes for `io`" at
-the end of this document until the `io` design exists.
+(see the master style map). The rules themselves are specified in the
+`products` section of `io/DESIGN.md`.
 
 ### Capabilities
 
@@ -446,8 +446,9 @@ master list: other `N IN, M OUT` patterns, multi-segment repeats, doubled
 threadings, two-yarn patterns, positional instructions, and free text. The
 reader recognizes only `SOLID` and the simple `N IN, M OUT` /
 `N OUT, M IN` forms; anything else is unrecognized and the style is
-skipped with a warning (see "Notes for `io`"). `BarConfig` does not store
-the threading; it is used only to decide the grouping.
+skipped with a warning (see "Greige styles" under `products` in
+`io/DESIGN.md`). `BarConfig` does not store the threading; it is used only
+to decide the grouping.
 
 Each `BeamConfig` in a `Greige` represents one of these bar groups, so it
 may cover one or more guide bars on the machine. Its `beamset` is the
@@ -578,111 +579,3 @@ required differs within each pair. `LIGHT0` cannot run immediately after a
 strip, and `BLACK` stains the jet more than solution-dyed black, so it
 requires more strips after it. The exact sequencing and strip rules will be
 detailed later, in the design for dye scheduling.
-
-## Notes for `io`
-
-Rules for translating database values into `products` objects. They were
-worked out while designing `products` and are parked here until the `io`
-design exists, at which point they move there and this section is removed.
-
-### Yarn from a database yarn item (`denier`, `luster`, `desc` columns)
-
-- **Denier.** Deniers of 70 and 75 are both treated as 75; all other deniers
-  are kept as-is.
-- **Color** is determined only by the `luster` column. The description
-  column sometimes contains what looks like a color and must be ignored. For
-  white yarn the luster is some version of dull, dim, semidull, or semidim
-  (also abbreviated `D`, `SD`, etc.). For non-white yarn the luster also
-  contains a color abbreviation. Anything without a color abbreviation is
-  `"white"`. Recognized abbreviations (case-insensitive substrings, checked
-  in the order listed, so e.g. `GYBK` is black):
-
-  | Color            | Abbreviations              | Example lusters                        |
-  |------------------|----------------------------|----------------------------------------|
-  | `"greenerblack"` | `RGB` (the whole luster)   | `RGB`                                  |
-  | `"black"`        | `BK`, `BLK`                | `SDBK`, `BLK`, `DBK`, `BKSD`, `OBBK`   |
-  | `"grey"`         | `GY`, `GRY`, `GRAY`        | `SDGY`, `GRY`, `GRAY`, `DGY`, `BRGY`   |
-
-- **Luster** is also determined by the `luster` column, from whatever
-  remains once the color abbreviation is accounted for. Semi-dull is checked
-  before dull, since every semi-dull marker contains a dull marker.
-  (Case-insensitive; the exact markers below are a first proposal and should
-  be checked against the data when the reader is designed.)
-
-  | Luster       | Markers                                | Example lusters                 |
-  |--------------|----------------------------------------|---------------------------------|
-  | `"semidull"` | `SD`, `SDIM`, `SEMIDULL`, `SEMI DULL`, `RGB` | `SD`, `SDIM`, `SDBK`, `SDGY`, `RGB` |
-  | `"dull"`     | `DULL`, `D`, `DIM`, `OD`, `OBD`        | `DULL`, `DBK`, `DGY`, `OD`, `OBD` |
-  | `"bright"`   | `BRT`, `BR`, `B`                       | `BRT`, `BRGY`, `BR`, `B`        |
-  | `"clear"`    | `CLR`, `CL`                            | `CLR`, `CL`, `CLBK`, `CLBT`     |
-
-  `RGB` ("Recycled Greener-Black") is a special case: it is a semi-dull,
-  greener-black yarn, but the database luster column says only `RGB`, so
-  the reader must map it to color `"greenerblack"` and luster `"semidull"`
-  explicitly.
-
-  A luster that matches none of these (e.g. `SB`, `MD`, `OBRO`) or that
-  is a mixed form (e.g. `SD/D`, `D/B`, `B/SD`) has no recognized luster. As
-  with materials, the reader must not guess: it skips the item and emits a
-  warning naming the item and its luster.
-
-  Mixed lusters always appear on bars whose merge is also two codes joined
-  by `/` (e.g. the `4031` and `SR5572` families). Styles with this sort of
-  configuration have not been run in a long time, and as of the 2026-10-29
-  extract none of the 33 such variants is, or shares a base name with, a
-  master style, so they are deliberately ignored.
-
-- **Material** is determined by the `desc` column, by the first matching
-  marker below. Markers are matched case-insensitively against the
-  whitespace-separated tokens of the description, so that `POLY` does not
-  match `POLYPRO` and a trailing `P` token is recognized as polyester.
-
-  | Material      | Markers (tokens)             | Example descriptions                       |
-  |---------------|------------------------------|--------------------------------------------|
-  | `"nylon"`     | starts with `NYL`            | `NYLON`, `TYPE 6 NYL`, `NYL TRI 6.6`, `NYLON/POLY` |
-  | `"lycra"`     | `LYCRA`                      | `LYCRA`, `LYCRA T162B`                     |
-  | `"spandex"`   | `SPANDEX`                    | `SPANDEX`                                  |
-  | `"acetate"`   | `ACETATE`                    | `ACETATE`                                  |
-  | `"eptfe"`     | `EPTFE`                      | `EPTFE`, `TWIST EPTFE`                     |
-  | `"polyester"` | `POLY`, `POLYESTER`, `P`     | `POLY`, `POLYESTER`, `TEXT POLY`, `RECYCLE TX P`, `LOW MELT P` |
-
-  A description matching none of these (e.g. `POLYPRO`, `PTFE`,
-  `FIBERGLASS`, `ELASTANE`, `DO NOT USE`, `POLY/NYL`) has no recognized
-  material. The reader must not guess: it skips the item and emits a
-  warning naming the item and its description so the data can be checked.
-
-- **Attributes** are parsed from the `desc` column's whitespace-separated
-  tokens (case-insensitive):
-
-  | Attribute  | Markers                                 | Example descriptions                  |
-  |------------|-----------------------------------------|---------------------------------------|
-  | `textured` | `TEXT`, `TEX`, `TX`                     | `TEXT POLY`, `STR TEX POLY`, `RECYCLE TX P` |
-  | `cationic` | `CAT`                                   | `CAT POLY`, `CAT TX POLY`             |
-  | `recycled` | `REPREVE`, `REPR`, `RECYCLE`, `RECYCLED` | `REPREVE POLY`, `RECYCLED P`, `FR REPR TX P` |
-
-  `BIO-MEG` and `SORBTEK` descriptions are left unmarked for now.
-
-### Greige from database variants
-
-See "Mapping variants to master styles" and "How bars are grouped into
-`BeamConfig`s" in the `greige` section above. Both are applied by the
-reader when loading styles.
-
-**Threading.** Grouping uses the `thread` column. The reader recognizes
-exactly two forms, after upper-casing and trimming the value:
-
-| Form                                    | Meaning                                              |
-|-----------------------------------------|------------------------------------------------------|
-| `SOLID`                                 | The bar feeds every needle in its row; it is its own group |
-| `N IN, M OUT` or `N OUT, M IN`          | Partial threading; the bar is grouped with the other partial bars that share its yarn and end count |
-
-The partial form is matched as two integer-plus-keyword segments in either
-order, with the comma optional and whitespace flexible, so `1 IN, 1 OUT`,
-`1 in,1 out`, and `1 OUT 1 IN` all match. Nothing else is accommodated:
-multi-segment patterns (`1 OUT, 1 IN, 1 OUT`), doubled threadings
-(`1 IN (DOUBLED), 1 OUT`), two-yarn patterns (`4 BRIGHT, 4 DULL`),
-positional instructions (`495 THREAD TO THE CENTER OF BEAM`), free text
-(`SEE BELOW`), and typos (`yOLID`) are all unrecognized. Typos are to be
-fixed in the source system rather than tolerated here. A style with an
-unrecognized threading on any bar with ends is skipped, and the reader
-emits a warning naming the style, the bar, and the threading value.
